@@ -127,14 +127,15 @@ end
     end
 end
 
-@testset "Allocation-free kite time step" begin
+@testset "Kite time step: allocations" begin
     m = NonlinearKiteShallowWater(create_hexagon_mesh(1), 1)
     y = initial_state(m, x -> 0.2 * SVector(-x[2], x[1], 0.0), x -> 1 - 0.22 * x[3]^2)
     dy = similar(y)
     cache = SSPRK3Cache(y)
     step!(y, cache, m) = @allocated ssprk3_step!(y, 1e-3, tendency!, cache, m)
     step!(y, cache, m)
-    @test step!(y, cache, m) == 0
+    # only the constant overhead of the kernel launches (96 bytes each), independent of the mesh
+    @test step!(y, cache, m) < 2048
     # chordal elements: same scheme, flat cells
     mc = NonlinearKiteShallowWater(create_hexagon_mesh(1), 1; geometry=:chordal)
     @test sum(assemble_mass(mc.H; lumped=true)) < 4π
@@ -161,4 +162,26 @@ end
         end
         @test residual[2] < 0.55 * residual[1]
     end
+end
+
+@testset "Distributed kite model (MPI)" begin
+    # equal-area partition: balanced, and identical zones to Leopardi/Atlas
+    @test equal_area_zones(32) == [1, 6, 9, 9, 6, 1]
+    part = equal_area_partition(create_hexagon_mesh(3), 7)
+    @test extrema([count(==(p), part) for p in 1:7]) == (91, 92)
+
+    script = joinpath(@__DIR__, "mpi_kite.jl")
+    project = dirname(@__DIR__)
+    results = map((1, 3)) do n
+        file = tempname()
+        run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file`)
+        lines = readlines(file)
+        (parse.(Float64, split(lines[1])), parse.(Float64, lines[2:end]))
+    end
+    (stats1, y1), (stats3, y3) = results
+    @test length(y1) == length(y3)
+    @test maximum(abs, y1 - y3) < 1e-12 * maximum(abs, y1)
+    @test abs(stats3[1]) < 1e-13       # mass, summed over ranks
+    @test abs(stats3[2]) < 1e-10       # energy, summed over ranks (conserving variant)
+    @test abs(stats1[2]) < 1e-10
 end

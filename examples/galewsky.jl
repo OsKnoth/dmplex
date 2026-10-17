@@ -2,10 +2,12 @@
 # nonlinear kite shallow-water model (RT1 × Q2 × CG2 by default).
 #
 #   julia --project examples/galewsky.jl [mesh] [resolution] [days] [perturbed]
+#   mpiexec -n 6 julia --project examples/galewsky.jl hexagon 5 6
 #
 # mesh: hexagon | triangle | cubed, or an ICON/MPAS grid file (resolution is
 # then ignored). Nondimensional units: a = Ω = 1, heights in units of 10 km.
 using LinearAlgebra
+using MPI
 using Printf
 using StaticArrays
 using dmplex
@@ -64,11 +66,15 @@ function main(args)
     days = length(args) >= 3 ? parse(Float64, args[3]) : 1.0
     perturbed = length(args) >= 4 ? parse(Bool, args[4]) : true
 
+    MPI.Initialized() || MPI.Init()
+    comm = MPI.COMM_WORLD
+    nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
     primal = load_primal(mesh, resolution)
-    model = NonlinearKiteShallowWater(primal, 1; gravity=G, coriolis=x -> 2x[3])
+    model = NonlinearKiteShallowWater(primal, 1; gravity=G, coriolis=x -> 2x[3], comm=nranks > 1 ? comm : nothing)
     kite_size = sqrt(4π / num_cells(model.kites))
-    @printf("%d primal cells, %d kites (≈ %.0f km), %d + %d dofs\n", num_cells(primal), num_cells(model.kites),
-            kite_size * EARTH_RADIUS / 1000, num_dofs(model.U), num_dofs(model.H))
+    root && @printf("%d primal cells, %d kites (≈ %.0f km), %d + %d dofs, %d ranks\n", num_cells(primal),
+                    num_cells(model.kites), kite_size * EARTH_RADIUS / 1000, num_dofs(model.U), num_dofs(model.H),
+                    nranks)
 
     hb = balanced_height()
     height(x) = hb(latitude(x)) + (perturbed ? perturbation(x) : 0.0)
@@ -79,27 +85,31 @@ function main(args)
     dt = 0.15 * kite_size / wave_speed
     nsteps = ceil(Int, days * DAY / dt)
     dt = days * DAY / nsteps
-    @printf("dt = %.1f s, %d steps\n", dt / OMEGA, nsteps)
+    root && @printf("dt = %.1f s, %d steps\n", dt / OMEGA, nsteps)
 
     cache = SSPRK3Cache(y)
     mass0, energy0 = total_mass(model, y), total_energy(model, y)
     elapsed = @elapsed for step in 1:nsteps
         ssprk3_step!(y, dt, tendency!, cache, model)
         if step % max(1, nsteps ÷ 10) == 0 || step == nsteps
-            dh = (y - y0)[height_dofs(model)]
-            @printf("day %5.2f  |h - h0| = %.3e  mass %.1e  energy %.1e\n", step * dt / DAY,
-                    sqrt(dot(dh, model.Mh * dh)), total_mass(model, y) - mass0,
-                    (total_energy(model, y) - energy0) / energy0)
+            mass, energy = total_mass(model, y), total_energy(model, y)
+            state = gather_state(model, y)
+            dh = (state - y0)[height_dofs(model)]
+            root && @printf("day %5.2f  |h - h0| = %.3e  mass %.1e  energy %.1e\n", step * dt / DAY,
+                            sqrt(dot(dh, model.Mh * dh)), mass - mass0, (energy - energy0) / energy0)
         end
     end
-    @printf("%.1f s wall time, %.1f ms per step\n", elapsed, 1000elapsed / nsteps)
+    root && @printf("%.1f s wall time, %.1f ms per step\n", elapsed, 1000elapsed / nsteps)
 
-    # relative vorticity at kite centers (1/s) for ParaView
-    ζ, _, _ = diagnostics(model, y[velocity_dofs(model)], y[height_dofs(model)])
-    center = SVector(0.0, 0.0)
-    vorticity = [evaluate(model.Z, ζ, c, center)[2] * OMEGA for c in cell_range(model.kites)]
-    filename = write_vtkhdf("galewsky_$(basename(mesh))_$(resolution).vtkhdf", model.kites; vorticity)
-    println("wrote $filename")
+    # relative vorticity at kite centers (1/s) for ParaView, from the gathered state
+    y = gather_state(model, y)
+    ζ = mass_solver(model.Z; lumped=true) \ (-(model.R * y[velocity_dofs(model)]))
+    if root
+        center = SVector(0.0, 0.0)
+        vorticity = [evaluate(model.Z, ζ, c, center)[2] * OMEGA for c in cell_range(model.kites)]
+        filename = write_vtkhdf("galewsky_$(basename(mesh))_$(resolution).vtkhdf", model.kites; vorticity)
+        println("wrote $filename")
+    end
     return model, y
 end
 

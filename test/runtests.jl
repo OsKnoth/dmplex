@@ -1,4 +1,5 @@
 using LinearAlgebra
+using MPI
 using Random
 using SparseArrays
 using StaticArrays

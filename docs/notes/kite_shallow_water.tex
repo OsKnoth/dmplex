@@ -434,24 +434,52 @@ RT$_k\times$DG$_k\times$CG$_{k+1}$ (\code{NonlinearShallowWater} on the kite
 \code{Plex}) can be run on it directly; its mass matrices are not block
 diagonal. See the results section.
 
-\subsection{Parallelization: coloured scatter}
-The kernels loop over kites, gather degrees of freedom, evaluate at quadrature
-points and scatter-add into global vectors. With threads (or on a GPU) two kites
-that share a degree of freedom must not add to it at the same time. Three
-standard remedies:
-\begin{itemize}
-\item \emph{colouring}: colour the kites so that kites of one colour share no
-  degrees of freedom (a greedy colouring of the kite adjacency graph needs a
-  handful of colours); colours are processed one after the other, the kites of
-  one colour in parallel, without atomics and deterministically;
-\item \emph{atomic adds} (as in CGDycore's KernelAbstractions kernels with
-  \code{@atomic}): simplest on GPUs, but the summation order and therefore the
-  round-off depend on the scheduling;
-\item \emph{owner-computes / gather}: loop over degrees of freedom and gather
-  contributions from the adjacent kites (needs the dof-to-kite incidence).
-\end{itemize}
-For MPI the natural partition is by primal cells; dual cells crossing a
-partition boundary need a halo for the block-diagonal velocity mass. The labels
-of the kite grid provide this information.
+\subsection{Parallelization}
+\paragraph{Kernels.} The nonlinear terms are KernelAbstractions kernels over a
+list of kites: gather the degrees of freedom, evaluate at the quadrature points
+with the stored metric terms, and scatter with atomic adds (Atomix). On the CPU
+backend the kernels run on the Julia threads, on a GPU unchanged; the scatter
+order and therefore the round-off depend on the scheduling. The block-diagonal
+mass solves need no atomics since the blocks are disjoint. (The alternative to
+atomics is colouring: kites of one colour share no degrees of freedom, colours
+are processed one after the other.)
+
+\paragraph{Distribution (MPI).} The primal cells are partitioned with the zonal
+equal-area regions of Leopardi (Atlas \code{EqualRegionsPartitioner}, CGDycore
+\code{DecomposeEqualArea}); kites follow their primal cell. Each rank holds one
+vertex ring of ghost primal cells. Ownership: height dofs follow their primal
+cell, velocity dofs their dual-cell block (the smallest part around the dual
+vertex), vorticity dofs the smallest part among the kites touching them. With
+the ghost ring every owned dof has all its kites locally, so a rank computes
+the right-hand sides over its owned and ghost kites, and they are complete for
+its owned dofs; all mass blocks of owned dofs are local. A tendency evaluation
+needs four halo exchanges (state, $\zeta$, $K$, $\bF$). The linear operators
+are applied to the owned rows only. The run on one and on three ranks agree to
+$10^{-12}$, and mass and energy are conserved across ranks.
+
+In the first version every rank keeps the global mesh and global-length vectors
+and works on its local part only; a local numbering is the next step for large
+meshes.
+
+\paragraph{First scaling test.} Galewsky setup, 2562 hexagons (15360 kites),
+Mac with 8 performance and 8 efficiency cores, warmed-up SSP-RK3 steps; per
+tendency the maximum over ranks:
+\begin{center}
+\begin{tabular}{rrrrrr}
+\toprule
+ranks & ms/step & kernels & halo (4$\times$) & sparse products & block solves \\
+\midrule
+1 & 241 & 34.7 & 0.9 & 5.5 & 19.8 \\
+2 & 145 & 21.0 & 1.6 & 4.4 & 10.5 \\
+4 &  90 & 14.6 & 1.7 & 3.1 &  6.2 \\
+8 &  75 & 13.0 & 3.6 & 2.8 &  4.9 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Up to four ranks the speed-up is reasonable (2.7); from four to eight ranks the
+kernels hardly get faster, although each rank has half the kites. The
+per-kite cost grows by a factor of 2.4, which points to the global-length
+vectors (poor locality of the gathers) and to ranks on efficiency cores. A
+local numbering of kites and degrees of freedom is the next step.
 
 \end{document}
