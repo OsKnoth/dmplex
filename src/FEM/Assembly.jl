@@ -7,7 +7,7 @@ contravariant Piola map (H(div)) or the covariant Piola map (H(curl)).
 `degree` is the reference quadrature degree; the sphere map is not polynomial,
 so the default adds some slack. Rows and columns cover the whole section.
 """
-function assemble_mass(V::FESpace; degree::Integer=2 * V.family.order + 4)
+function assemble_mass(V::FESpace; degree::Integer=default_degree(V))
     dm = V.dm
     space = function_space(V)
     nc = V.ncomp
@@ -171,5 +171,5 @@ function assemble_load(V::FESpace, f; degree::Integer=default_degree(V))
     return b
 end
 
-"L2 projection of `f` onto `V`."
-project(V::FESpace, f; kwargs...) = assemble_mass(V; kwargs...) \ assemble_load(V, f; kwargs...)
+"L2 projection of `f` onto `V`, using the cached mass solver."
+project(V::FESpace, f; degree::Integer=default_degree(V)) = mass_solver(V; degree) \ assemble_load(V, f; degree)

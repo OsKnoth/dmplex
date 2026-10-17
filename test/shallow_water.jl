@@ -16,6 +16,21 @@
     @test project(FESpace(dm, Lagrange(2)), x -> 1.0) ≈ ones(num_dofs(FESpace(dm, Lagrange(2))))
 end
 
+@testset "Cached mass solvers" begin
+    dm = create_cubed_sphere_mesh(2)
+    for family in (Lagrange(2), Discontinuous(1), RaviartThomas(1))
+        V = FESpace(dm, family)
+        S = mass_solver(V)
+        @test mass_solver(V) === S  # assembled and factorized once
+        b = randn(num_dofs(V))
+        @test S.matrix * (S \ b) ≈ b
+    end
+    @test mass_solver(FESpace(dm, Discontinuous(1))).factor isa dmplex.FEM.CellBlockInverse
+    # models built on the same spaces share the factorizations
+    U, H = FESpace(dm, RaviartThomas(0)), FESpace(dm, Discontinuous(0))
+    @test LinearShallowWater(U, H).Mu_solver === NonlinearShallowWater(U, H, FESpace(dm, Lagrange(1))).Mu_solver
+end
+
 @testset "RK4" begin
     for dt in (0.1, 0.05)
         y = [1.0, 0.0]
@@ -54,11 +69,10 @@ end
     m = NonlinearShallowWater(dm, k)
     y = initial_state(m, velocity, height)
 
-    # diagnostic PV of solid-body rotation: q = (ζ + f) / h = 2 (u0 + 1) z / h
-    q, _, _ = diagnostics(m, y[velocity_dofs(m)], y[height_dofs(m)])
-    q_exact = project(m.Q, x -> 2 * (u0 + 1) * x[3] / height(x))
-    dq = q - q_exact
-    @test sqrt(dot(dq, assemble_mass(m.Q) * dq)) < (k == 0 ? 0.2 : 0.05)  # converges at second order
+    # diagnostic absolute vorticity of solid-body rotation: ω = ζ + f = 2 (u0 + 1) z
+    ω, _, _ = diagnostics(m, y[velocity_dofs(m)], y[height_dofs(m)])
+    dω = ω - project(m.Q, x -> 2 * (u0 + 1) * x[3])
+    @test sqrt(dot(dω, assemble_mass(m.Q) * dω)) < (k == 0 ? 0.2 : 0.05)  # converges at second order
 
     # the semi-discretization conserves energy exactly: dE/dt = Fᵀ M_u u̇ + (K + g h)ᵀ M_h ḣ = 0
     Random.seed!(3)

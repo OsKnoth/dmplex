@@ -6,6 +6,10 @@ Finite-element space of `family` on `dm`. The global numbering comes from a
 `Section`, either built for this space alone or shared with other fields of
 a mixed system. The reference element is chosen per cell from its number of
 edges, so triangle, quadrilateral and mixed meshes are handled alike.
+
+Operators that depend only on the space (mesh, element, reference-to-sphere
+map), such as the factorized mass matrix, are created on first use and cached
+in `operators`; see [`mass_solver`](@ref).
 """
 struct FESpace{F<:ElementFamily}
     dm::Plex
@@ -14,6 +18,7 @@ struct FESpace{F<:ElementFamily}
     family::F
     ncomp::Int
     elements::Dict{Int, ReferenceElement}  # keyed by the cell's number of edges
+    operators::Dict{Any, Any}              # lazily built operators, e.g. (:mass, degree)
 end
 
 function FESpace(dm::Plex, section::Section, f::Integer)
@@ -22,7 +27,7 @@ function FESpace(dm::Plex, section::Section, f::Integer)
     family isa ElementFamily || throw(ArgumentError("field $(layout.name) has no finite-element family"))
     cone_sizes = unique(get_cone_size(dm, c) for c in cell_range(dm))
     elements = Dict{Int, ReferenceElement}(n => ReferenceElement(family, reference_shape(n)) for n in cone_sizes)
-    return FESpace(dm, section, Int(f), family, layout.ncomp, elements)
+    return FESpace(dm, section, Int(f), family, layout.ncomp, elements, Dict{Any, Any}())
 end
 
 FESpace(dm::Plex, section::Section, name::AbstractString) = FESpace(dm, section, field_index(section, name))
