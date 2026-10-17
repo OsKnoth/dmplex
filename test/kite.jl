@@ -63,3 +63,34 @@ end
         @test block_size(mass_solver(U)) == dual_cell_size * (2 * (k + 1) + 2k * (k + 1)) + dual_cell_size * (k + 1)
     end
 end
+
+@testset "Linear kite shallow water: $name" for (name, primal) in (("hexagons", create_hexagon_mesh(2)),
+                                                                   ("triangles", create_spherical_mesh(1)),
+                                                                   ("quadrilaterals", create_cubed_sphere_mesh(4)))
+    u0 = 0.5
+    velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
+    height(x) = -u0 * x[3]^2  # geostrophic balance with f = 2z (Ω = g = 1)
+    m = LinearKiteShallowWater(primal, 1)
+    @test block_size(m.Mh_solver) == 1  # diagonal height mass
+
+    # the semi-discretization conserves energy exactly and mass exactly
+    Random.seed!(5)
+    y = initial_state(m, velocity, height) .+ 0.01 .* randn(num_dofs(m.U) + num_dofs(m.H))
+    dy = tendency!(similar(y), y, m)
+    u, h = y[velocity_dofs(m)], y[height_dofs(m)]
+    dEdt = m.depth * dot(m.Mu * u, dy[velocity_dofs(m)]) + m.gravity * dot(m.Mh * h, dy[height_dofs(m)])
+    @test abs(dEdt) < 1e-12 * norm(dy)
+    @test abs(sum(m.Mh * dy[height_dofs(m)])) < 1e-13
+
+    y = initial_state(m, velocity, height)
+    y0 = copy(y)
+    energy0 = total_energy(m, y)
+    cache = RK4Cache(y)
+    dt = 0.025 * sqrt(4π / num_cells(m.kites))
+    for _ in 1:20
+        rk4_step!(y, dt, tendency!, cache, m)
+    end
+    @test abs(total_energy(m, y) - energy0) / energy0 < 1e-9
+    dh = (y - y0)[height_dofs(m)]
+    @test sqrt(dot(dh, m.Mh * dh)) < 5e-3
+end
