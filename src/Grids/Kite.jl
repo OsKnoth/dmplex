@@ -19,8 +19,15 @@ the cell center; local edges 1 and 4 are halves of primal edges, local edges
 form a dual cell.
 
 Vertices are numbered primal vertices, then edge midpoints, then centers.
-`centers` (one point per primal cell) defaults to the normalized vertex mean;
-pass e.g. the MPAS or ICON cell generators instead. Labels:
+`centers` (one point per primal cell) defaults to [`cell_centers`](@ref)
+`(primal)`, which are the vertices of the orthogonal dual when there is one
+(circumcenters for triangles, Voronoi generators for MPAS-like meshes) and the
+centroids otherwise. The kite vertex on a primal edge is the point where the
+edge crosses the dual edge joining the two adjacent centers if the mesh has an
+orthogonal dual; then the midpoint–center kite edges lie on the dual edges and
+each dual cell is exactly the dual polygon (the Delaunay triangle of an MPAS
+mesh). Otherwise, and on boundary edges, it is the midpoint of the primal edge.
+Labels:
 
 - `"kite_parent_cell"`: primal cell index of each kite
 - `"kite_dual_cell"`: primal vertex index (dual cell) of each kite
@@ -29,10 +36,9 @@ pass e.g. the MPAS or ICON cell generators instead. Labels:
 """
 function create_kite_mesh(primal::Plex; centers=nothing)
     nv, ne = num_vertices(primal), num_edges(primal)
-    centers = centers === nothing ?
-        [normalize(sum(get_coordinates(primal, v) for v in get_cell_vertices(primal, c))) for c in cell_range(primal)] :
-        normalize.(collect(SVector{3, Float64}, centers))
-    midpoints = [normalize(sum(get_coordinates(primal, v) for v in get_cone(primal, e))) for e in edge_range(primal)]
+    centers = centers === nothing ? cell_centers(primal) : normalize.(collect(SVector{3, Float64}, centers))
+    orthogonal = orthogonality_defect(primal, centers) < 1e-8
+    midpoints = [edge_point(primal, e, centers, orthogonal) for e in edge_range(primal)]
     coordinates = [primal.coordinates; midpoints; centers]
     midpoint_id(e) = nv + edge_index(primal, e)
     center_id(c) = nv + ne + cell_index(primal, c)
@@ -67,4 +73,14 @@ function create_kite_mesh(primal::Plex; centers=nothing)
         set_label!(dm, "kite_edge_type", e, KITE_CENTER in types ? KITE_INTERIOR_EDGE : KITE_HALF_EDGE)
     end
     return dm
+end
+
+"Kite vertex on primal edge `e`: crossing with the dual edge (orthogonal meshes) or the arc midpoint."
+function edge_point(primal::Plex, e::Integer, centers, orthogonal::Bool)
+    a, b = (get_coordinates(primal, v) for v in get_cone(primal, e))
+    midpoint = normalize(a + b)
+    left, right = get_edge_cells(primal, e)
+    (orthogonal && left != 0 && right != 0) || return midpoint
+    crossing = normalize(cross(cross(a, b), cross(centers[cell_index(primal, left)], centers[cell_index(primal, right)])))
+    return dot(crossing, midpoint) > 0 ? crossing : -crossing
 end

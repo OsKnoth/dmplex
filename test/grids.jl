@@ -140,3 +140,41 @@ end
         end
     end
 end
+
+@testset "Cell centers and orthogonal kites" begin
+    icosahedral = create_spherical_mesh(2)
+    hexagonal = create_hexagon_mesh(2)
+    # triangles: circumcenters, equidistant from the three vertices
+    centers = cell_centers(icosahedral)
+    @test all(cell_range(icosahedral)) do c
+        d = [dot(centers[cell_index(icosahedral, c)], get_coordinates(icosahedral, v)) for v in get_cell_vertices(icosahedral, c)]
+        maximum(d) - minimum(d) < 1e-14
+    end
+    # Voronoi mesh: the generators are recovered (the vertices of the dual triangles)
+    generators = cell_centers(hexagonal)
+    @test orthogonality_defect(hexagonal, generators) < 1e-12
+    @test maximum(norm.(generators .- icosahedral.coordinates)) < 1e-12
+    @test cell_centers(hexagonal; method=:voronoi) ≈ generators
+    # non-orthogonal meshes fall back to centroids
+    cubed = create_cubed_sphere_mesh(4)
+    @test cell_centers(cubed) == cell_centers(cubed; method=:centroid)
+    @test_throws ArgumentError cell_centers(cubed; method=:circumcenter)
+
+    # on the Voronoi mesh the kites of a dual cell form exactly the dual triangle:
+    # midpoint–center kite edges lie on the great circle through two centers
+    kites = create_kite_mesh(hexagonal)
+    @test check_plex(kites)
+    @test sum(compute_mesh_metrics(kites).cell_areas) ≈ 4π
+    for e in edge_range(hexagonal)
+        left, right = get_edge_cells(hexagonal, e)
+        m = kites.coordinates[num_vertices(hexagonal) + edge_index(hexagonal, e)]
+        gl, gr = generators[cell_index(hexagonal, left)], generators[cell_index(hexagonal, right)]
+        @test abs(dot(normalize(cross(gl, gr)), m)) < 1e-12
+    end
+    kite_areas = compute_mesh_metrics(kites).cell_areas
+    dual_areas = zeros(num_vertices(hexagonal))
+    for (k, c) in enumerate(cell_range(kites))
+        dual_areas[get_label_value(kites, "kite_dual_cell", c)] += kite_areas[k]
+    end
+    @test dual_areas ≈ compute_mesh_metrics(icosahedral).cell_areas
+end
