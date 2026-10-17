@@ -14,6 +14,11 @@ Conventions:
 - every cell is oriented counter-clockwise seen from outside the sphere,
 - hence the cell with orientation `0` on an edge lies to its *left*, and the
   edge normal `t × r` points from the left cell to the right cell.
+
+`surface` is `:sphere` (unit sphere) or `:plane` (coordinates with `z = 0`).
+A plane may be periodic with `period = (Lx, Ly)` on `[0, Lx) × [0, Ly)`
+(`0` for a non-periodic direction); vertex coordinates are stored inside the
+box and [`cell_coordinates`](@ref) unwraps cells that cross the seam.
 """
 struct Plex
     strata::NTuple{3, UnitRange{Int}}  # indexed by depth + 1: vertices, edges, cells
@@ -24,23 +29,30 @@ struct Plex
     supports::Vector{Int}
     coordinates::Vector{SVector{3, Float64}}
     labels::Dict{String, Dict{Int, Int}}
+    surface::Symbol
+    period::SVector{2, Float64}
 end
 
 # --- Construction -----------------------------------------------------------
 
 """
-    plex_from_polygons(polygons, coordinates)
+    plex_from_polygons(polygons, coordinates; period=nothing)
 
 Build an interpolated `Plex` from a cell-vertex list (analogue of
 `DMPlexCreateFromCellList` followed by `DMPlexInterpolate`). `polygons[c]`
 lists the vertex indices (into `coordinates`) of cell `c` in cyclic order;
 cells given clockwise are reversed so that all cells are counter-clockwise
-seen from outside. Edges are numbered in order of first appearance.
+seen from outside (from `+z` on a plane). Edges are numbered in order of first
+appearance. Coordinates with `z = 0` define a plane, otherwise the unit
+sphere; `period = (Lx, Ly)` makes a plane periodic.
 """
 function plex_from_polygons(polygons::AbstractVector{<:AbstractVector{<:Integer}},
-                            coordinates::AbstractVector{<:SVector{3, <:Real}})
+                            coordinates::AbstractVector{<:SVector{3, <:Real}}; period=nothing)
     vertex_coords = Vector{SVector{3, Float64}}(coordinates)
-    polys = [orient_ccw(collect(Int, poly), vertex_coords) for poly in polygons]
+    surface = all(x -> x[3] == 0, vertex_coords) ? :plane : :sphere
+    box = period === nothing ? SVector(0.0, 0.0) : SVector{2, Float64}(period)
+    surface == :sphere && any(!iszero, box) && throw(ArgumentError("only planes can be periodic"))
+    polys = [orient_ccw(collect(Int, poly), vertex_coords, surface, box) for poly in polygons]
     nc, nv = length(polys), length(vertex_coords)
 
     edge_ids = Dict{Tuple{Int, Int}, Int}()
@@ -81,18 +93,50 @@ function plex_from_polygons(polygons::AbstractVector{<:AbstractVector{<:Integer}
     support_offsets, supports = invert_cones(cone_offsets, cones, npoints)
     strata = (nc + ne + 1:npoints, nc + 1:nc + ne, 1:nc)
     return Plex(strata, cone_offsets, cones, orientations, support_offsets, supports,
-                vertex_coords, Dict{String, Dict{Int, Int}}())
+                vertex_coords, Dict{String, Dict{Int, Int}}(), surface, box)
 end
 
-function orient_ccw(poly::Vector{Int}, coordinates)
-    normal = zero(SVector{3, Float64})
-    centroid = zero(SVector{3, Float64})
-    for i in eachindex(poly)
-        x = coordinates[poly[i]]
-        normal += cross(x, coordinates[poly[mod1(i + 1, length(poly))]])
-        centroid += x
-    end
-    return dot(normal, centroid) >= 0 ? poly : reverse(poly)
+function orient_ccw(poly::Vector{Int}, coordinates, surface::Symbol, period)
+    x = [unwrap(period, coordinates[v], coordinates[poly[1]]) for v in poly]
+    normal = sum(cross(x[i], x[mod1(i + 1, length(x))]) for i in eachindex(x))
+    return dot(normal, reference_normal(surface, sum(x))) >= 0 ? poly : reverse(poly)
+end
+
+# --- Surface geometry -----------------------------------------------------------
+
+"Shift `x` by multiples of `period` (where nonzero) to the copy closest to `reference`."
+function unwrap(period, x::SVector{3}, reference::SVector{3})
+    shift(k) = period[k] > 0 ? -period[k] * round((x[k] - reference[k]) / period[k]) : 0.0
+    return x + SVector(shift(1), shift(2), 0.0)
+end
+
+"Outward unit normal of the surface at `x` (radial on the sphere, `+z` on a plane)."
+reference_normal(surface::Symbol, x) = surface == :sphere ? normalize(x) : SVector(0.0, 0.0, 1.0)
+reference_normal(dm, x) = reference_normal(dm.surface, x)
+
+"""
+    surface_point(dm, X)
+
+Point of the surface represented by `X`: `X / |X|` on the sphere, `X` wrapped
+into the periodic box on a plane.
+"""
+function surface_point(dm, X::SVector{3})
+    dm.surface == :sphere && return normalize(X)
+    wrap(k) = dm.period[k] > 0 ? mod(X[k], dm.period[k]) : X[k]
+    return SVector(wrap(1), wrap(2), 0.0)
+end
+
+"Coordinates of the vertices of `cell` (counter-clockwise), unwrapped across periodic seams."
+function cell_coordinates(dm, cell::Integer)
+    vertices = get_cell_vertices(dm, cell)
+    x1 = get_coordinates(dm, vertices[1])
+    return [unwrap(dm.period, get_coordinates(dm, v), x1) for v in vertices]
+end
+
+"Coordinates of the two vertices of edge `e`, the second unwrapped next to the first."
+function edge_coordinates(dm, e::Integer)
+    a, b = (get_coordinates(dm, v) for v in get_cone(dm, e))
+    return a, unwrap(dm.period, b, a)
 end
 
 function invert_cones(cone_offsets, cones, npoints)
@@ -279,7 +323,8 @@ end
 Verify the mesh invariants (cf. `DMPlexCheckSymmetry`/`DMPlexCheckSkeleton`):
 cones and supports are symmetric, every cell boundary is a closed oriented
 loop, cells are counter-clockwise, each edge has at most one cell per side,
-and for `closed=true` the Euler characteristic is that of the sphere.
+and for `closed=true` the Euler characteristic is that of the sphere (or of
+the torus for a doubly periodic plane).
 """
 function check_plex(dm::Plex; closed::Bool=true)
     for p in get_chart(dm), q in get_cone(dm, p)
@@ -295,9 +340,9 @@ function check_plex(dm::Plex; closed::Bool=true)
             stop = edge[orientation[i] == 0 ? 2 : 1]
             stop == vertices[mod1(i + 1, length(cone))] || error("cell $cell boundary is not a closed loop")
         end
-        x = [get_coordinates(dm, v) for v in vertices]
+        x = cell_coordinates(dm, cell)
         normal = sum(cross(x[i], x[mod1(i + 1, length(x))]) for i in eachindex(x))
-        dot(normal, sum(x)) > 0 || error("cell $cell is not counter-clockwise")
+        dot(normal, reference_normal(dm, sum(x))) > 0 || error("cell $cell is not counter-clockwise")
     end
     for e in edge_range(dm)
         nleft = count(c -> edge_sign(dm, c, findfirst(==(e), get_cone(dm, c))) == 1, get_support(dm, e))
@@ -307,7 +352,8 @@ function check_plex(dm::Plex; closed::Bool=true)
     end
     if closed
         chi = num_vertices(dm) - num_edges(dm) + num_cells(dm)
-        chi == 2 || error("Euler characteristic $chi != 2")
+        expected = dm.surface == :sphere ? 2 : 0  # sphere or doubly periodic plane (torus)
+        chi == expected || error("Euler characteristic $chi != $expected")
     end
     return true
 end

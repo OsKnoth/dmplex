@@ -139,3 +139,26 @@ end
     mc = NonlinearKiteShallowWater(create_hexagon_mesh(1), 1; geometry=:chordal)
     @test sum(assemble_mass(mc.H; lumped=true)) < 4π
 end
+
+@testset "Kite shallow water on a periodic plane" begin
+    for cells in (:quadrilateral, :triangle)
+        m = NonlinearKiteShallowWater(create_periodic_plane(6, 5; Lx=4π, Ly=2π, cells), 1; coriolis=x -> 0.5)
+        Random.seed!(2)
+        y = initial_state(m, x -> SVector(sin(x[2]), 0.3cos(0.5x[1]), 0.0), x -> 1 + 0.1sin(0.5x[1]))
+        y .+= 1e-3 .* randn(length(y))
+        dy = tendency!(similar(y), y, m)
+        u, h = y[velocity_dofs(m)], y[height_dofs(m)]
+        _, K, F = diagnostics(m, u, h)
+        @test abs(sum(m.Mh * dy[height_dofs(m)])) < 1e-13
+        @test abs(dot(m.Mu * F, dy[velocity_dofs(m)]) + dot(m.Mh * (K + m.gravity * h), dy[height_dofs(m)])) < 1e-12 * norm(dy)
+        # a parallel shear flow with constant height is steady (without rotation):
+        # the discrete tendency of its projection vanishes under refinement
+        residual = map((8, 16)) do n
+            ms = NonlinearKiteShallowWater(create_periodic_plane(n, n; Lx=2π, Ly=2π, cells), 1; coriolis=x -> 0.0)
+            ys = initial_state(ms, x -> SVector(sin(x[2]), 0.0, 0.0), x -> 1.0)
+            dy = tendency!(similar(ys), ys, ms)
+            sqrt(dot(dy[velocity_dofs(ms)], ms.Mu * dy[velocity_dofs(ms)]) + dot(dy[height_dofs(ms)], ms.Mh * dy[height_dofs(ms)]))
+        end
+        @test residual[2] < 0.55 * residual[1]
+    end
+end

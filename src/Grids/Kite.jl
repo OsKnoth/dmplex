@@ -36,7 +36,8 @@ Labels:
 """
 function create_kite_mesh(primal::Plex; centers=nothing)
     nv, ne = num_vertices(primal), num_edges(primal)
-    centers = centers === nothing ? cell_centers(primal) : normalize.(collect(SVector{3, Float64}, centers))
+    centers = centers === nothing ? cell_centers(primal) :
+              [surface_point(primal, SVector{3, Float64}(x)) for x in centers]
     orthogonal = orthogonality_defect(primal, centers) < 1e-8
     midpoints = [edge_point(primal, e, centers, orthogonal) for e in edge_range(primal)]
     coordinates = [primal.coordinates; midpoints; centers]
@@ -56,7 +57,7 @@ function create_kite_mesh(primal::Plex; centers=nothing)
             push!(dual_cell, vertex_index(primal, corners[i]))
         end
     end
-    dm = plex_from_polygons(kites, coordinates)
+    dm = plex_from_polygons(kites, coordinates; period=primal.period)
 
     for (k, c) in enumerate(cell_range(dm))
         get_cell_vertices(dm, c)[1] == first(vertex_range(dm)) + kites[k][1] - 1 ||
@@ -77,8 +78,8 @@ end
 
 "Kite vertex on primal edge `e`: crossing with the dual edge (orthogonal meshes) or the arc midpoint."
 function edge_point(primal::Plex, e::Integer, centers, orthogonal::Bool)
-    a, b = (get_coordinates(primal, v) for v in get_cone(primal, e))
-    midpoint = normalize(a + b)
+    a, b = edge_coordinates(primal, e)
+    midpoint = surface_point(primal, (a + b) / 2)
     left, right = get_edge_cells(primal, e)
     (orthogonal && left != 0 && right != 0) || return midpoint
     crossing = normalize(cross(cross(a, b), cross(centers[cell_index(primal, left)], centers[cell_index(primal, right)])))

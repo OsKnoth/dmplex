@@ -178,3 +178,21 @@ end
     end
     @test dual_areas ≈ compute_mesh_metrics(icosahedral).cell_areas
 end
+
+@testset "Periodic plane" begin
+    for cells in (:quadrilateral, :triangle)
+        dm = create_periodic_plane(6, 5; Lx=4π, Ly=2π, cells)
+        @test dm.surface == :plane && dm.period == SVector(4π, 2π)
+        @test check_plex(dm)  # closed torus, Euler characteristic 0
+        @test num_cells(dm) == (cells == :quadrilateral ? 30 : 60)
+        @test total_area(dm) ≈ 8π^2
+        # cells across the seam are unwrapped: all cell areas positive and equal per type
+        areas = compute_mesh_metrics(dm).cell_areas
+        @test all(a -> a ≈ areas[1], areas)
+        kites = create_kite_mesh(dm)
+        @test check_plex(kites)
+        @test total_area(kites) ≈ 8π^2
+        @test all(x -> 0 <= x[1] < 4π && 0 <= x[2] < 2π, kites.coordinates)
+    end
+    @test_throws ArgumentError create_periodic_plane(2, 5)
+end

@@ -20,9 +20,13 @@ vertices of the orthogonal dual mesh whenever the mesh has one:
   `:centroid` (cubed sphere, HEALPix).
 
 `:voronoi` is a global problem; compute the centers on the whole mesh before
-partitioning it.
+partitioning it. On a plane the centroids are used.
 """
 function cell_centers(dm::Plex; method::Symbol=:auto, tolerance::Real=1e-8)
+    if dm.surface == :plane
+        method in (:auto, :centroid) || throw(ArgumentError("only centroids are implemented on planes"))
+        return [surface_point(dm, sum(cell_coordinates(dm, c)) / get_cone_size(dm, c)) for c in cell_range(dm)]
+    end
     if method == :auto
         all(c -> get_cone_size(dm, c) == 3, cell_range(dm)) && return cell_centers(dm; method=:circumcenter)
         generators = cell_centers(dm; method=:voronoi)
@@ -84,6 +88,7 @@ through the centers of its two cells; zero for a mesh with an orthogonal dual
 (Voronoi–Delaunay pair).
 """
 function orthogonality_defect(dm::Plex, centers)
+    dm.surface == :sphere || return Inf
     defect = 0.0
     for e in edge_range(dm)
         left, right = get_edge_cells(dm, e)

@@ -8,6 +8,8 @@ straight reference edges then map to great-circle arcs and the cells tile the
 sphere exactly. With `projected=false` (chordal elements) the flat bilinear
 surface through the vertices is used; neighbouring cells still match along
 their straight chord edges, but the total area misses the sphere by O(h²).
+On a plane the map is always the flat one, with cells unwrapped across
+periodic seams.
 """
 struct CellMap{S<:ReferenceShape, N}
     shape::S
@@ -18,8 +20,8 @@ end
 
 function CellMap(dm::Plex, cell::Integer; radius::Real=1.0, projected::Bool=true)
     shape = reference_shape(dm, cell)
-    vertices = Tuple(get_coordinates(dm, v) for v in get_cell_vertices(dm, cell))
-    return CellMap(shape, vertices, Float64(radius), projected)
+    vertices = Tuple(cell_coordinates(dm, cell))
+    return CellMap(shape, vertices, Float64(radius), projected && dm.surface == :sphere)
 end
 
 function shape_functions(::Triangle, ξ)

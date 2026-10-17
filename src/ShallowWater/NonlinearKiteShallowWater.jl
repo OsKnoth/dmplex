@@ -31,7 +31,7 @@ function KiteQuadrature(dm::Plex, degree::Integer, coriolis; projected::Bool=tru
             piola[q, j] = SMatrix{3, 2}(J) / detJ
             dA[q, j] = w * detJ
             normal[q, j] = surface_normal(J)
-            f[q, j] = coriolis(normalize(x))
+            f[q, j] = coriolis(surface_point(dm, x))
         end
     end
     return KiteQuadrature(rule.points, rule.weights, piola, dA, normal, f)

@@ -174,12 +174,12 @@ end
     assemble_coriolis(U, f)
 
 Coriolis matrix `C[i, j] = ∫ f(x) φ_i ⋅ (r̂ × φ_j) dA` for a vector space `U`,
-with the element normal `r̂` and `f` evaluated on the unit sphere;
+with the element normal `r̂` and `f` evaluated at the surface point;
 antisymmetric, so it does no work.
 """
 assemble_coriolis(U::FESpace, f; kwargs...) =
     assemble_bilinear(U, U; kwargs...) do t, u, a, b, q
-        f(normalize(t.points[q])) * dot(t.φ[a, q], cross(t.normals[q], u.φ[b, q])) * t.dA[q]
+        f(surface_point(U.dm, t.points[q])) * dot(t.φ[a, q], cross(t.normals[q], u.φ[b, q])) * t.dA[q]
     end
 
 "Load vector `b[i] = ∫ f(x) ⋅ φ_i dA` (`f` scalar or Cartesian vector valued)."
