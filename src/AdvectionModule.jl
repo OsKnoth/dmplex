@@ -8,55 +8,30 @@ export compute_advection_rhs!
 """
     compute_advection_rhs!(rhs, C, dm, metrics, U_normal)
 
-Berechnet dC/dt rein topologisch über die im DMPlex eingeprägten Vorzeichen-Orientierungen.
-Entspricht exakt der High-Performance-Assemblierung in PETSc.
+First-order upwind finite-volume tendency `dC/dt` of a cell-wise constant
+tracer. `U_normal[i]` is the normal velocity of edge `i`, positive from its
+left to its right cell.
 """
 function compute_advection_rhs!(
     rhs::Vector{Float64},
-    C::Vector{Float64}, 
-    dm::MyDMPlex, 
-    metrics::MeshMetrics, 
+    C::Vector{Float64},
+    dm::Plex,
+    metrics::MeshMetrics,
     U_normal::Vector{Float64}
 )
     fill!(rhs, 0.0)
-
-    # Schleife über alle Kanten (Kanten-basiertes Residuum)
-    @inbounds for e_point in dm.edge_start:dm.edge_end
-        e_idx = e_point - dm.edge_start + 1
-        
-        length_e = metrics.edge_lengths[e_point]
-        u_n = U_normal[e_idx] # Geschwindigkeit relativ zur positiven Kanten-Normale
-
-        # Strikte PETSc Support-Abfrage:
-        # cell_L hat die Kante im Graphen als (+), d.h. u_n strömt hier HERAUS.
-        # cell_R hat die Kante im Graphen als (-), d.h. u_n strömt hier HINEIN.
-        cell_L, cell_R = get_support_cells(dm, e_point)
-        if cell_L == 0 || cell_R == 0 continue end # Sicherheitscheck für ungeschlossene Ränder
-
-        cL_idx = cell_L - dm.cell_start + 1
-        cR_idx = cell_R - dm.cell_start + 1
-
-        # --- REINE TOPOLOGISCHE UPWIND ENTSCHEIDUNG ---
-        if u_n > 0.0
-            flux = length_e * u_n * C[cL_idx]
-        else
-            flux = length_e * u_n * C[cR_idx]
-        end
-
-        # Fluss-Bilanzierung auf den Zellen
-        rhs[cL_idx] -= flux
-        rhs[cR_idx] += flux
+    for e in edge_range(dm)
+        i = edge_index(dm, e)
+        left, right = get_edge_cells(dm, e)
+        (left == 0 || right == 0) && continue
+        l, r = cell_index(dm, left), cell_index(dm, right)
+        u_n = U_normal[i]
+        flux = metrics.edge_lengths[i] * u_n * (u_n > 0.0 ? C[l] : C[r])
+        rhs[l] -= flux
+        rhs[r] += flux
     end
-
-    # In-place Normierung über das Zellvolumen
-    @inbounds for cell_point in dm.cell_start:dm.cell_end
-        c_idx = cell_point - dm.cell_start + 1
-        volume = metrics.cell_volumes[cell_point]
-        rhs[c_idx] /= volume
-    end
-
+    rhs ./= metrics.cell_areas
     return rhs
 end
 
 end # module
-

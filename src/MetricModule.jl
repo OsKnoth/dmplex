@@ -1,63 +1,56 @@
 module MetricModule
 
-using StaticArrays
 using LinearAlgebra
+using StaticArrays
 using ..DMPlexModule
 
 export MeshMetrics, compute_mesh_metrics
 
+"""
+    MeshMetrics
+
+Geometric quantities on the unit sphere, stored per stratum and indexed with
+`cell_index`/`edge_index`. Edges are great-circle arcs; `edge_normals` are unit
+tangent vectors at the edge midpoint pointing from the left to the right cell.
+"""
 struct MeshMetrics
-    edge_lengths::Dict{Int, Float64}
-    edge_normals::Dict{Int, SVector{3, Float64}}
-    cell_volumes::Dict{Int, Float64}
+    cell_areas::Vector{Float64}
+    cell_centers::Vector{SVector{3, Float64}}
+    edge_lengths::Vector{Float64}
+    edge_midpoints::Vector{SVector{3, Float64}}
+    edge_normals::Vector{SVector{3, Float64}}
 end
 
-function compute_spherical_triangle_volume(A, B, C)
+"Area of the spherical triangle `ABC` on the unit sphere (Van Oosterom–Strackee)."
+function spherical_triangle_area(A, B, C)
     determinant = dot(A, cross(B, C))
     denominator = 1.0 + dot(A, B) + dot(B, C) + dot(C, A)
     return 2.0 * atan(abs(determinant), denominator)
 end
 
-function compute_mesh_metrics(dm::MyDMPlex, vertices::Vector{SVector{3, Float64}})::MeshMetrics
-    edge_lengths = Dict{Int, Float64}()
-    edge_normals = Dict{Int, SVector{3, Float64}}()
-    cell_volumes = Dict{Int, Float64}()
-
-    # 1. Kantenmetriken
-    for e_point in dm.edge_start:dm.edge_end
-        v_cone = get_cone(dm, e_point)
-        p1 = vertices[v_cone[1] - dm.vertex_start + 1]
-        p2 = vertices[v_cone[2] - dm.vertex_start + 1]
-        
-        edge_lengths[e_point] = acos(clamp(dot(p1, p2), -1.0, 1.0))
-        mid = (p1 + p2) / 2.0; mid /= norm(mid)
-        n = cross(mid, p2 - p1)
-        edge_normals[e_point] = n / norm(n)
+function compute_mesh_metrics(dm::Plex)::MeshMetrics
+    edge_lengths = Vector{Float64}(undef, num_edges(dm))
+    edge_midpoints = Vector{SVector{3, Float64}}(undef, num_edges(dm))
+    edge_normals = Vector{SVector{3, Float64}}(undef, num_edges(dm))
+    for e in edge_range(dm)
+        i = edge_index(dm, e)
+        p1, p2 = (get_coordinates(dm, v) for v in get_cone(dm, e))
+        edge_lengths[i] = atan(norm(cross(p1, p2)), dot(p1, p2))
+        edge_midpoints[i] = normalize(p1 + p2)
+        # (p2 - p1) × (p1 + p2) = 2 p2 × p1: right of the edge, seen from outside
+        edge_normals[i] = normalize(cross(p2, p1))
     end
 
-    # 2. Polygon-unabhängige Volumenberechnung
-    for cell_point in dm.cell_start:dm.cell_end
-        edges = get_cone(dm, cell_point)
-        cell_vertex_points = get_cell_vertices(dm, cell_point)
-        if isempty(cell_vertex_points)
-            v_indices = Int[]
-            for oriented_edge in edges
-                append!(v_indices, get_cone(dm, abs(oriented_edge)))
-            end
-            cell_vertex_points = unique(v_indices)
-        end
-
-        cell_nodes = [vertices[v - dm.vertex_start + 1] for v in cell_vertex_points]
-        area = 0.0
-        for i in 2:length(cell_nodes)-1
-            area += compute_spherical_triangle_volume(cell_nodes[1], cell_nodes[i], cell_nodes[i + 1])
-        end
-        cell_volumes[cell_point] = area
+    cell_areas = Vector{Float64}(undef, num_cells(dm))
+    cell_centers = Vector{SVector{3, Float64}}(undef, num_cells(dm))
+    for c in cell_range(dm)
+        i = cell_index(dm, c)
+        x = [get_coordinates(dm, v) for v in get_cell_vertices(dm, c)]
+        cell_areas[i] = sum(spherical_triangle_area(x[1], x[k], x[k + 1]) for k in 2:length(x) - 1)
+        cell_centers[i] = normalize(sum(x))
     end
 
-    return MeshMetrics(edge_lengths, edge_normals, cell_volumes)
+    return MeshMetrics(cell_areas, cell_centers, edge_lengths, edge_midpoints, edge_normals)
 end
-
-norm(v) = sqrt(sum(v .^ 2))
 
 end # module
