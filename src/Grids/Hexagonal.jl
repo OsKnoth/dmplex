@@ -1,12 +1,3 @@
-module HexagonMesh
-
-using LinearAlgebra
-using StaticArrays
-using ..DMPlexModule
-using ..SphereMesh
-
-export create_hexagon_mesh
-
 """
     create_hexagon_mesh(subdivisions)
 
@@ -31,5 +22,3 @@ function create_hexagon_mesh(subdivisions::Int)
 
     return plex_from_polygons(polygons, centers)
 end
-
-end # module

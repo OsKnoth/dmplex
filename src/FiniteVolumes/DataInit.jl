@@ -1,12 +1,3 @@
-module DataInitModule
-
-using LinearAlgebra
-using StaticArrays
-using ..DMPlexModule
-using ..MetricModule
-
-export init_edge_velocity, init_tracer
-
 "Solid-body rotation about a slightly tilted axis."
 function analytical_wind_field(pos::SVector{3, Float64})::SVector{3, Float64}
     omega = SVector(0.1, 0.0, 1.0)
@@ -35,5 +26,3 @@ function init_tracer(dm::Plex, metrics::MeshMetrics)
         dist < 0.5 ? 0.5 * (1.0 + cos(π * dist / 0.5)) : 0.0
     end
 end
-
-end # module

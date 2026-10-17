@@ -1,21 +1,13 @@
-module SectionModule
-
-using ..DMPlexModule
-
-export FieldLayout, lagrange, discontinuous, raviart_thomas, nedelec,
-    Section, num_fields, field_names, field_index, get_dof, get_offset,
-    get_field_dof, get_field_offset, storage_size, dof_range, field_range,
-    closure_dofs, create_vector
-
 """
     FieldLayout(name, space, order, ncomp, ndofs)
 
-Describes how many degrees of freedom a finite-element field places on each
-mesh point. `ndofs(depth, cone_size)` returns the number of nodes on a point of
-the given depth (0 vertex, 1 edge, 2 cell) whose cone has `cone_size` entries;
-every node carries `ncomp` components. `space` is one of `:H1`, `:L2`, `:Hdiv`,
-`:Hcurl` and decides how edge orientations act on the closure (see
-[`closure_dofs`](@ref)).
+Describes how many degrees of freedom a field places on each mesh point.
+`ndofs(depth, cone_size)` is any callable returning the number of nodes on a
+point of the given depth (0 vertex, 1 edge, 2 cell) whose cone has
+`cone_size` entries; the finite-element families of the `FEM` module are such
+callables. Every node carries `ncomp` components. `space` is one of `:H1`,
+`:L2`, `:Hdiv`, `:Hcurl` and decides how edge orientations act on the closure
+(see [`closure_dofs`](@ref)).
 """
 struct FieldLayout{F}
     name::String
@@ -23,56 +15,6 @@ struct FieldLayout{F}
     order::Int
     ncomp::Int
     ndofs::F
-end
-
-const TRIANGLE = 3
-const QUADRILATERAL = 4
-
-unsupported(name, k, n) = throw(ArgumentError("$name of order $k is not defined on cells with $n edges"))
-
-"Continuous Lagrange space of order `k ≥ 1` (P_k on triangles, Q_k on quadrilaterals)."
-function lagrange(k::Integer; name::AbstractString="u", ncomp::Integer=1)
-    k >= 1 || throw(ArgumentError("Lagrange order must be at least 1"))
-    ndofs(depth, n) = depth == 0 ? 1 :
-                      depth == 1 ? k - 1 :
-                      k == 1 ? 0 :
-                      n == TRIANGLE ? (k - 1) * (k - 2) ÷ 2 :
-                      n == QUADRILATERAL ? (k - 1)^2 : unsupported("Lagrange", k, n)
-    return FieldLayout(String(name), :H1, Int(k), Int(ncomp), ndofs)
-end
-
-"Discontinuous space of order `k ≥ 0`, all nodes owned by the cell (DG0 on any polygon)."
-function discontinuous(k::Integer; name::AbstractString="h", ncomp::Integer=1)
-    k >= 0 || throw(ArgumentError("DG order must be non-negative"))
-    ndofs(depth, n) = depth < 2 ? 0 :
-                      k == 0 ? 1 :
-                      n == TRIANGLE ? (k + 1) * (k + 2) ÷ 2 :
-                      n == QUADRILATERAL ? (k + 1)^2 : unsupported("DG", k, n)
-    return FieldLayout(String(name), :L2, Int(k), Int(ncomp), ndofs)
-end
-
-function edge_element_dofs(name, k)
-    ndofs(depth, n) = depth == 0 ? 0 :
-                      depth == 1 ? k + 1 :
-                      k == 0 ? 0 :
-                      n == TRIANGLE ? k * (k + 1) :
-                      n == QUADRILATERAL ? 2k * (k + 1) : unsupported(name, k, n)
-    return ndofs
-end
-
-"""
-Raviart–Thomas space `RT_k`, `k ≥ 0`, with divergence in P_k/Q_k (RTCF on
-quadrilaterals). Edge nodes are normal components ordered along the edge.
-"""
-function raviart_thomas(k::Integer; name::AbstractString="u")
-    k >= 0 || throw(ArgumentError("Raviart–Thomas order must be non-negative"))
-    return FieldLayout(String(name), :Hdiv, Int(k), 1, edge_element_dofs("Raviart–Thomas", k))
-end
-
-"Nédélec space of the first kind `N_k`, `k ≥ 0`; edge nodes are tangential components."
-function nedelec(k::Integer; name::AbstractString="u")
-    k >= 0 || throw(ArgumentError("Nédélec order must be non-negative"))
-    return FieldLayout(String(name), :Hcurl, Int(k), 1, edge_element_dofs("Nédélec", k))
 end
 
 """
@@ -194,5 +136,3 @@ end
 
 closure_dofs(dm::Plex, s::Section, cell::Integer, name::AbstractString) =
     closure_dofs(dm, s, cell, field_index(s, name))
-
-end # module

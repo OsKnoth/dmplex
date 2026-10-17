@@ -1,7 +1,3 @@
-module TimeStepperModule
-
-export euler_forward_step!
-
 """
     euler_forward_step!(C_next, C_curr, dt, rhs_cache, rhs_callback, args...)
 
@@ -26,6 +22,3 @@ function euler_forward_step!(
     end
     return C_next
 end
-
-end # module
-

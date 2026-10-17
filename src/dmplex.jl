@@ -1,26 +1,21 @@
 module dmplex
 
-include("DMPlexModule.jl")
-include("SectionModule.jl")
-include("SphereMesh.jl")
-include("CubedSphereMesh.jl")
-include("HexagonMesh.jl")
-include("MetricModule.jl")
-include("DataInitModule.jl")
-include("AdvectionModule.jl")
-include("TimeStepperModule.jl")
-include("OutputModule.jl")
-
 using Reexport: @reexport
-@reexport using .DMPlexModule
-@reexport using .SectionModule
-@reexport using .SphereMesh
-@reexport using .CubedSphereMesh
-@reexport using .HexagonMesh
-@reexport using .MetricModule
-@reexport using .DataInitModule
-@reexport using .AdvectionModule
-@reexport using .TimeStepperModule
-@reexport using .OutputModule
+
+include("Topology/Topology.jl")
+include("Grids/Grids.jl")
+include("Geometry/Geometry.jl")
+include("FEM/FEM.jl")
+include("FiniteVolumes/FiniteVolumes.jl")
+include("TimeSteppers/TimeSteppers.jl")
+include("Outputs/Outputs.jl")
+
+@reexport using .Topology
+@reexport using .Grids
+@reexport using .Geometry
+@reexport using .FEM
+@reexport using .FiniteVolumes
+@reexport using .TimeSteppers
+@reexport using .Outputs
 
 end # module dmplex

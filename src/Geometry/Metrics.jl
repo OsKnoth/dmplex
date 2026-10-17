@@ -1,11 +1,3 @@
-module MetricModule
-
-using LinearAlgebra
-using StaticArrays
-using ..DMPlexModule
-
-export MeshMetrics, compute_mesh_metrics
-
 """
     MeshMetrics
 
@@ -52,5 +44,3 @@ function compute_mesh_metrics(dm::Plex)::MeshMetrics
 
     return MeshMetrics(cell_areas, cell_centers, edge_lengths, edge_midpoints, edge_normals)
 end
-
-end # module

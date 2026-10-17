@@ -1,10 +1,3 @@
-module AdvectionModule
-
-using ..DMPlexModule
-using ..MetricModule
-
-export compute_advection_rhs!
-
 """
     compute_advection_rhs!(rhs, C, dm, metrics, U_normal)
 
@@ -33,5 +26,3 @@ function compute_advection_rhs!(
     rhs ./= metrics.cell_areas
     return rhs
 end
-
-end # module

@@ -1,10 +1,3 @@
-module OutputModule
-
-using VTKHDF
-using ..DMPlexModule
-
-export write_vtkhdf
-
 """
     write_vtkhdf(filename, dm; cell_data...)
 
@@ -28,5 +21,3 @@ function write_vtkhdf(filename::AbstractString, dm::Plex; cell_data...)
     end
     return filename
 end
-
-end # module

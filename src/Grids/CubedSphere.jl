@@ -1,11 +1,3 @@
-module CubedSphereMesh
-
-using LinearAlgebra
-using StaticArrays
-using ..DMPlexModule
-
-export create_cubed_sphere_mesh
-
 """
     analytical_cube_point(i, j, n, panel)
 
@@ -54,5 +46,3 @@ function create_cubed_sphere_mesh(n::Int)
 
     return plex_from_polygons(quads, vertices)
 end
-
-end # module

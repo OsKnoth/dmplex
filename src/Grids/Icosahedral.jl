@@ -1,11 +1,3 @@
-module SphereMesh
-
-using LinearAlgebra
-using StaticArrays
-using ..DMPlexModule
-
-export create_spherical_mesh
-
 const PHI = (1.0 + sqrt(5.0)) / 2.0
 
 """
@@ -45,5 +37,3 @@ function create_spherical_mesh(subdivisions::Int)
 
     return plex_from_polygons([collect(t) for t in triangles], vertices)
 end
-
-end # module
