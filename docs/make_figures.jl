@@ -206,6 +206,61 @@ function shallow_water_figure()
     end
 end
 
+function kite_figure()
+    primal = create_hexagon_mesh(2)
+    dm = create_kite_mesh(primal)
+    basis = screen_basis(VIEW)
+    cx, cy, radius = 200, 200, 160
+    # highlight the primal cell and the dual cell (primal vertex) facing the viewer most directly
+    facing(x) = dot(normalize(x), VIEW)
+    P = argmax(c -> facing(sum(get_coordinates(primal, v) for v in get_cell_vertices(primal, c))), cell_range(primal))
+    corners = get_cell_vertices(primal, P)
+    v = vertex_index(primal, corners[argmax(i -> facing(get_coordinates(primal, corners[i]) +
+                                                         0.3 * get_coordinates(primal, corners[mod1(i + 1, end)])), eachindex(corners))])
+    neighbor = [c for c in get_star(primal, first(vertex_range(primal)) + v - 1) if c in cell_range(primal) && c != P]
+    blue, orange = "#2a78d6", "#eb6834"
+    function fill(c)
+        get_label_value(dm, "kite_dual_cell", c) == v && return orange
+        get_label_value(dm, "kite_parent_cell", c) == cell_index(primal, P) && return blue
+        return CELL_FILL
+    end
+    svg("kites.svg", 640, 400) do io
+        for c in visible_cells(dm, VIEW)
+            f = fill(c)
+            opacity = f == CELL_FILL ? "" : " fill-opacity=\"0.45\""
+            println(io, replace(polygon(cell_outline(dm, c), cx, cy, radius, basis; fill=f, stroke=INK_SECONDARY, width=0.4),
+                                "/>" => "$opacity/>"))
+        end
+        # primal edges on top
+        e1, e2 = basis
+        for e in edge_range(primal)
+            a, b = (get_coordinates(primal, w) for w in get_cone(primal, e))
+            facing(a + b) > 0.05 || continue
+            pts = [normalize((1 - t) * a + t * b) for t in range(0, 1; length=5)]
+            coords = join((@sprintf("%.1f,%.1f", cx + radius * dot(p, e1), cy - radius * dot(p, e2)) for p in pts), " ")
+            println(io, """<polyline points="$coords" fill="none" stroke="$INK" stroke-width="1.6" stroke-linecap="round"/>""")
+        end
+        println(io, """<circle cx="$cx" cy="$cy" r="$radius" fill="none" stroke="$INK_SECONDARY" stroke-width="1"/>""")
+        # legend
+        lx, ly = 400, 120
+        text(io, lx, ly - 30, "Kite grid of a hexagonal mesh"; anchor="start", weight="bold")
+        items = [("line", INK, "primal edges"), ("line", INK_SECONDARY, "kite edges (edge midpoint – center)"),
+                 ("box", blue, "kites of one primal cell P"), ("box", orange, "kites of one dual cell P̃")]
+        for (i, (kind, color, label)) in enumerate(items)
+            y = ly + 28 * (i - 1)
+            if kind == "line"
+                println(io, """<line x1="$lx" y1="$(y - 4)" x2="$(lx + 22)" y2="$(y - 4)" stroke="$color" stroke-width="$(color == INK ? 1.6 : 0.8)"/>""")
+            else
+                println(io, """<rect x="$lx" y="$(y - 12)" width="22" height="14" rx="2" fill="$color" fill-opacity="0.45" stroke="$INK_SECONDARY" stroke-width="0.4"/>""")
+            end
+            text(io, lx + 32, y, label; size=13, color=INK_SECONDARY, anchor="start")
+        end
+        text(io, lx, ly + 130, "$(num_cells(primal)) primal cells → $(num_cells(dm)) kites"; size=12,
+             color=INK_SECONDARY, anchor="start")
+    end
+end
+
 mkpath(OUT)
 mesh_gallery()
 shallow_water_figure()
+kite_figure()

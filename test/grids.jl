@@ -113,3 +113,30 @@ const GRID_DIR = joinpath(@__DIR__, "..", "grid")
         closed && @test total_area(dm) ≈ 4π
     end
 end
+
+@testset "Kite grids" begin
+    for primal in (create_spherical_mesh(1), create_cubed_sphere_mesh(3), create_hexagon_mesh(1), create_healpix_mesh(2))
+        dm = create_kite_mesh(primal)
+        @test check_plex(dm)
+        @test all(c -> get_cone_size(dm, c) == 4, cell_range(dm))
+        @test num_cells(dm) == sum(get_cone_size(primal, c) for c in cell_range(primal))
+        @test num_vertices(dm) == num_vertices(primal) + num_edges(primal) + num_cells(primal)
+        @test total_area(dm) ≈ 4π
+        # canonical local numbering: vertex 1 primal vertex, vertex 3 center,
+        # edges 1 and 4 halves of primal edges, edges 2 and 3 midpoint–center
+        vtype(v) = get_label_value(dm, "kite_vertex_type", v)
+        etype(e) = get_label_value(dm, "kite_edge_type", e)
+        @test all(cell_range(dm)) do c
+            vertices, edges = get_cell_vertices(dm, c), get_cone(dm, c)
+            vtype.(vertices) == [0, 1, 2, 1] && etype.(edges) == [1, 2, 2, 1]
+        end
+        # every primal edge is split into two half edges; every primal cell has n interior edges
+        @test count(e -> etype(e) == 1, edge_range(dm)) == 2 * num_edges(primal)
+        @test count(e -> etype(e) == 2, edge_range(dm)) == num_edges(dm) - 2 * num_edges(primal)
+        # kites of one dual cell share their primal vertex; their number is the vertex valence
+        for v in vertex_range(primal)
+            kites = get_label_stratum(dm, "kite_dual_cell", vertex_index(primal, v))
+            @test length(kites) == count(in(cell_range(primal)), get_star(primal, v))
+        end
+    end
+end

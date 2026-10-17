@@ -43,7 +43,7 @@ The figures are generated with `julia --project docs/make_figures.jl`.
 | Directory | Module | Contents |
 |---|---|---|
 | `src/Topology` | `Topology` | `Plex` (mesh DAG in CSR form with PETSc orientations), `Section` (dof layout), `closure_dofs` |
-| `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal and HEALPix meshes; ICON and MPAS grid-file readers (primal or dual) |
+| `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal and HEALPix meshes; ICON and MPAS grid-file readers (primal or dual); kite grids |
 | `src/Geometry` | `Geometry` | reference triangle/quadrilateral, reference-to-sphere map, Piola maps, FV metrics |
 | `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, assembly (mass, divergence, Coriolis, load, projection), cached `mass_solver` |
 | `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection |
@@ -99,15 +99,27 @@ s = Section(dm, field(RaviartThomas(1); name="u"), field(Discontinuous(1); name=
 U, H = FESpace(dm, s, "u"), FESpace(dm, s, "h")
 ```
 
+## Kite grids
+
+![Kite grid of a hexagonal mesh with one primal cell and one dual cell highlighted](docs/images/kites.svg)
+
+`create_kite_mesh(primal)` splits every cell of any polygonal mesh (generated,
+ICON or MPAS) into quadrilaterals by joining its center with the edge
+midpoints. The result is an ordinary quad `Plex` with a canonical local
+numbering (vertex 1 the primal vertex, vertex 3 the center) and labels for the
+parent primal cell, the dual cell (primal vertex) and the edge type. This is
+the basis for the staggered kite discretization of the shallow-water
+equations (Knoth, EGU 2026): height broken across primal edges with
+Gauss–Radau nodes, velocity broken-RT on dual cells, vorticity continuous on
+the kites, all with diagonal or block-diagonal mass matrices. That
+discretization is work in progress.
+
 ## Direction
 
 The goal is finite-element modelling of the linear and nonlinear shallow-water
-equations on the sphere, eventually with the kite-grid approach of
-[CGDycore.jl](https://github.com/CliMA/CGDycore.jl/tree/main/src/FEM). A kite
-grid splits every primal polygon into quadrilaterals; it will be built as an
-ordinary quad `Plex` (with labels for parent cells and edge types), so all
-quadrilateral elements above apply to it directly. This is an independent
-implementation, not a wrapper around CGDycore or PETSc.
+equations on the sphere with the kite-grid approach of
+[CGDycore.jl](https://github.com/CliMA/CGDycore.jl/tree/main/src/FEM). This is
+an independent implementation, not a wrapper around CGDycore or PETSc.
 
 ## Run
 
