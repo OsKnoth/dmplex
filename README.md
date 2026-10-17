@@ -43,12 +43,12 @@ The figures are generated with `julia --project docs/make_figures.jl`.
 | Directory | Module | Contents |
 |---|---|---|
 | `src/Topology` | `Topology` | `Plex` (mesh DAG in CSR form with PETSc orientations), `Section` (dof layout), `closure_dofs` |
-| `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal and HEALPix meshes; ICON and MPAS grid-file readers (primal or dual); kite grids |
+| `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal, HEALPix and periodic plane meshes; ICON and MPAS grid-file readers (primal or dual); kite grids |
 | `src/Geometry` | `Geometry` | reference triangle/quadrilateral, reference-to-sphere map, Piola maps, FV metrics |
 | `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, assembly (mass, divergence, Coriolis, load, projection), cached `mass_solver` |
 | `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection |
 | `src/TimeSteppers` | `TimeSteppers` | explicit Euler, classical RK4 |
-| `src/ShallowWater` | `ShallowWater` | linear (RT_k × DG_k) and nonlinear vector-invariant (RT_k × DG_k × CG_{k+1}) rotating shallow water, mass and energy conserving |
+| `src/ShallowWater` | `ShallowWater` | linear and nonlinear rotating shallow water: mixed RT_k × DG_k (× CG_{k+1}) and the staggered kite method, mass and energy conserving |
 | `src/Outputs` | `Outputs` | VTKHDF output for ParaView |
 | `docs` | | figure generation (`make_figures.jl`, plain SVG) |
 
@@ -111,8 +111,20 @@ parent primal cell, the dual cell (primal vertex) and the edge type. This is
 the basis for the staggered kite discretization of the shallow-water
 equations (Knoth, EGU 2026): height broken across primal edges with
 Gauss–Radau nodes, velocity broken-RT on dual cells, vorticity continuous on
-the kites, all with diagonal or block-diagonal mass matrices. That
-discretization is work in progress.
+the kites, all with diagonal or block-diagonal mass matrices.
+
+`NonlinearKiteShallowWater(primal, 1)` implements it with RT1 velocity, Q2
+height and CG2 vorticity. By default the mass flux is projected into the
+velocity space and the vorticity term uses the potential vorticity, which
+conserves mass and energy exactly; the poster form is available with
+`flux=:pointwise, vorticity=:absolute`. Metric terms are precomputed at one
+3 × 3 quadrature rule per kite and a time step does not allocate.
+
+![Galewsky jet after 6 days on the kite grid of a hexagonal mesh](docs/images/galewsky.svg)
+
+The same model runs on doubly periodic planes (`create_periodic_plane`):
+
+![Bickley jet vortex street on a periodic plane](docs/images/bickley.svg)
 
 ## Direction
 
@@ -128,4 +140,6 @@ julia --project -e 'using Pkg; Pkg.test()'
 julia --project examples/advection.jl 4 cubed            # FV upwind advection, writes VTKHDF
 julia --project examples/linear_shallow_water.jl 2 cubed 8   # RT2 × DG2 linear shallow water
 julia --project examples/nonlinear_shallow_water.jl 1 healpix 8   # Williamson TC2, also with an ICON/MPAS file
+julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days
+julia --project docs/bickley_figure.jl quadrilateral 32 40   # Bickley jet on a periodic plane
 ```
