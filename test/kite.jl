@@ -94,3 +94,35 @@ end
     dh = (y - y0)[height_dofs(m)]
     @test sqrt(dot(dh, m.Mh * dh)) < 5e-3
 end
+
+@testset "Nonlinear kite shallow water: $name" for (name, kw) in (("poster form", (flux=:pointwise, vorticity=:absolute, height_order=1)),
+                                                                 ("projected flux", (vorticity=:absolute,)),
+                                                                 ("energy conserving (default)", (;)))
+    u0 = 0.2
+    velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
+    height(x) = 1 - (u0 + u0^2 / 2) * x[3]^2  # Williamson test case 2, a = Ω = g = 1
+    for primal in (create_hexagon_mesh(1), create_cubed_sphere_mesh(3))
+        m = NonlinearKiteShallowWater(primal, 1; kw...)
+        Random.seed!(9)
+        y = initial_state(m, velocity, height) .+ 1e-3 .* randn(num_dofs(m.U) + num_dofs(m.H))
+        dy = tendency!(similar(y), y, m)
+        u, h = y[velocity_dofs(m)], y[height_dofs(m)]
+        mass_rate = sum(m.Mh * dy[height_dofs(m)])
+        if m.flux == :projected
+            @test abs(mass_rate) < 1e-13
+            _, K, F = diagnostics(m, u, h)
+            dEdt = dot(m.Mu * F, dy[velocity_dofs(m)]) + dot(m.Mh * (K + m.gravity * h), dy[height_dofs(m)])
+            m.vorticity == :potential && @test abs(dEdt) < 1e-12 * norm(dy)
+        end
+
+        y = initial_state(m, velocity, height)
+        y0 = copy(y)
+        cache = SSPRK3Cache(y)
+        dt = 0.02 * sqrt(4π / num_cells(m.kites))
+        for _ in 1:10
+            ssprk3_step!(y, dt, tendency!, cache, m)
+        end
+        dh = (y - y0)[height_dofs(m)]
+        @test sqrt(dot(dh, m.Mh * dh)) < 5e-3
+    end
+end
