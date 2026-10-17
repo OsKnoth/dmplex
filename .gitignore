@@ -4,3 +4,9 @@ Manifest.toml
 *.vtu
 *.hdf
 grid/
+docs/notes/*.aux
+docs/notes/*.log
+docs/notes/*.fls
+docs/notes/*.fdb_latexmk
+docs/notes/*.out
+docs/notes/*.toc

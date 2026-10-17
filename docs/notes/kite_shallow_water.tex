@@ -1,0 +1,457 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bu}{\mathbf{u}}
+\newcommand{\bv}{\mathbf{v}}
+\newcommand{\bF}{\mathbf{F}}
+\newcommand{\bn}{\mathbf{n}}
+\newcommand{\rhat}{\hat{\mathbf{r}}}
+\newcommand{\Pc}{\mathcal{P}}
+\newcommand{\Pt}{\widetilde{\mathcal{P}}}
+\newcommand{\Kc}{\mathcal{K}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newtheorem{proposition}{Proposition}
+
+\title{Staggered kite finite elements for the shallow-water equations\\[2pt]
+\large Notes on the implementation in \code{dmplex.jl}}
+\author{Oswald Knoth}
+\date{Working notes, \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+These notes document the staggered kite discretization of the rotating
+shallow-water equations (EGU 2026 poster) as implemented in the Julia package
+\code{dmplex.jl}: the kite grid and its cell centers, the finite-element spaces
+and their degrees of freedom, the discrete operators, the conservation
+properties of the linear and nonlinear schemes, and numerical results. Open
+questions --- the lowest-order pairing, other velocity elements, the pair of
+Wess et al.\ with Coriolis, damping and parallelization --- are collected at
+the end.
+\end{abstract}
+
+\tableofcontents
+
+%------------------------------------------------------------------------------
+\section{Equations}
+
+On a closed surface $\Omega$ (the unit sphere or a doubly periodic plane) with
+outward unit normal $\rhat$, the rotating shallow-water equations in
+vector-invariant form are
+\begin{align}
+  \partial_t \bu + q\,\rhat\times\bF + \nabla\bigl(K + g h\bigr) &= 0, &
+  \partial_t h + \nabla\cdot\bF &= 0,
+\end{align}
+with mass flux $\bF = h\bu$, kinetic energy $K = \tfrac12|\bu|^2$, absolute
+vorticity $\omega = \zeta + f$, $\zeta = \rhat\cdot\nabla\times\bu$, and
+potential vorticity $q = \omega/h$ (so $q\,\rhat\times\bF = \omega\,\rhat\times\bu$).
+The equations conserve mass $\int h$ and energy
+$E = \int \tfrac12 h|\bu|^2 + \tfrac12 g h^2$. For the sphere we use units with
+radius $a = 1$ and rotation rate $\Omega = 1$, so $f = 2z$.
+
+%------------------------------------------------------------------------------
+\section{The kite grid}
+
+\paragraph{Construction.} Let $\Pc$ be a polygonal primal mesh (triangles,
+quadrilaterals, the hexagons and pentagons of a Voronoi mesh). Every cell
+$P\in\Pc$ with vertices $w_1,\dots,w_n$ (counter-clockwise seen from outside)
+is split into $n$ quadrilaterals (\emph{kites})
+\[
+  K_i = (w_i,\; m_i,\; c_P,\; m_{i-1}),\qquad i = 1,\dots,n,
+\]
+where $c_P$ is the cell center and $m_i$ a point on the primal edge
+$(w_i,w_{i+1})$. The kites sharing a primal vertex $w$ form the dual cell
+$\widetilde P_w$. In \code{create\_kite\_mesh} every kite has the canonical
+local numbering: vertex~1 is the primal vertex, vertex~3 the center; local
+edges~1 and~4 are halves of primal edges (\emph{half edges}), local edges~2
+and~3 join an edge point to the center (\emph{interior edges}); the interior
+edges of $P$ are exactly the boundaries of the dual cells. Labels record the
+parent cell, the dual cell and the vertex and edge types.
+
+\paragraph{Cell centers.} The center is chosen so that it coincides with the
+vertex of the orthogonal dual mesh whenever there is one
+(\code{cell\_centers}):
+\begin{itemize}
+\item triangles: the circumcenter (vertex of the Voronoi dual);
+\item Voronoi meshes: the generators. Every Voronoi edge with great-circle
+  normal $\bn_e = a\times b$ is the perpendicular bisector of the generators
+  $g_i, g_j$ of its two cells,
+  \begin{equation}
+    g_i - g_j \parallel \bn_e, \qquad \bn_e\cdot(g_i + g_j) = 0,
+  \end{equation}
+  which is a homogeneous linear system for all generators. Its least-squares
+  null vector is computed by sparse inverse iteration. For MPAS meshes this
+  recovers \code{xCell} to $10^{-14}$, for the ICON dual \code{vlon/vlat}
+  to $10^{-14}$;
+\item other meshes (cubed sphere, HEALPix, planes): the centroid.
+\end{itemize}
+On meshes with an orthogonal dual, $m_i$ is the crossing of the primal edge with
+the dual edge $(c_P, c_{P'})$, so the interior kite edges lie on the dual edges
+and each dual cell is exactly the dual polygon (the Delaunay triangle of an MPAS
+mesh); otherwise $m_i$ is the edge midpoint. The number of kites equals
+$\sum_P n_P$, e.g.\ $245\,760$ for the MPAS mesh \code{x1.40962}.
+
+%------------------------------------------------------------------------------
+\section{Finite-element spaces}
+
+All kite spaces live on the reference square $[-1,1]^2$ with the primal vertex
+at $(-1,-1)$ and the center at $(1,1)$. The reference map is the bilinear
+interpolant of the four kite vertices, radially projected onto the sphere
+(curved elements); a chordal variant without projection is available.
+
+\paragraph{Height: \code{KiteRadau(p)}.} $Q_p$ on every kite with nodes at the
+tensor Gauss--Radau points $r_0<\dots<r_p = 1$ that include the end point at the
+center side. Nodes lie in the kite interior ($p^2$), on the interior edges
+($p$ each) and at the center (one), never on primal edges. Hence $h$ is
+continuous inside a primal cell and broken across primal edges,
+\[
+  V_h = \{ h \in L^2(\Omega) : h|_P \in H^1(P)\ \forall P\in\Pc,\ h|_K\in Q_p \},
+\]
+with $1 + n_P(p + p^2)$ degrees of freedom per primal cell. With the Radau nodes
+as quadrature the mass matrix is diagonal; the rule is exact for degree $2p$
+per direction, so for $p\ge1$ the lumped mass integrates the bilinear
+area element exactly and is consistent. For $p = 0$ the single Radau node sits
+at the center corner and $4\,\det J(c)$ is an $O(1)$ wrong kite area (kites do
+not become parallelograms under refinement); since $h$ is then constant per
+primal cell the exact mass matrix (the cell area) is used instead.
+
+\paragraph{Velocity: \code{KiteBrokenRT(k)}.} $\mathrm{RTCF}_k$ on every kite
+with normal continuity across half edges (inside a dual cell) and none across
+interior edges (the dual cell boundaries):
+\[
+  V_u = \{ \bu \in L^2(\Omega)^2 : \bu|_{\widetilde P} \in H(\mathrm{div},\widetilde P)
+  \ \forall \widetilde P\in\Pt,\ \bu|_K\in\mathrm{RTCF}_k \}.
+\]
+Edge degrees of freedom are normal components at the $k+1$ Gauss points; the
+degrees of freedom of the two interior edges are stored with the kite itself.
+The exact mass matrix is block diagonal with one block per dual cell (9 for
+RT0 on a triangular dual cell, 12 for a quadrilateral one, 30 for RT1 on a
+triangular dual cell).
+
+\paragraph{Vorticity.} Continuous $Q_{k+1}$ (\code{Lagrange(k+1)}) on the kites
+with Gauss--Lobatto nodes and lumped, diagonal mass.
+
+\paragraph{Implementation.} A \code{Section} assigns degrees of freedom to mesh
+points (vertices, edges, cells). Layouts that depend on point labels extend
+\code{num\_nodes(layout, dm, p)}, and an element may store dofs on another point
+than the one they belong to geometrically (the interior-edge RT dofs on the
+kite). The closure of a kite then delivers the global indices, with node order
+reversed and signs flipped on reversed edges, so the spaces are conforming
+where intended; the tests check the continuity pattern across both edge types
+to machine precision.
+
+%------------------------------------------------------------------------------
+\section{Discrete operators}
+
+With the contravariant Piola map
+$\bv = J\hat\bv/\det J$ one has $\bv\cdot\nabla\eta\,dA = \hat\bv\cdot\hat\nabla\hat\eta\,d\xi$,
+$(\nabla\cdot\bv)\,\eta\,dA = (\hat\nabla\cdot\hat\bv)\,\hat\eta\,d\xi$ and
+$\bv\cdot\bn\,ds = \hat\bv\cdot\hat\nu\,dt$ with the scaled reference edge normal
+$\hat\nu$; both operators below are therefore independent of the metric.
+
+\paragraph{Divergence.} For $\eta\in V_h$, $\bF \in V_u$,
+\begin{equation}
+  D(\eta;\bF) = \sum_{K} \int_K \bF\cdot\nabla\eta
+  - \sum_K \sum_{e\subset\partial K\cap\partial\Pc} \int_e \eta_K\,\bF\cdot\bn_K,
+\end{equation}
+summed over the half edges of each kite with the trace of $\eta$ from inside
+$K$; as a matrix $B_{ij} = D(\eta_i;\bv_j)$.
+
+\paragraph{Gradient.} For $p\in V_h$, $\bv\in V_u$,
+\begin{equation}
+  G(p;\bv) = \sum_K \int_K p\,\nabla\cdot\bv
+  - \sum_K \sum_{e\subset\partial K,\ e\ \text{interior}} \int_e p\,\bv_K\cdot\bn_K,
+\end{equation}
+where $p$ is single valued on interior edges.
+
+\begin{proposition}
+$G(p;\bv) = -D(p;\bv)$, i.e.\ $G = -B^T$, and $\mathbf 1^T B = 0$.
+\end{proposition}
+\begin{proof}
+Integrating by parts on each kite,
+$\int_K p\,\nabla\cdot\bv = -\int_K \nabla p\cdot\bv + \int_{\partial K} p\,\bv\cdot\bn_K$.
+The boundary integral splits into half edges and interior edges; the interior
+edges cancel against the face term of $G$, leaving
+$-\sum_K\int_K\nabla p\cdot\bv + \sum_K\sum_{\text{half}}\int p_K\,\bv\cdot\bn_K = -D(p;\bv)$.
+For $\eta \equiv 1\in V_h$, $D(1;\bv) = -\sum_K\sum_{\text{half}}\int\bv\cdot\bn_K = 0$,
+since $\bv\cdot\bn$ is continuous across half edges and both sides appear with
+opposite normals.
+\end{proof}
+Both matrices are assembled independently in the code; the test suite checks
+$\|G + B^T\|_\infty < 10^{-12}$.
+
+\paragraph{Vorticity, kinetic energy, Coriolis.}
+$\langle\zeta,\gamma\rangle = -\int \bu\cdot(\rhat\times\nabla\gamma)$ for
+$\gamma\in Q_{k+1}$ (lumped mass),
+$\langle K,\eta\rangle = \int\tfrac12|\bu|^2\eta$ (lumped mass of $V_h$), and
+$C_{ij} = \int f\,\bv_i\cdot(\rhat\times\bv_j)$, which is antisymmetric. The
+surface normal $\rhat$ is computed from the Jacobian,
+$\rhat = J_1\times J_2/\det J$, which is $x/|x|$ on curved elements and the
+element normal on chordal ones.
+
+%------------------------------------------------------------------------------
+\section{Semi-discrete schemes and conservation}
+
+\paragraph{Linear.}
+\begin{equation}
+  M_h\dot h = H\,B\,\bu, \qquad M_u\dot\bu = -C\bu - g\,B^T h.
+\end{equation}
+Mass $\mathbf 1^T M_h h$ is conserved because $\mathbf 1^T B = 0$, energy
+$\tfrac12 H\bu^T M_u\bu + \tfrac12 g h^T M_h h$ because $C$ is antisymmetric
+and the gradient is the negative adjoint of the divergence.
+
+\paragraph{Nonlinear, poster form.}
+\begin{align}
+  \langle\dot h,\eta\rangle &= \sum_K\int_K h\bu\cdot\nabla\eta
+     - \sum_K\sum_{\text{half}}\int \eta_K\,h_K\,\bu\cdot\bn_K,\\
+  \int\dot\bu\cdot\bv &= -\int(\zeta+f)\,(\rhat\times\bu)\cdot\bv + G(gh+K;\bv),
+\end{align}
+with $h_K$ the trace from inside the kite. On primal edges $h$ is two valued, so
+the flux $h_K\,\bu\cdot\bn$ is not single valued: neither mass nor energy is
+conserved exactly.
+
+\paragraph{Nonlinear, conservative variant (default).} Project the mass flux,
+$\bF = \Pi_{V_u}(h\bu)$, i.e.\ $M_u\bF = \bigl(\int h\bu\cdot\bv_i\bigr)_i$ (one solve
+with the block-diagonal velocity mass), and use the potential vorticity
+$q = (\zeta+f)/h$ at the quadrature points:
+\begin{align}
+  M_h\dot h &= B\bF, &
+  \int\dot\bu\cdot\bv &= -\int q\,(\rhat\times\bF)\cdot\bv - B^T(gh+K).
+\end{align}
+\begin{proposition}
+The conservative variant conserves mass and the discrete energy
+$E_h = \int\tfrac12 h|\bu|^2 + \tfrac12 g\,h^T M_h h$ exactly.
+\end{proposition}
+\begin{proof}
+Mass: $\mathbf 1^T M_h\dot h = \mathbf 1^T B\bF = 0$. Energy: with the same
+quadrature in $E_h$ and in the right-hand sides,
+$\partial E_h/\partial\bu = M_u\bF$ and
+$\partial E_h/\partial h = M_h(K + g h)$. Hence
+$\dot E_h = \bF^T M_u\dot\bu + (K+gh)^T M_h\dot h
+ = -\int q\,(\rhat\times\bF)\cdot\bF - \bF^T B^T(gh+K) + (gh+K)^T B\bF = 0$,
+since $(\rhat\times\bF)\cdot\bF = 0$ pointwise.
+\end{proof}
+This is the framework of McRae and Cotter (2014) transferred to the kite
+spaces; all mass matrices stay diagonal or block diagonal. The test suite
+checks $\dot E_h$ and $\mathbf 1^T M_h\dot h$ to round-off on hexagonal,
+triangular and quadrilateral kites and on periodic planes.
+
+%------------------------------------------------------------------------------
+\section{Numerical results}
+
+Williamson test case~2 (steady geostrophic flow, $u_0 = 0.2$, $g = 1$,
+$T = 1$) measures $\|h(T)-h(0)\|_{M_h}$; kites of the hexagonal (Voronoi)
+meshes \code{hex(r)} have 960, 3840 and 15360 kites for $r = 2,3,4$.
+
+\subsection{Lowest order}
+$L^2$ errors of the discrete gradient $M_u^{-1}B^T\Pi p$ and divergence
+$M_h^{-1}B\,\Pi\bu$ against the projections of the exact operators for smooth
+$p$ and $\bu$ (hexagon kites with 960, 3840, 15360 kites; cubed-sphere kites with
+384, 1536, 6144 kites):
+
+\begin{center}
+\begin{tabular}{llccc}
+\toprule
+pairing & mesh & gradient error & divergence error \\
+\midrule
+$Q_0\times\mathrm{RT}_0$ & hex  & 7.4, 7.6, 7.7 & 0.017, 0.0069, 0.0030 \\
+                         & cube & 5.6, 5.8, 5.9 & 0.065, 0.076, 0.067 \\
+$Q_1\times\mathrm{RT}_0$ & hex  & 0.10, 0.052, 0.026 & 0.23, 0.21, 0.21 \\
+                         & cube & 0.19, 0.094, 0.047 & 0.40, 0.36, 0.31 \\
+$Q_1\times\mathrm{RT}_1$ & hex  & 0.21, 0.11, 0.052 & 0.016, 0.0060, 0.0027 \\
+                         & cube & 0.31, 0.15, 0.077 & 0.044, 0.022, 0.012 \\
+$Q_2\times\mathrm{RT}_1$ & hex  & 0.0038, 0.00091, 0.00023 & 0.088, 0.045, 0.023 \\
+                         & cube & 0.0091, 0.0023, 0.00057 & 0.059, 0.035, 0.019 \\
+\bottomrule
+\end{tabular}
+\end{center}
+At lowest order one of the two operators is inconsistent. With $Q_0$ heights the
+pressure is constant per primal cell and only sets the half-edge normal
+components of the gradient; the kite-local interior-edge velocity degrees of
+freedom are not controlled by the pressure. With $Q_1\times\mathrm{RT}_0$ the
+discrete divergence of the broken RT0 field tested with $Q_1$ does not converge.
+From $\mathrm{RT}_1$ on both operators converge. This agrees with the
+experience with CGDycore that the lowest order does not work.
+
+\subsection{Linear model}
+$Q_1\times\mathrm{RT}_1$, RK4, geostrophic steady state:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+primal mesh & coarse & medium & fine \\
+\midrule
+hexagons (162, 642, 2562 cells) & $3.09\cdot10^{-3}$ & $7.72\cdot10^{-4}$ & $1.94\cdot10^{-4}$ \\
+triangles (80, 320, 1280)       & $9.67\cdot10^{-3}$ & $2.46\cdot10^{-3}$ & $6.16\cdot10^{-4}$ \\
+cubed sphere (96, 384, 1536)    & $7.88\cdot10^{-3}$ & $1.94\cdot10^{-3}$ & $4.88\cdot10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Second order on all meshes; mass to $10^{-15}$, energy up to the RK4 error.
+
+\subsection{Nonlinear model}
+Williamson test case~2, RT1 velocity, CG2 vorticity, SSP-RK3:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+variant & $h$ & hex(2) & hex(3) & mass / energy \\
+\midrule
+poster form          & $Q_1$ & $2.05\cdot10^{-3}$ & $8.76\cdot10^{-4}$ & $\dot M\approx10^{-4}$, $\Delta E/E\approx10^{-4}$ \\
+poster form          & $Q_2$ & $5.9\cdot10^{-4}$  & $5.2\cdot10^{-3}$ (grows) & not conserved \\
+projected flux       & $Q_2$ & $3.60\cdot10^{-4}$ & $8.79\cdot10^{-5}$ & exact / $10^{-12}$ \\
+projected flux + $q$ & $Q_2$ & $3.60\cdot10^{-4}$ & $8.80\cdot10^{-5}$ & exact / exact \\
+\bottomrule
+\end{tabular}
+\end{center}
+The pair RT1 / $Q_2$ / CG2 is the most accurate and, with the projected flux,
+second-order convergent. With the poster's own-trace flux, $Q_2$ heights grew
+on the finer mesh; nothing damps the jumps of $h$ across primal edges there.
+
+\paragraph{Quadrature.} All nonlinear terms use one Gauss rule per kite with
+precomputed metric terms ($J/\det J$, $dA$, $\rhat$, $f$). Errors on hex(2) /
+hex(3) and cost per SSP-RK3 step on hex(3):
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+rule & hex(2) & hex(3) & ms/step \\
+\midrule
+$3\times3$ & $3.606\cdot10^{-4}$ & $8.765\cdot10^{-5}$ & 42 \\
+$4\times4$ & $3.601\cdot10^{-4}$ & $8.796\cdot10^{-5}$ & 53 \\
+$5\times5$ & $3.601\cdot10^{-4}$ & $8.796\cdot10^{-5}$ & 68 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The minimal rule ($3\times3$ for RT1) is the default; energy conservation is an
+algebraic property and holds for every rule. A time step does not allocate.
+
+\paragraph{Curved versus chordal elements.} With precomputed metric terms both
+cost the same; chordal (flat bilinear) kites give $9.10\cdot10^{-4}$ and
+$2.50\cdot10^{-4}$ (rate 1.87) instead of $3.60\cdot10^{-4}$ and
+$8.80\cdot10^{-5}$ (rate 2.03). Curved elements are the default.
+
+\subsection{Kite method versus the standard mixed setup on the kite quads}
+The kite grid is an ordinary quadrilateral mesh, so the compatible pair
+RT1 $\times$ DG1 $\times$ CG2 of McRae and Cotter (global, non-diagonal mass
+matrices, \code{NonlinearShallowWater}) runs on it unchanged. Williamson test
+case~2, SSP-RK3, same time step:
+\begin{center}
+\begin{tabular}{llccccc}
+\toprule
+mesh & method & $u$ dofs & $h$ dofs & error & mass solve & ms/step \\
+\midrule
+hex(2) & kite RT1/$Q_2$/CG2   &  9600 &  5922 & $3.61\cdot10^{-4}$ & blocks (30) & 6.9 \\
+       & mixed RT1/DG1/CG2    &  7680 &  3840 & $1.94\cdot10^{-4}$ & Cholesky    & 20.0 \\
+hex(3) & kite RT1/$Q_2$/CG2   & 38400 & 23682 & $8.77\cdot10^{-5}$ & blocks (30) & 38.4 \\
+       & mixed RT1/DG1/CG2    & 30720 & 15360 & $4.72\cdot10^{-5}$ & Cholesky    & 98.5 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Both are second order and conserve energy; the mixed setup is about $1.9\times$
+more accurate with fewer degrees of freedom. The timings are not a fair
+comparison of the methods: the mixed model in \code{dmplex.jl} still uses the
+older allocating kernels, and its global mass solves (sparse Cholesky) are the
+part that the kite method replaces by local block inverses, which matters most
+for explicit time stepping, on GPUs and in parallel.
+
+
+\subsection{Galewsky jet}
+2562 hexagons, 15360 kites ($\approx 182$\,km), $\Delta t = 66.9$\,s, 6 days:
+the jet becomes unstable after day~3 and rolls up by day~6; mass changes by
+$6\cdot10^{-12}$, energy by $1.2\cdot10^{-8}$ (time integration only). Grid-scale
+noise is visible near the vortices (no dissipation).
+
+\subsection{Bickley jet}
+Doubly periodic $[0,4\pi)^2$, $u = \mathrm{sech}^2(y-2\pi)$, no rotation, Froude
+number 0.2, perturbation in wavenumber~1; $32\times32$ quadrilaterals, 4096 kites,
+$t = 40$: vortex street with two cat's-eye pairs; mass $8\cdot10^{-11}$, energy
+$8\cdot10^{-10}$.
+
+%------------------------------------------------------------------------------
+\section{Open questions and proposals}
+
+\subsection{Other velocity elements}
+\begin{itemize}
+\item \emph{Broken BDM.} $\mathrm{BDM}_1$ on the quadrilateral has 8 instead of
+  12 degrees of freedom, with the same normal-trace space as RT1; the broken
+  version on dual cells keeps the block-diagonal mass. The generic element
+  construction (prime basis plus dual functionals) needs only the BDM prime
+  space $[P_k]^2\oplus\mathrm{span}\{\mathrm{curl}(x^{k+1}y),\mathrm{curl}(xy^{k+1})\}$.
+\item \emph{Broken N\'ed\'elec / the dual-cell pair of Wess et al.} See below.
+\end{itemize}
+
+\subsection{The pair of Wess et al.\ with Coriolis}
+The dual-cell method with mass lumping (Wess et al.\ 2024) works for linear
+acoustics on the sphere but, in a first attempt, not with Coriolis or in the
+nonlinear case. A plausible reason: for acoustics only the pair
+(gradient, divergence) has to be compatible, $G = -D^T$. Coriolis adds the map
+$\bu\mapsto\rhat\times\bu$, which turns a field with continuous normal component
+into one with continuous tangential component. If the velocity space carries
+only one kind of continuity across the edges where the dual cells meet, the
+Coriolis form is still antisymmetric (energy neutral), but geostrophic balance
+$f\,\rhat\times\bu = -\nabla(gh)$ has to hold discretely for a consistent steady
+state: the range of $M_u^{-1}C$ restricted to balanced states must lie in the
+range of $M_u^{-1}B^T$. With lumped or broken spaces the dimensions of these
+ranges need not match, which gives inconsistent or spurious geostrophic modes
+(the analogue of the TRiSK $W$ operator on C grids). The kite RT space works
+because it is broken only across interior edges and rich enough there (TC2
+converges at second order). Proposal: implement the Wess pair in
+\code{dmplex.jl} and run the same diagnostics (operator consistency, geostrophic
+steady state, $f$-plane inertia-gravity modes) to locate the failure.
+
+\subsection{Damping}
+For comparison, Gusto's standard shallow-water model (\code{SIQNModel}) obtains
+its dissipation implicitly from upwinded DG transport (\code{DGUpwind}) of the
+depth and of the velocity in vector-invariant form, with SSP-RK3 transport inside
+a semi-implicit quasi-Newton step; interior-penalty diffusion and SUPG are
+optional. Options for the kite method, in order of preference:
+\begin{enumerate}
+\item \emph{APVM} (anticipated potential vorticity): replace $q$ by
+  $q - \tau\,\bu\cdot\nabla q$, $\tau = \alpha\Delta t$, in the vorticity term.
+  The term stays of the form $q^*\,\rhat\times\bF$, so energy is still conserved
+  exactly while potential enstrophy is dissipated (McRae and Cotter 2014).
+  $\nabla q$ is available from $\nabla\zeta$ (CG2) and $\nabla h$ inside the kite.
+\item \emph{Upwind height flux on primal edges}, where $h$ jumps: replace the
+  own-trace $h_K$ by the upwind trace in the poster form. The flux is single
+  valued, so mass is conserved, and energy is dissipated by the jumps of $h$
+  (the analogue of Gusto's upwinded depth transport).
+\item \emph{Biharmonic hyperviscosity} on the velocity,
+  $\Delta\bu = \nabla\delta - \rhat\times\nabla\zeta$ with the discrete
+  divergence $\delta = M_h^{-1}B\bu$ and vorticity $\zeta$, applied twice,
+  $\nu_4\propto\Delta x^4/\tau_4$; as in MPAS and CGDycore, mainly for comparison.
+\end{enumerate}
+
+\subsection{Comparison with the standard mixed setup on the kite quads}
+The kite grid is an ordinary quadrilateral mesh, so the standard compatible pair
+RT$_k\times$DG$_k\times$CG$_{k+1}$ (\code{NonlinearShallowWater} on the kite
+\code{Plex}) can be run on it directly; its mass matrices are not block
+diagonal. See the results section.
+
+\subsection{Parallelization: coloured scatter}
+The kernels loop over kites, gather degrees of freedom, evaluate at quadrature
+points and scatter-add into global vectors. With threads (or on a GPU) two kites
+that share a degree of freedom must not add to it at the same time. Three
+standard remedies:
+\begin{itemize}
+\item \emph{colouring}: colour the kites so that kites of one colour share no
+  degrees of freedom (a greedy colouring of the kite adjacency graph needs a
+  handful of colours); colours are processed one after the other, the kites of
+  one colour in parallel, without atomics and deterministically;
+\item \emph{atomic adds} (as in CGDycore's KernelAbstractions kernels with
+  \code{@atomic}): simplest on GPUs, but the summation order and therefore the
+  round-off depend on the scheduling;
+\item \emph{owner-computes / gather}: loop over degrees of freedom and gather
+  contributions from the adjacent kites (needs the dof-to-kite incidence).
+\end{itemize}
+For MPI the natural partition is by primal cells; dual cells crossing a
+partition boundary need a halo for the block-diagonal velocity mass. The labels
+of the kite grid provide this information.
+
+\end{document}
