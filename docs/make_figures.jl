@@ -35,7 +35,7 @@ function cell_outline(dm, cell; segments=4)
 end
 
 "Painter's order: cells facing the viewer, back to front."
-function visible_cells(dm, view)
+function visible_cells(dm, view=VIEW)
     depth = Dict(c => dot(normalize(sum(get_coordinates(dm, v) for v in get_cell_vertices(dm, c))), view)
                  for c in cell_range(dm))
     return sort([c for c in cell_range(dm) if depth[c] > -0.2]; by=c -> depth[c])
@@ -152,12 +152,12 @@ function subcells(dm, cell, m)
 end
 
 "Draw a scalar field `value(cell, ξ, x)` on the visible hemisphere, painted back to front."
-function field_globe(io, dm, value, cx, cy, radius, color; m=2)
-    basis = screen_basis(VIEW)
+function field_globe(io, dm, value, cx, cy, radius, color; m=2, view=VIEW)
+    basis = screen_basis(view)
     pieces = Tuple{Float64, Vector{SVector{3, Float64}}, String}[]
     for c in cell_range(dm), (points, ξ) in subcells(dm, c, m)
         center = normalize(sum(points))
-        depth = dot(center, VIEW)
+        depth = dot(center, view)
         depth > -0.1 && push!(pieces, (depth, points, color(value(c, ξ, center))))
     end
     for (_, points, fill) in sort!(pieces; by=first)
@@ -260,7 +260,9 @@ function kite_figure()
     end
 end
 
-mkpath(OUT)
-mesh_gallery()
-shallow_water_figure()
-kite_figure()
+if abspath(PROGRAM_FILE) == @__FILE__
+    mkpath(OUT)
+    mesh_gallery()
+    shallow_water_figure()
+    kite_figure()
+end
