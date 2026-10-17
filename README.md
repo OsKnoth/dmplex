@@ -11,9 +11,10 @@ directly in Julia, without calling PETSc.
 | `src/Topology` | `Topology` | `Plex` (mesh DAG in CSR form with PETSc orientations), `Section` (dof layout), `closure_dofs` |
 | `src/Grids` | `Grids` | icosahedral, cubed-sphere and hexagonal meshes of the unit sphere |
 | `src/Geometry` | `Geometry` | reference triangle/quadrilateral, reference-to-sphere map, Piola maps, FV metrics |
-| `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, mass assembly |
+| `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, assembly (mass, divergence, Coriolis, load, projection) |
 | `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection |
-| `src/TimeSteppers` | `TimeSteppers` | explicit Euler |
+| `src/TimeSteppers` | `TimeSteppers` | explicit Euler, classical RK4 |
+| `src/ShallowWater` | `ShallowWater` | linear rotating shallow water in RT_k × DG_k (mass and energy conserving) |
 | `src/Outputs` | `Outputs` | VTKHDF output for ParaView |
 
 ## Mesh topology
@@ -63,5 +64,6 @@ implementation, not a wrapper around CGDycore or PETSc.
 
 ```sh
 julia --project -e 'using Pkg; Pkg.test()'
-julia --project examples/advection.jl 4 cubed   # FV upwind advection, writes VTKHDF
+julia --project examples/advection.jl 4 cubed            # FV upwind advection, writes VTKHDF
+julia --project examples/linear_shallow_water.jl 2 cubed 8   # RT2 × DG2 linear shallow water
 ```

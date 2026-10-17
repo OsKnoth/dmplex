@@ -49,3 +49,120 @@ function assemble_mass(V::FESpace; degree::Integer=2 * V.family.order + 4)
     end
     return sparse(rows, cols, vals, num_dofs(V), num_dofs(V))
 end
+
+"""
+    cell_basis(V, cell, rule, values, gradients)
+
+Physical basis of `V` on `cell` at the points of `rule`, with the orientation
+signs of `cell_dofs` already applied. Returns a named tuple with the global
+`indices`, physical `points`, area weights `dA = w detJ`, the basis values
+`φ[dof, point]` (numbers for H1/L2, Cartesian vectors for H(div)/H(curl)) and,
+for H(div), the surface divergence `div[dof, point]`.
+"""
+function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gradients)
+    V.ncomp == 1 || throw(ArgumentError("cell_basis supports scalar or intrinsically vector spaces only"))
+    cmap = CellMap(V.dm, cell)
+    indices, signs = cell_dofs(V, cell)
+    n, nq = length(indices), length(rule.points)
+    space = function_space(V)
+    points = Vector{SVector{3, Float64}}(undef, nq)
+    dA = zeros(nq)
+    φ = space in (:H1, :L2) ? zeros(n, nq) : Matrix{SVector{3, Float64}}(undef, n, nq)
+    div = zeros(n, space == :Hdiv ? nq : 0)
+    for (q, (ξ, w)) in enumerate(zip(rule.points, rule.weights))
+        x, J, detJ = map_point(cmap, ξ)
+        points[q] = x
+        dA[q] = w * detJ
+        for a in 1:n
+            if space in (:H1, :L2)
+                φ[a, q] = values[a, 1, q]
+                continue
+            end
+            v̂ = SVector(values[a, 1, q], values[a, 2, q])
+            if space == :Hdiv
+                φ[a, q] = signs[a] * piola_hdiv(J, detJ, v̂)
+                div[a, q] = signs[a] * (gradients[a, 1, 1, q] + gradients[a, 2, 2, q]) / detJ
+            else
+                φ[a, q] = signs[a] * piola_hcurl(J, v̂)
+            end
+        end
+    end
+    return (; indices, points, dA, φ, div)
+end
+
+"Tabulated reference basis of `V` for the quadrature rule of each cell shape."
+struct Tabulation
+    space::FESpace
+    degree::Int
+    tables::Dict{Int, Tuple{QuadratureRule, Array{Float64, 3}, Array{Float64, 4}}}
+end
+
+Tabulation(V::FESpace, degree::Integer) = Tabulation(V, Int(degree), Dict())
+
+function cell_basis(T::Tabulation, cell::Integer)
+    V = T.space
+    rule, values, gradients = get!(T.tables, get_cone_size(V.dm, cell)) do
+        el = reference_element(V, cell)
+        rule = quadrature_rule(el.shape, T.degree)
+        (rule, tabulate(el, rule.points)...)
+    end
+    return cell_basis(V, cell, rule, values, gradients)
+end
+
+default_degree(spaces::FESpace...) = 2 * maximum(V.family.order for V in spaces) + 4
+
+"""
+    assemble_bilinear(kernel, test, trial; degree)
+
+Sparse matrix `A[i, j] = Σ_cells Σ_q kernel(t, u, a, b, q)` where `t` and `u`
+are the `cell_basis` tuples of the test and trial space, `a`, `b` local dofs
+and `q` the quadrature point. Both spaces must live on the same mesh.
+"""
+function assemble_bilinear(kernel, test::FESpace, trial::FESpace; degree::Integer=default_degree(test, trial))
+    test.dm === trial.dm || throw(ArgumentError("test and trial spaces live on different meshes"))
+    Tt, Tu = Tabulation(test, degree), Tabulation(trial, degree)
+    rows, cols, vals = Int[], Int[], Float64[]
+    for cell in cell_range(test.dm)
+        t, u = cell_basis(Tt, cell), cell_basis(Tu, cell)
+        for b in eachindex(u.indices), a in eachindex(t.indices)
+            push!(rows, t.indices[a])
+            push!(cols, u.indices[b])
+            push!(vals, sum(kernel(t, u, a, b, q) for q in eachindex(t.dA)))
+        end
+    end
+    return sparse(rows, cols, vals, num_dofs(test), num_dofs(trial))
+end
+
+"Weak divergence `D[i, j] = ∫ ψ_i ∇⋅φ_j dA` from H(div) space `U` into scalar space `H`."
+function assemble_divergence(H::FESpace, U::FESpace; kwargs...)
+    function_space(U) == :Hdiv || throw(ArgumentError("trial space must be H(div)"))
+    return assemble_bilinear((t, u, a, b, q) -> t.φ[a, q] * u.div[b, q] * t.dA[q], H, U; kwargs...)
+end
+
+"""
+    assemble_coriolis(U, f)
+
+Coriolis matrix `C[i, j] = ∫ f(x) φ_i ⋅ (r̂ × φ_j) dA` for a vector space `U`;
+antisymmetric, so it does no work.
+"""
+assemble_coriolis(U::FESpace, f; kwargs...) =
+    assemble_bilinear(U, U; kwargs...) do t, u, a, b, q
+        x = t.points[q]
+        f(x) * dot(t.φ[a, q], cross(normalize(x), u.φ[b, q])) * t.dA[q]
+    end
+
+"Load vector `b[i] = ∫ f(x) ⋅ φ_i dA` (`f` scalar or Cartesian vector valued)."
+function assemble_load(V::FESpace, f; degree::Integer=default_degree(V))
+    T = Tabulation(V, degree)
+    b = zeros(num_dofs(V))
+    for cell in cell_range(V.dm)
+        t = cell_basis(T, cell)
+        for a in eachindex(t.indices), q in eachindex(t.dA)
+            b[t.indices[a]] += dot(f(t.points[q]), t.φ[a, q]) * t.dA[q]
+        end
+    end
+    return b
+end
+
+"L2 projection of `f` onto `V`."
+project(V::FESpace, f; kwargs...) = assemble_mass(V; kwargs...) \ assemble_load(V, f; kwargs...)
