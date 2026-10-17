@@ -28,8 +28,8 @@ end
 @testset "Reference elements: $family on $shape" for family in families_up_to(4), shape in SHAPES
     el = ReferenceElement(family, shape)
     nv = length(reference_vertices(shape))
-    @test el.entity_dofs == (family(2, nv), family(1, 2), family(0, 0))
-    @test num_dofs(el) == sum(el.entity_dofs .* (1, nv, nv))
+    @test entity_dofs(el) == (family(2, nv), family(1, 2), family(0, 0))
+    @test num_dofs(el) == sum(entity_dofs(el) .* (1, nv, nv))
 
     if function_space(family) in (:H1, :L2)
         values, _ = tabulate(el, el.nodes)
@@ -39,12 +39,12 @@ end
     end
 
     # traces: on edge i only the dofs of edge i (and its two vertices) are seen
-    first_edge_dof = el.entity_dofs[1]
+    first_edge_dof = entity_dofs(el)[1]
     for i in 1:nv, t in (-0.83, -0.1, 0.47)
         values, _ = tabulate(el, [edge_point(shape, i, t)])
-        owned = collect(first_edge_dof + (i - 1) * el.entity_dofs[2] .+ (1:el.entity_dofs[2]))
+        owned = collect(first_edge_dof + (i - 1) * entity_dofs(el)[2] .+ (1:entity_dofs(el)[2]))
         if function_space(family) == :H1
-            vertex_base = first_edge_dof + nv * el.entity_dofs[2]
+            vertex_base = first_edge_dof + nv * entity_dofs(el)[2]
             append!(owned, vertex_base .+ (i, mod1(i + 1, nv)))
             trace = values[:, 1, 1]
         elseif function_space(family) == :Hdiv

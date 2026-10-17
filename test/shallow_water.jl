@@ -25,7 +25,7 @@ end
         b = randn(num_dofs(V))
         @test S.matrix * (S \ b) ≈ b
     end
-    @test mass_solver(FESpace(dm, Discontinuous(1))).factor isa dmplex.FEM.CellBlockInverse
+    @test mass_solver(FESpace(dm, Discontinuous(1))).factor isa dmplex.FEM.BlockInverse
     # models built on the same spaces share the factorizations
     U, H = FESpace(dm, RaviartThomas(0)), FESpace(dm, Discontinuous(0))
     @test LinearShallowWater(U, H).Mu_solver === NonlinearShallowWater(U, H, FESpace(dm, Lagrange(1))).Mu_solver

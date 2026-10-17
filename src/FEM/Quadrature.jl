@@ -32,6 +32,30 @@ function gauss_lobatto(n::Integer)
     return x, 2 ./ (N * n .* P[:, N + 1] .^ 2)
 end
 
+"""
+    gauss_radau(n)
+
+Gauss–Radau nodes (ascending, including the right end point `+1`) and weights
+on [-1, 1], exact for degree `2n - 2`. The left rule (with `-1`) has nodes at
+the roots of `P_{n-1} + P_n`; the right rule is its mirror image.
+"""
+function gauss_radau(n::Integer)
+    n >= 1 || throw(ArgumentError("need at least one point"))
+    n == 1 && return [1.0], [2.0]
+    x = -cos.(2π .* (0:(n - 1)) ./ (2n - 1))  # Chebyshev–Gauss–Radau guess, x[1] = -1
+    for _ in 1:100
+        dx = zeros(n)
+        for i in 2:n
+            P, dP = legendre(n, x[i])
+            dx[i] = (P[n] + P[n + 1]) / (dP[n] + dP[n + 1])
+        end
+        x .-= dx
+        maximum(abs, dx) < 1e-15 && break
+    end
+    w = [i == 1 ? 2 / n^2 : (1 - x[i]) / (n^2 * legendre(n - 1, x[i])[1][n]^2) for i in 1:n]
+    return -reverse(x), reverse(w)
+end
+
 "Quadrature rule on a reference cell: `sum(w * f(ξ) for (ξ, w) in zip(points, weights))`."
 struct QuadratureRule
     points::Vector{SVector{2, Float64}}

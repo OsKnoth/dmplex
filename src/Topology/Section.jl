@@ -5,7 +5,8 @@ Describes how many degrees of freedom a field places on each mesh point.
 `ndofs(depth, cone_size)` is any callable returning the number of nodes on a
 point of the given depth (0 vertex, 1 edge, 2 cell) whose cone has
 `cone_size` entries; the finite-element families of the `FEM` module are such
-callables. Every node carries `ncomp` components. `space` is one of `:H1`,
+callables. Layouts that depend on more than depth and cone size (e.g. on
+point labels) extend [`num_nodes`](@ref) instead. Every node carries `ncomp` components. `space` is one of `:H1`,
 `:L2`, `:Hdiv`, `:Hcurl` and decides how edge orientations act on the closure
 (see [`closure_dofs`](@ref)).
 """
@@ -16,6 +17,14 @@ struct FieldLayout{F}
     ncomp::Int
     ndofs::F
 end
+
+"""
+    num_nodes(ndofs, dm, p)
+
+Number of dof nodes a layout places on point `p`. Defaults to
+`ndofs(depth, cone_size)`; extend it for point-dependent layouts.
+"""
+num_nodes(ndofs, dm::Plex, p::Integer) = ndofs(get_depth(dm, p), get_cone_size(dm, p))
 
 """
     Section(dm, fields...; ordering=:point)
@@ -40,11 +49,8 @@ function Section(dm::Plex, fields::FieldLayout...; ordering::Symbol=:point)
     chart = get_chart(dm)
     nf = length(fields)
     field_dof = zeros(Int, nf, length(chart))
-    for p in chart
-        depth, n = get_depth(dm, p), get_cone_size(dm, p)
-        for (f, field) in enumerate(fields)
-            field_dof[f, p] = field.ncomp * field.ndofs(depth, n)
-        end
+    for p in chart, (f, field) in enumerate(fields)
+        field_dof[f, p] = field.ncomp * num_nodes(field.ndofs, dm, p)
     end
     field_offset = similar(field_dof)
     field_start = zeros(Int, nf)

@@ -17,15 +17,20 @@ point_value(ξ::SVector{2}) = DofFunctional([ξ], [SVector(1.0)])
 Finite element on a reference cell (Ciarlet triple). The basis is dual to the
 dof functionals, `ℓ_i(φ_j) = δ_ij`, and is stored as Legendre coefficients.
 Dofs come in closure order: cell interior, edges `1…n` (nodes along the
-counter-clockwise traversal), vertices `1…n`. `entity_dofs` gives the dof
-count of (interior, each edge, each vertex). Elements are cached.
+counter-clockwise traversal), vertices `1…n`. `closure_counts` gives the
+number of dofs stored on each closure point (cell, edges, vertices); a family
+may store dofs on another point than the one they belong to geometrically,
+e.g. edge dofs on the cell (see the kite families). Nodal elements whose nodes
+are a tensor quadrature rule carry its weights in `nodal_weights`, which
+gives lumped (diagonal) mass matrices. Elements are cached.
 """
 struct ReferenceElement{F<:ElementFamily, S<:ReferenceShape}
     family::F
     shape::S
-    entity_dofs::NTuple{3, Int}
+    closure_counts::Vector{Int}          # dofs on (cell, edge 1…n, vertex 1…n)
     coeffs::Array{Float64, 4}
-    nodes::Vector{SVector{2, Float64}}  # node positions of nodal (H1/L2) elements
+    nodes::Vector{SVector{2, Float64}}   # node positions of nodal (H1/L2) elements
+    nodal_weights::Vector{Float64}       # quadrature weights at the nodes, if lumpable
 end
 
 const ELEMENT_CACHE = Dict{Tuple{ElementFamily, ReferenceShape}, ReferenceElement}()
@@ -50,14 +55,30 @@ function build_element(family::ElementFamily, shape::ReferenceShape)
     cond(V) < 1e12 || error("$family on $shape: dof functionals are not unisolvent")
     coeffs = reshape(reshape(primes, :, n) / V, size(primes))  # primes * inv(V)
 
-    nv = length(reference_vertices(shape))
-    entity_dofs = (family(2, nv), family(1, 2), family(0, 0))
-    entity_dofs[1] + nv * (entity_dofs[2] + entity_dofs[3]) == n ||
-        error("$family on $shape: dof count does not match the section layout")
-    return ReferenceElement(family, shape, entity_dofs, coeffs, nodes)
+    counts = closure_counts(family, shape)
+    sum(counts) == n || error("$family on $shape: dof count does not match the section layout")
+    return ReferenceElement(family, shape, counts, coeffs, nodes, nodal_weights(family, shape, nodes))
 end
 
+"Dofs per closure point (cell, edges, vertices) for families with a uniform layout."
+function closure_counts(family::ElementFamily, shape::ReferenceShape)
+    nv = length(reference_vertices(shape))
+    return [family(2, nv); fill(family(1, 2), nv); fill(family(0, 0), nv)]
+end
+
+"Quadrature weights at the nodes (empty: the element has no lumped mass)."
+nodal_weights(::ElementFamily, ::ReferenceShape, nodes) = Float64[]
+
 num_dofs(el::ReferenceElement) = size(el.coeffs, 4)
+
+"(interior, per edge, per vertex) dof counts of an element with a uniform layout."
+function entity_dofs(el::ReferenceElement)
+    n = length(reference_vertices(el.shape))
+    c = el.closure_counts
+    all(==(c[2]), c[2:(n + 1)]) && all(==(c[n + 2]), c[(n + 2):end]) ||
+        throw(ArgumentError("$(el.family) has a non-uniform closure layout"))
+    return (c[1], c[2], c[n + 2])
+end
 
 """
     tabulate(el, points) -> (values, gradients)

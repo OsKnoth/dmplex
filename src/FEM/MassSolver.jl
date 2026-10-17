@@ -1,10 +1,11 @@
 """
     MassSolver
 
-Assembled mass matrix of a space together with the means to invert it:
-a sparse Cholesky factorization in general, or the inverses of the cell
-blocks when every dof belongs to a single cell (discontinuous spaces), which
-makes the solve a cheap cell-local operation. Apply it with `S \\ b` or
+Assembled mass matrix of a space together with the means to invert it. If the
+matrix decouples into small independent blocks (diagonal lumped matrices,
+discontinuous spaces, broken spaces with dual-cell blocks) the inverses of the
+blocks are stored and a solve is a set of small local products; otherwise a
+sparse Cholesky factorization is used. Apply it with `S \\ b` or
 `ldiv!(x, S, b)`.
 """
 struct MassSolver{F}
@@ -12,31 +13,51 @@ struct MassSolver{F}
     factor::F
 end
 
-"Inverted cell blocks of a block-diagonal mass matrix."
-struct CellBlockInverse
+"Inverted diagonal blocks of a block-diagonal matrix."
+struct BlockInverse
     indices::Vector{Vector{Int}}
     inverses::Vector{Matrix{Float64}}
 end
 
-function MassSolver(V::FESpace; degree::Integer=default_degree(V))
-    M = assemble_mass(V; degree)
-    if function_space(V) == :L2
-        indices = [first(cell_dofs(V, c)) for c in cell_range(V.dm)]
-        return MassSolver(M, CellBlockInverse(indices, [inv(Matrix(M[i, i])) for i in indices]))
+"Index sets of the connected components of the sparsity graph of `M` (only rows with entries)."
+function matrix_blocks(M::SparseMatrixCSC)
+    n = size(M, 1)
+    parent = collect(1:n)
+    root(i) = (while parent[i] != i; parent[i] = parent[parent[i]]; i = parent[i]; end; i)
+    rows = rowvals(M)
+    for j in 1:n, k in nzrange(M, j)
+        a, b = root(rows[k]), root(j)
+        a != b && (parent[a] = b)
+    end
+    blocks = Dict{Int, Vector{Int}}()
+    for i in 1:n
+        isempty(nzrange(M, i)) && continue
+        push!(get!(blocks, root(i), Int[]), i)
+    end
+    return collect(values(blocks))
+end
+
+function MassSolver(V::FESpace; degree::Integer=default_degree(V), lumped::Bool=false, max_block::Integer=512)
+    M = assemble_mass(V; degree, lumped)
+    blocks = matrix_blocks(M)
+    if maximum(length, blocks) <= max_block
+        return MassSolver(M, BlockInverse(blocks, [inv(Matrix(M[i, i])) for i in blocks]))
     end
     return MassSolver(M, cholesky(Symmetric(M)))
 end
 
 """
-    mass_solver(V; degree)
+    mass_solver(V; degree, lumped=false)
 
-Mass matrix and factorization of `V`, assembled once and cached in the space,
-so all models and operators built on `V` share them.
+Mass matrix and its inverse for `V`, assembled once and cached in the space,
+so all models and operators built on `V` share them. `lumped=true` uses the
+element nodes as quadrature (Gauss–Lobatto or Gauss–Radau tensor nodes),
+which gives a diagonal matrix.
 """
-mass_solver(V::FESpace; degree::Integer=default_degree(V)) =
-    get!(() -> MassSolver(V; degree), V.operators, (:mass, Int(degree)))::MassSolver
+mass_solver(V::FESpace; degree::Integer=default_degree(V), lumped::Bool=false) =
+    get!(() -> MassSolver(V; degree, lumped), V.operators, (:mass, Int(degree), lumped))::MassSolver
 
-function LinearAlgebra.ldiv!(x::AbstractVector, S::MassSolver{CellBlockInverse}, b::AbstractVector)
+function LinearAlgebra.ldiv!(x::AbstractVector, S::MassSolver{BlockInverse}, b::AbstractVector)
     for (i, Minv) in zip(S.factor.indices, S.factor.inverses)
         x[i] = Minv * b[i]
     end
@@ -45,4 +66,8 @@ end
 
 LinearAlgebra.ldiv!(x::AbstractVector, S::MassSolver, b::AbstractVector) = copyto!(x, S.factor \ b)
 
-Base.:\(S::MassSolver, b::AbstractVector) = ldiv!(similar(b, Float64), S, b)
+Base.:\(S::MassSolver, b::AbstractVector) = ldiv!(zeros(length(b)), S, b)
+
+"Largest block of a block-diagonal mass solver (0 for a Cholesky factorization)."
+block_size(S::MassSolver{BlockInverse}) = maximum(length, S.factor.indices)
+block_size(::MassSolver) = 0

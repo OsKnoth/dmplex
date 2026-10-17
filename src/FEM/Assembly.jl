@@ -1,13 +1,16 @@
 """
-    assemble_mass(V; degree=2 * order + 4)
+    assemble_mass(V; degree, lumped=false)
 
 Global mass matrix `∫ φ_i ⋅ φ_j dA` of `V` on the sphere, with physical basis
 functions obtained from the reference basis by the identity (H1, L2), the
 contravariant Piola map (H(div)) or the covariant Piola map (H(curl)).
 `degree` is the reference quadrature degree; the sphere map is not polynomial,
-so the default adds some slack. Rows and columns cover the whole section.
+so the default adds some slack. With `lumped=true` the element nodes and their
+`nodal_weights` serve as quadrature, which makes the matrix diagonal (nodal
+elements on quadrilaterals). Rows and columns cover the whole section.
 """
-function assemble_mass(V::FESpace; degree::Integer=default_degree(V))
+function assemble_mass(V::FESpace; degree::Integer=default_degree(V), lumped::Bool=false)
+    lumped && return assemble_lumped_mass(V)
     dm = V.dm
     space = function_space(V)
     nc = V.ncomp
@@ -48,6 +51,23 @@ function assemble_mass(V::FESpace; degree::Integer=default_degree(V))
         end
     end
     return sparse(rows, cols, vals, num_dofs(V), num_dofs(V))
+end
+
+function assemble_lumped_mass(V::FESpace)
+    diagonal = zeros(num_dofs(V))
+    nc = V.ncomp
+    for cell in cell_range(V.dm)
+        el = reference_element(V, cell)
+        isempty(el.nodal_weights) && throw(ArgumentError("$(el.family) on $(el.shape) has no lumped mass"))
+        cmap = CellMap(V.dm, cell)
+        indices, _ = cell_dofs(V, cell)
+        for (a, (ξ, w)) in enumerate(zip(el.nodes, el.nodal_weights)), c in 1:nc
+            diagonal[indices[(a - 1) * nc + c]] += w * map_point(cmap, ξ)[3]
+        end
+    end
+    n = num_dofs(V)
+    used = findall(!iszero, diagonal)
+    return sparse(used, used, diagonal[used], n, n)
 end
 
 """

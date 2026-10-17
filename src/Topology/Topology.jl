@@ -16,7 +16,7 @@ export Plex, plex_from_polygons,
     get_closure, get_star, get_cell_vertices, get_edge_cells, edge_sign,
     get_adjacency, get_cell_neighbors, boundary_matrix, check_plex,
     set_label!, get_label_value, get_label_stratum, get_label_names, clear_label!
-export FieldLayout, Section, num_fields, field_names, field_index, get_dof, get_offset,
+export FieldLayout, Section, num_nodes, num_fields, field_names, field_index, get_dof, get_offset,
     get_field_dof, get_field_offset, storage_size, dof_range, field_range,
     closure_dofs, create_vector
 
