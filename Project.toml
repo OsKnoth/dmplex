@@ -6,6 +6,7 @@ authors = ["OsKnoth <50015520+OsKnoth@users.noreply.github.com>"]
 [deps]
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
 Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
@@ -13,6 +14,7 @@ VTKHDF = "45d8cf6f-ab5f-45bc-ab92-77e36ab192e6"
 
 [compat]
 HDF5 = "0.17.4"
+NCDatasets = "0.14.15"
 Reexport = "1.2.2"
 SparseArrays = "1.12.0"
 StaticArrays = "1.9.23"
