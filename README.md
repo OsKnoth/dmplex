@@ -9,13 +9,27 @@ directly in Julia, without calling PETSc.
 | Directory | Module | Contents |
 |---|---|---|
 | `src/Topology` | `Topology` | `Plex` (mesh DAG in CSR form with PETSc orientations), `Section` (dof layout), `closure_dofs` |
-| `src/Grids` | `Grids` | icosahedral, cubed-sphere and hexagonal meshes of the unit sphere |
+| `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal and HEALPix meshes; ICON and MPAS grid-file readers (primal or dual) |
 | `src/Geometry` | `Geometry` | reference triangle/quadrilateral, reference-to-sphere map, Piola maps, FV metrics |
 | `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, assembly (mass, divergence, Coriolis, load, projection) |
 | `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection |
 | `src/TimeSteppers` | `TimeSteppers` | explicit Euler, classical RK4 |
-| `src/ShallowWater` | `ShallowWater` | linear rotating shallow water in RT_k × DG_k (mass and energy conserving) |
+| `src/ShallowWater` | `ShallowWater` | linear (RT_k × DG_k) and nonlinear vector-invariant (RT_k × DG_k × CG_{k+1}, PV form) rotating shallow water, mass and energy conserving |
 | `src/Outputs` | `Outputs` | VTKHDF output for ParaView |
+
+## Grids
+
+```julia
+dm = create_healpix_mesh(16)                              # 12·16² quads
+dm = read_grid("grid/icon_grid_0010_R02B04_G.nc")          # ICON triangles
+dm = read_grid("grid/x1.40962.grid.nc"; dual=true)         # MPAS Delaunay triangles
+```
+
+ICON and MPAS files are read with NCDatasets; cells and vertices keep the
+file numbering. Open (regional or ocean) meshes such as MPAS-Ocean QU240 are
+supported. Finite elements need triangles or quadrilaterals, so Voronoi grids
+(MPAS primal, ICON dual) are for finite volumes until the kite grid exists.
+Local grid files live in `grid/`, which is not tracked.
 
 ## Mesh topology
 
@@ -66,4 +80,5 @@ implementation, not a wrapper around CGDycore or PETSc.
 julia --project -e 'using Pkg; Pkg.test()'
 julia --project examples/advection.jl 4 cubed            # FV upwind advection, writes VTKHDF
 julia --project examples/linear_shallow_water.jl 2 cubed 8   # RT2 × DG2 linear shallow water
+julia --project examples/nonlinear_shallow_water.jl 1 healpix 8   # Williamson TC2, also with an ICON/MPAS file
 ```

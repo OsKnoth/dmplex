@@ -56,8 +56,9 @@ end
 Physical basis of `V` on `cell` at the points of `rule`, with the orientation
 signs of `cell_dofs` already applied. Returns a named tuple with the global
 `indices`, physical `points`, area weights `dA = w detJ`, the basis values
-`φ[dof, point]` (numbers for H1/L2, Cartesian vectors for H(div)/H(curl)) and,
-for H(div), the surface divergence `div[dof, point]`.
+`φ[dof, point]` (numbers for H1/L2, Cartesian vectors for H(div)/H(curl)),
+for H(div) the surface divergence `div[dof, point]` and for H1 the surface
+gradient `grad[dof, point]` (`J (JᵀJ)⁻¹ ∇̂φ̂`).
 """
 function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gradients)
     V.ncomp == 1 || throw(ArgumentError("cell_basis supports scalar or intrinsically vector spaces only"))
@@ -69,6 +70,7 @@ function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gra
     dA = zeros(nq)
     φ = space in (:H1, :L2) ? zeros(n, nq) : Matrix{SVector{3, Float64}}(undef, n, nq)
     div = zeros(n, space == :Hdiv ? nq : 0)
+    grad = Matrix{SVector{3, Float64}}(undef, n, space == :H1 ? nq : 0)
     for (q, (ξ, w)) in enumerate(zip(rule.points, rule.weights))
         x, J, detJ = map_point(cmap, ξ)
         points[q] = x
@@ -76,6 +78,7 @@ function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gra
         for a in 1:n
             if space in (:H1, :L2)
                 φ[a, q] = values[a, 1, q]
+                space == :H1 && (grad[a, q] = piola_hcurl(J, SVector(gradients[a, 1, 1, q], gradients[a, 1, 2, q])))
                 continue
             end
             v̂ = SVector(values[a, 1, q], values[a, 2, q])
@@ -87,7 +90,7 @@ function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gra
             end
         end
     end
-    return (; indices, points, dA, φ, div)
+    return (; indices, points, dA, φ, div, grad)
 end
 
 "Tabulated reference basis of `V` for the quadrature rule of each cell shape."
@@ -108,6 +111,10 @@ function cell_basis(T::Tabulation, cell::Integer)
     end
     return cell_basis(V, cell, rule, values, gradients)
 end
+
+"Physical bases of all cells of `V` (indexed by `cell_index`), for repeated nonlinear evaluations."
+precompute_basis(V::FESpace, degree::Integer) =
+    (T = Tabulation(V, degree); [cell_basis(T, c) for c in cell_range(V.dm)])
 
 default_degree(spaces::FESpace...) = 2 * maximum(V.family.order for V in spaces) + 4
 

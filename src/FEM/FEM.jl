@@ -15,7 +15,7 @@ export ElementFamily, Lagrange, Discontinuous, RaviartThomas, Nedelec, function_
     field, lagrange, discontinuous, raviart_thomas, nedelec
 export QuadratureRule, quadrature_rule, gauss_legendre, gauss_lobatto, legendre
 export ReferenceElement, DofFunctional, num_dofs, tabulate
-export FESpace, reference_element, cell_dofs, evaluate, Tabulation, cell_basis
+export FESpace, reference_element, cell_dofs, evaluate, Tabulation, cell_basis, precompute_basis
 export assemble_mass, assemble_bilinear, assemble_divergence, assemble_coriolis, assemble_load, project
 
 include("Polynomials.jl")
