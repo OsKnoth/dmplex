@@ -15,5 +15,6 @@ export LinearShallowWater, NonlinearShallowWater, LinearKiteShallowWater, Nonlin
 include("LinearShallowWater.jl")
 include("NonlinearShallowWater.jl")
 include("KiteShallowWater.jl")
+include("NonlinearKiteShallowWater.jl")
 
 end # module

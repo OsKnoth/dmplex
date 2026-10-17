@@ -1,21 +1,25 @@
 """
-    CellMap
+    CellMap(dm, cell; radius=1, projected=true)
 
-Map from a reference cell onto a spherical cell: the linear (triangle) or
-bilinear (quadrilateral) interpolant of the cell's vertices, radially
-projected onto the sphere. Straight reference edges map to great-circle arcs,
-so neighbouring cells match exactly along shared edges.
+Map from a reference cell onto a surface cell: the linear (triangle) or
+bilinear (quadrilateral) interpolant of the cell's vertices. With
+`projected=true` (curved elements) it is radially projected onto the sphere;
+straight reference edges then map to great-circle arcs and the cells tile the
+sphere exactly. With `projected=false` (chordal elements) the flat bilinear
+surface through the vertices is used; neighbouring cells still match along
+their straight chord edges, but the total area misses the sphere by O(h²).
 """
 struct CellMap{S<:ReferenceShape, N}
     shape::S
     vertices::NTuple{N, SVector{3, Float64}}
     radius::Float64
+    projected::Bool
 end
 
-function CellMap(dm::Plex, cell::Integer; radius::Real=1.0)
+function CellMap(dm::Plex, cell::Integer; radius::Real=1.0, projected::Bool=true)
     shape = reference_shape(dm, cell)
     vertices = Tuple(get_coordinates(dm, v) for v in get_cell_vertices(dm, cell))
-    return CellMap(shape, vertices, Float64(radius))
+    return CellMap(shape, vertices, Float64(radius), projected)
 end
 
 function shape_functions(::Triangle, ξ)
@@ -44,6 +48,10 @@ function map_point(cmap::CellMap, ξ::SVector{2})
     X = sum(N[i] * cmap.vertices[i] for i in eachindex(N))
     Xξ = sum(dξ[i] * cmap.vertices[i] for i in eachindex(N))
     Xη = sum(dη[i] * cmap.vertices[i] for i in eachindex(N))
+    if !cmap.projected
+        J = cmap.radius * hcat(Xξ, Xη)
+        return cmap.radius * X, J, norm(cross(J[:, 1], J[:, 2]))
+    end
     r = norm(X)
     x = X / r
     # derivative of X / |X|: project out the radial part
@@ -52,6 +60,9 @@ function map_point(cmap::CellMap, ξ::SVector{2})
     J = hcat(Jξ, Jη)
     return cmap.radius * x, J, norm(cross(Jξ, Jη))
 end
+
+"Unit normal of the surface element with Jacobian `J` (outward for counter-clockwise cells)."
+surface_normal(J) = normalize(cross(J[:, 1], J[:, 2]))
 
 "Contravariant Piola transform for H(div): `J v̂ / detJ`."
 piola_hdiv(J, detJ, v̂) = J * v̂ / detJ

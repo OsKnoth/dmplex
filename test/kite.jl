@@ -126,3 +126,16 @@ end
         @test sqrt(dot(dh, m.Mh * dh)) < 5e-3
     end
 end
+
+@testset "Allocation-free kite time step" begin
+    m = NonlinearKiteShallowWater(create_hexagon_mesh(1), 1)
+    y = initial_state(m, x -> 0.2 * SVector(-x[2], x[1], 0.0), x -> 1 - 0.22 * x[3]^2)
+    dy = similar(y)
+    cache = SSPRK3Cache(y)
+    step!(y, cache, m) = @allocated ssprk3_step!(y, 1e-3, tendency!, cache, m)
+    step!(y, cache, m)
+    @test step!(y, cache, m) == 0
+    # chordal elements: same scheme, flat cells
+    mc = NonlinearKiteShallowWater(create_hexagon_mesh(1), 1; geometry=:chordal)
+    @test sum(assemble_mass(mc.H; lumped=true)) < 4π
+end

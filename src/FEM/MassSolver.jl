@@ -58,8 +58,15 @@ mass_solver(V::FESpace; degree::Integer=default_degree(V), lumped::Bool=false) =
     get!(() -> MassSolver(V; degree, lumped), V.operators, (:mass, Int(degree), lumped))::MassSolver
 
 function LinearAlgebra.ldiv!(x::AbstractVector, S::MassSolver{BlockInverse}, b::AbstractVector)
-    for (i, Minv) in zip(S.factor.indices, S.factor.inverses)
-        x[i] = Minv * b[i]
+    x === b && throw(ArgumentError("in-place block solve needs distinct input and output"))
+    @inbounds for (indices, Minv) in zip(S.factor.indices, S.factor.inverses)
+        for r in eachindex(indices)
+            s = 0.0
+            for c in eachindex(indices)
+                s += Minv[r, c] * b[indices[c]]
+            end
+            x[indices[r]] = s
+        end
     end
     return x
 end

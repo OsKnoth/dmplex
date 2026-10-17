@@ -22,7 +22,7 @@ function assemble_mass(V::FESpace; degree::Integer=default_degree(V), lumped::Bo
             rule = quadrature_rule(el.shape, degree)
             rule, first(tabulate(el, rule.points))
         end
-        cmap = CellMap(dm, cell)
+        cmap = CellMap(V, cell)
         n = num_dofs(el)
         local_mass = zeros(n, n)
         for (q, (ξ, w)) in enumerate(zip(rule.points, rule.weights))
@@ -59,7 +59,7 @@ function assemble_lumped_mass(V::FESpace)
     for cell in cell_range(V.dm)
         el = reference_element(V, cell)
         isempty(el.nodal_weights) && throw(ArgumentError("$(el.family) on $(el.shape) has no lumped mass"))
-        cmap = CellMap(V.dm, cell)
+        cmap = CellMap(V, cell)
         indices, _ = cell_dofs(V, cell)
         for (a, (ξ, w)) in enumerate(zip(el.nodes, el.nodal_weights)), c in 1:nc
             diagonal[indices[(a - 1) * nc + c]] += w * map_point(cmap, ξ)[3]
@@ -76,17 +76,19 @@ end
 Physical basis of `V` on `cell` at the points of `rule`, with the orientation
 signs of `cell_dofs` already applied. Returns a named tuple with the global
 `indices`, physical `points`, area weights `dA = w detJ`, the basis values
-`φ[dof, point]` (numbers for H1/L2, Cartesian vectors for H(div)/H(curl)),
+`φ[dof, point]` (numbers for H1/L2, Cartesian vectors for H(div)/H(curl)), the
+unit surface `normals`,
 for H(div) the surface divergence `div[dof, point]` and for H1 the surface
 gradient `grad[dof, point]` (`J (JᵀJ)⁻¹ ∇̂φ̂`).
 """
 function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gradients)
     V.ncomp == 1 || throw(ArgumentError("cell_basis supports scalar or intrinsically vector spaces only"))
-    cmap = CellMap(V.dm, cell)
+    cmap = CellMap(V, cell)
     indices, signs = cell_dofs(V, cell)
     n, nq = length(indices), length(rule.points)
     space = function_space(V)
     points = Vector{SVector{3, Float64}}(undef, nq)
+    normals = Vector{SVector{3, Float64}}(undef, nq)
     dA = zeros(nq)
     φ = space in (:H1, :L2) ? zeros(n, nq) : Matrix{SVector{3, Float64}}(undef, n, nq)
     div = zeros(n, space == :Hdiv ? nq : 0)
@@ -94,6 +96,7 @@ function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gra
     for (q, (ξ, w)) in enumerate(zip(rule.points, rule.weights))
         x, J, detJ = map_point(cmap, ξ)
         points[q] = x
+        normals[q] = surface_normal(J)
         dA[q] = w * detJ
         for a in 1:n
             if space in (:H1, :L2)
@@ -110,7 +113,7 @@ function cell_basis(V::FESpace, cell::Integer, rule::QuadratureRule, values, gra
             end
         end
     end
-    return (; indices, points, dA, φ, div, grad)
+    return (; indices, points, normals, dA, φ, div, grad)
 end
 
 "Tabulated reference basis of `V` for the quadrature rule of each cell shape."
@@ -147,6 +150,7 @@ and `q` the quadrature point. Both spaces must live on the same mesh.
 """
 function assemble_bilinear(kernel, test::FESpace, trial::FESpace; degree::Integer=default_degree(test, trial))
     test.dm === trial.dm || throw(ArgumentError("test and trial spaces live on different meshes"))
+    test.geometry == trial.geometry || throw(ArgumentError("test and trial spaces use different geometries"))
     Tt, Tu = Tabulation(test, degree), Tabulation(trial, degree)
     rows, cols, vals = Int[], Int[], Float64[]
     for cell in cell_range(test.dm)
@@ -169,13 +173,13 @@ end
 """
     assemble_coriolis(U, f)
 
-Coriolis matrix `C[i, j] = ∫ f(x) φ_i ⋅ (r̂ × φ_j) dA` for a vector space `U`;
+Coriolis matrix `C[i, j] = ∫ f(x) φ_i ⋅ (r̂ × φ_j) dA` for a vector space `U`,
+with the element normal `r̂` and `f` evaluated on the unit sphere;
 antisymmetric, so it does no work.
 """
 assemble_coriolis(U::FESpace, f; kwargs...) =
     assemble_bilinear(U, U; kwargs...) do t, u, a, b, q
-        x = t.points[q]
-        f(x) * dot(t.φ[a, q], cross(normalize(x), u.φ[b, q])) * t.dA[q]
+        f(normalize(t.points[q])) * dot(t.φ[a, q], cross(t.normals[q], u.φ[b, q])) * t.dA[q]
     end
 
 "Load vector `b[i] = ∫ f(x) ⋅ φ_i dA` (`f` scalar or Cartesian vector valued)."

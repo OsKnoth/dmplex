@@ -47,7 +47,7 @@ function NonlinearShallowWater(U::FESpace, H::FESpace, Q::FESpace; gravity::Real
                                degree::Integer=3 * U.family.order + 6)
     D = assemble_divergence(H, U; degree)
     R = assemble_bilinear(Q, U; degree) do t, u, a, b, q
-        dot(u.φ[b, q], cross(normalize(t.points[q]), t.grad[a, q])) * t.dA[q]
+        dot(u.φ[b, q], cross(t.normals[q], t.grad[a, q])) * t.dA[q]
     end
     Su, Sh = mass_solver(U), mass_solver(H)
     return NonlinearShallowWater(U, H, Q, precompute_basis(U, degree), precompute_basis(H, degree),
@@ -96,7 +96,7 @@ function tendency!(dy::AbstractVector, y::AbstractVector, m::NonlinearShallowWat
     for (bu, bh, bq) in zip(m.basis_u, m.basis_h, m.basis_q)
         for p in eachindex(bu.dA)
             q = field_at(bq, ω, p) / field_at(bh, h, p)
-            flux = q * cross(normalize(bu.points[p]), field_at(bu, F, p)) * bu.dA[p]
+            flux = q * cross(bu.normals[p], field_at(bu, F, p)) * bu.dA[p]
             for a in eachindex(bu.indices)
                 rhs_u[bu.indices[a]] -= dot(bu.φ[a, p], flux)
             end

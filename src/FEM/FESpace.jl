@@ -1,11 +1,15 @@
 """
-    FESpace(dm, family; name="u", ncomp=1)
-    FESpace(dm, section, field)
+    FESpace(dm, family; name="u", ncomp=1, geometry=:sphere)
+    FESpace(dm, section, field; geometry=:sphere)
 
 Finite-element space of `family` on `dm`. The global numbering comes from a
 `Section`, either built for this space alone or shared with other fields of
 a mixed system. The reference element is chosen per cell from its number of
 edges, so triangle, quadrilateral and mixed meshes are handled alike.
+
+`geometry` selects the cell map: `:sphere` (curved elements, radially
+projected onto the sphere) or `:chordal` (flat bilinear elements through the
+vertices); see [`CellMap`](@ref).
 
 Operators that depend only on the space (mesh, element, reference-to-sphere
 map), such as the factorized mass matrix, are created on first use and cached
@@ -19,21 +23,27 @@ struct FESpace{F<:ElementFamily}
     ncomp::Int
     elements::Dict{Int, ReferenceElement}  # keyed by the cell's number of edges
     operators::Dict{Any, Any}              # lazily built operators, e.g. (:mass, degree)
+    geometry::Symbol                       # :sphere or :chordal
 end
 
-function FESpace(dm::Plex, section::Section, f::Integer)
+function FESpace(dm::Plex, section::Section, f::Integer; geometry::Symbol=:sphere)
+    geometry in (:sphere, :chordal) || throw(ArgumentError("geometry must be :sphere or :chordal"))
     layout = section.fields[f]
     family = layout.ndofs
     family isa ElementFamily || throw(ArgumentError("field $(layout.name) has no finite-element family"))
     cone_sizes = unique(get_cone_size(dm, c) for c in cell_range(dm))
     elements = Dict{Int, ReferenceElement}(n => ReferenceElement(family, reference_shape(n)) for n in cone_sizes)
-    return FESpace(dm, section, Int(f), family, layout.ncomp, elements, Dict{Any, Any}())
+    return FESpace(dm, section, Int(f), family, layout.ncomp, elements, Dict{Any, Any}(), geometry)
 end
 
-FESpace(dm::Plex, section::Section, name::AbstractString) = FESpace(dm, section, field_index(section, name))
+FESpace(dm::Plex, section::Section, name::AbstractString; kwargs...) =
+    FESpace(dm, section, field_index(section, name); kwargs...)
 
-FESpace(dm::Plex, family::ElementFamily; name::AbstractString="u", ncomp::Integer=1) =
-    FESpace(dm, Section(dm, field(family; name, ncomp)), 1)
+FESpace(dm::Plex, family::ElementFamily; name::AbstractString="u", ncomp::Integer=1, kwargs...) =
+    FESpace(dm, Section(dm, field(family; name, ncomp)), 1; kwargs...)
+
+"Reference-to-surface map of `cell` with the geometry of `V`."
+Geometry.CellMap(V::FESpace, cell::Integer) = CellMap(V.dm, cell; projected=V.geometry == :sphere)
 
 function_space(V::FESpace) = function_space(V.family)
 num_dofs(V::FESpace) = storage_size(V.section)
@@ -54,7 +64,7 @@ function evaluate(V::FESpace, u::AbstractVector, cell::Integer, ξ::SVector{2})
     el = reference_element(V, cell)
     indices, signs = cell_dofs(V, cell)
     values, _ = tabulate(el, [ξ])
-    x, J, detJ = map_point(CellMap(V.dm, cell), ξ)
+    x, J, detJ = map_point(CellMap(V, cell), ξ)
     space = function_space(V)
     if space in (:H1, :L2)
         nc = V.ncomp
