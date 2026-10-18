@@ -11,7 +11,8 @@ using StaticArrays
 using ..Topology
 using ..Geometry
 
-export ElementFamily, Lagrange, Discontinuous, RaviartThomas, Nedelec, KiteRadau, KiteBrokenRT, function_space, value_size,
+export ElementFamily, Lagrange, Discontinuous, RaviartThomas, Nedelec, KiteRadau, KiteBrokenRT,
+    BrezziDouglasMarini, KiteBrokenBDM, KiteDualRadau, function_space, value_size,
     field, lagrange, discontinuous, raviart_thomas, nedelec
 export QuadratureRule, quadrature_rule, gauss_legendre, gauss_lobatto, gauss_radau, legendre
 export ReferenceElement, DofFunctional, num_dofs, tabulate, entity_dofs

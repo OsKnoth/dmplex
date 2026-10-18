@@ -10,7 +10,7 @@ resolution = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 4
 days = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 6.0
 model, y = main([mesh, string(resolution), string(days), "true"])
 
-ζ = mass_solver(model.Z; lumped=true) \ (-(model.R * y[velocity_dofs(model)]))
+ζ = mass_solver(model.Z; lumped=true) \ (-(model.R * y[global_velocity_dofs(model)]))
 vorticity(c, ξ, _) = evaluate(model.Z, ζ, c, ξ)[2] * OMEGA
 scale = 1.5e-4  # 1/s, the usual Galewsky color range
 view = normalize(SVector(cosd(50) * cosd(0), cosd(50) * sind(0), sind(50)))

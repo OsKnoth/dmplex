@@ -13,7 +13,8 @@ using Atomix: @atomic
 using KernelAbstractions
 
 export LinearShallowWater, NonlinearShallowWater, LinearKiteShallowWater, NonlinearKiteShallowWater, velocity_dofs, height_dofs, initial_state, tendency!,
-    total_mass, total_energy, potential_enstrophy, diagnostics, gather_state
+    total_mass, total_energy, potential_enstrophy, diagnostics, gather_state,
+    global_velocity_dofs, global_height_dofs
 
 include("LinearShallowWater.jl")
 include("NonlinearShallowWater.jl")

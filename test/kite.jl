@@ -185,3 +185,25 @@ end
     @test abs(stats3[2]) < 1e-10       # energy, summed over ranks (conserving variant)
     @test abs(stats1[2]) < 1e-10
 end
+
+@testset "Further velocity spaces: BDM and the Wess pair" begin
+    @test num_dofs(ReferenceElement(BrezziDouglasMarini(1), Quadrilateral())) == 8
+    @test num_dofs(ReferenceElement(BrezziDouglasMarini(2), Quadrilateral())) == 14
+    @test num_dofs(ReferenceElement(KiteDualRadau(2), Quadrilateral())) == 18
+    Random.seed!(4)
+    dm = create_kite_mesh(create_hexagon_mesh(1))
+    for (family, lumped, block) in ((KiteBrokenBDM(1), false, 18), (KiteDualRadau(1), true, 3))
+        U = FESpace(dm, family)
+        @test kite_jump(U, 1) < 1e-12   # normal continuity across halves of primal edges
+        @test kite_jump(U, 2) > 1e-3    # broken across dual-cell boundaries
+        @test block_size(mass_solver(U; lumped)) == block
+    end
+    # the semi-discrete linear model conserves energy exactly with every velocity space
+    for velocity in (:rt, :bdm, :dual_radau)
+        m = LinearKiteShallowWater(create_hexagon_mesh(1), 1; velocity)
+        y = randn(length(velocity_dofs(m)) + length(height_dofs(m)))
+        dy = tendency!(similar(y), y, m)
+        u, h = y[velocity_dofs(m)], y[height_dofs(m)]
+        @test abs(m.depth * dot(m.Mu * u, dy[velocity_dofs(m)]) + m.gravity * dot(m.Mh * h, dy[height_dofs(m)])) < 1e-11 * norm(dy)
+    end
+end

@@ -84,3 +84,67 @@ function dof_functionals(f::Union{RaviartThomas, Nedelec}, shape::ReferenceShape
     end
     return functionals, SVector{2, Float64}[]
 end
+
+# --- Brezzi–Douglas–Marini on quadrilaterals ----------------------------------------
+
+"""
+    BrezziDouglasMarini(k)
+
+BDM_k on quadrilaterals, `k ≥ 1`: `[P_k]² ⊕ span{curl(x^{k+1} y), curl(x y^{k+1})}`
+(dimension `(k + 1)(k + 2) + 2`, 8 for `k = 1`), normal components at the
+`k + 1` Gauss points of every edge and, for `k ≥ 2`, moments against
+`[P_{k-2}]²`. Same normal traces as `RaviartThomas(k)` with fewer dofs.
+"""
+struct BrezziDouglasMarini <: ElementFamily
+    order::Int
+    BrezziDouglasMarini(k::Integer) = k >= 1 ? new(k) : throw(ArgumentError("BDM order must be at least 1"))
+end
+
+function_space(::BrezziDouglasMarini) = :Hdiv
+value_size(::BrezziDouglasMarini) = 2
+
+function (f::BrezziDouglasMarini)(depth::Integer, n::Integer)
+    depth == 0 && return 0
+    depth == 1 && return f.order + 1
+    n == QUADRILATERAL && return f.order * (f.order - 1)
+    unsupported(f, n)
+end
+
+"Legendre coefficients of the monomial `x^a y^b` with maximal degree `D`."
+monomial(a, b, D) = foldl((c, _) -> mul_y(c), 1:b; init=foldl((c, _) -> mul_x(c), 1:a; init=legendre_product(0, 0, D)))
+
+function bdm_primes(k)
+    D = k + 1
+    functions = Vector{Vector{Matrix{Float64}}}()
+    for (i, j) in scalar_indices(k, Triangle())  # all P_i P_j with i + j ≤ k span P_k
+        push!(functions, [legendre_product(i, j, D), zero_coeffs(D)], [zero_coeffs(D), legendre_product(i, j, D)])
+    end
+    # curl ψ = (∂ψ/∂y, -∂ψ/∂x) for ψ = x^{k+1} y and ψ = x y^{k+1}
+    push!(functions, [monomial(k + 1, 0, D), -(k + 1) * monomial(k, 1, D)])
+    push!(functions, [(k + 1) * monomial(1, k, D), -monomial(0, k + 1, D)])
+    return pack_primes(functions, D, 2)
+end
+
+prime_basis(f::BrezziDouglasMarini, ::Quadrilateral) = bdm_primes(f.order)
+prime_basis(f::BrezziDouglasMarini, shape::Triangle) = unsupported(f, 3)
+interior_moments(f::BrezziDouglasMarini, ::Quadrilateral) =
+    [(c, i, j) for (i, j) in scalar_indices(f.order - 2, Triangle()) for c in 1:2]
+edge_weight(::BrezziDouglasMarini, shape, i) = edge_normal(shape, i)
+
+function dof_functionals(f::BrezziDouglasMarini, shape::Quadrilateral)
+    k = f.order
+    functionals = DofFunctional{2}[]
+    if k >= 2
+        rule = quadrature_rule(shape, 2k + 2)
+        for (c, i, j) in interior_moments(f, shape)
+            unit = c == 1 ? SVector(1.0, 0.0) : SVector(0.0, 1.0)
+            push!(functionals, DofFunctional(rule.points,
+                                             [w * legendre_product_value(i, j, ξ) * unit for (ξ, w) in zip(rule.points, rule.weights)]))
+        end
+    end
+    t, _ = gauss_legendre(k + 1)
+    for i in 1:4, m in 1:(k + 1)
+        push!(functionals, DofFunctional([edge_point(shape, i, t[m])], [edge_normal(shape, i)]))
+    end
+    return functionals, SVector{2, Float64}[]
+end

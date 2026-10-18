@@ -54,20 +54,32 @@ function assemble_mass(V::FESpace; degree::Integer=default_degree(V), lumped::Bo
 end
 
 function assemble_lumped_mass(V::FESpace)
-    diagonal = zeros(num_dofs(V))
+    rows, cols, vals = Int[], Int[], Float64[]
     nc = V.ncomp
     for cell in cell_range(V.dm)
         el = reference_element(V, cell)
         isempty(el.nodal_weights) && throw(ArgumentError("$(el.family) on $(el.shape) has no lumped mass"))
-        cmap = CellMap(V, cell)
-        indices, _ = cell_dofs(V, cell)
-        for (a, (ξ, w)) in enumerate(zip(el.nodes, el.nodal_weights)), c in 1:nc
-            diagonal[indices[(a - 1) * nc + c]] += w * map_point(cmap, ξ)[3]
+        # the element nodes are the quadrature rule; the basis is (block-)diagonal there
+        rule = QuadratureRule(el.nodes, el.nodal_weights)
+        if nc > 1
+            cmap = CellMap(V, cell)
+            indices, _ = cell_dofs(V, cell)
+            for (a, (ξ, w)) in enumerate(zip(el.nodes, el.nodal_weights)), c in 1:nc
+                push!(rows, indices[(a - 1) * nc + c]); push!(cols, indices[(a - 1) * nc + c])
+                push!(vals, w * map_point(cmap, ξ)[3])
+            end
+            continue
+        end
+        b = cell_basis(V, cell, rule, tabulate(el, rule.points)...)
+        n = length(b.indices)
+        for j in 1:n, i in 1:n
+            v = sum(dot(b.φ[i, q], b.φ[j, q]) * b.dA[q] for q in eachindex(b.dA))
+            abs(v) > 1e-13 * b.dA[1] || continue  # nodal bases vanish at the other nodes up to round-off
+            push!(rows, b.indices[i]); push!(cols, b.indices[j]); push!(vals, v)
         end
     end
     n = num_dofs(V)
-    used = findall(!iszero, diagonal)
-    return sparse(used, used, diagonal[used], n, n)
+    return sparse(rows, cols, vals, n, n)
 end
 
 """

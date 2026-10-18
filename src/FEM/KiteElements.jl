@@ -110,3 +110,104 @@ function dof_functionals(f::KiteBrokenRT, shape::Quadrilateral)
 end
 
 prime_basis(::Union{KiteRadau, KiteBrokenRT}, shape::Triangle) = check_kite_shape(shape)
+
+# --- further velocity spaces on the kites -----------------------------------------------
+
+"""
+    KiteBrokenBDM(k)
+
+BDM_k on every kite, broken across the dual-cell boundaries like
+`KiteBrokenRT(k)`: normal continuity across halves of primal edges, the dofs
+of the interior (center–edge) edges stored on the kite. 8 dofs per kite for
+`k = 1` instead of 12.
+"""
+struct KiteBrokenBDM <: ElementFamily
+    order::Int
+    KiteBrokenBDM(k::Integer) = k >= 1 ? new(k) : throw(ArgumentError("BDM order must be at least 1"))
+end
+
+"""
+    KiteDualRadau(p)
+
+Velocity space of the dual cell method of Wess, Kapidani, Codecasa and
+Schöberl (JCP 2024): `Q_p × Q_p` on every kite with nodes at the tensor
+Gauss–Radau points that include the primal-vertex side (the mirror image of
+the `KiteRadau` nodes). On the halves of primal edges the dofs are the normal
+components (shared by the two kites of the dual cell), inside the kite the
+component values; there are no nodes on the dual-cell boundaries, so the field
+is broken there. With the nodes as quadrature the mass matrix has small
+blocks (2 × 2 per node, the nodes at a primal vertex coupled around it).
+"""
+struct KiteDualRadau <: ElementFamily
+    order::Int
+    KiteDualRadau(p::Integer) = p >= 0 ? new(p) : throw(ArgumentError("order must be non-negative"))
+end
+
+function_space(::Union{KiteBrokenBDM, KiteDualRadau}) = :Hdiv
+value_size(::Union{KiteBrokenBDM, KiteDualRadau}) = 2
+(f::Union{KiteBrokenBDM, KiteDualRadau})(depth::Integer, n::Integer) =
+    throw(ArgumentError("$f needs a kite mesh; its layout depends on point labels"))
+
+function Topology.num_nodes(f::KiteBrokenBDM, dm::Plex, p::Integer)
+    k, depth = f.order, get_depth(dm, p)
+    depth == 2 && return k * (k - 1) + 2 * (k + 1)
+    depth == 1 && return kite_edge_type(dm, p) == KITE_HALF_EDGE ? k + 1 : 0
+    return 0
+end
+
+function Topology.num_nodes(f::KiteDualRadau, dm::Plex, p::Integer)
+    k, depth = f.order, get_depth(dm, p)
+    depth == 2 && return 2k * (k + 1)
+    depth == 1 && return kite_edge_type(dm, p) == KITE_HALF_EDGE ? k + 1 : 0
+    return 0
+end
+
+closure_counts(f::KiteBrokenBDM, shape::ReferenceShape) =
+    (check_kite_shape(shape); [f.order * (f.order - 1) + 2 * (f.order + 1), f.order + 1, 0, 0, f.order + 1, 0, 0, 0, 0])
+closure_counts(f::KiteDualRadau, shape::ReferenceShape) =
+    (check_kite_shape(shape); [2f.order * (f.order + 1), f.order + 1, 0, 0, f.order + 1, 0, 0, 0, 0])
+
+prime_basis(f::KiteBrokenBDM, shape::Quadrilateral) = bdm_primes(f.order)
+
+function dof_functionals(f::KiteBrokenBDM, shape::Quadrilateral)
+    functionals, nodes = dof_functionals(BrezziDouglasMarini(f.order), shape)
+    k = f.order
+    ni = k * (k - 1)
+    edge(i) = ni + (i - 1) * (k + 1) .+ (1:(k + 1))
+    return functionals[[1:ni; edge(2); edge(3); edge(1); edge(4)]], nodes  # e2, e3 stored with the cell
+end
+
+function prime_basis(f::KiteDualRadau, shape::Quadrilateral)
+    p = f.order
+    functions = Vector{Vector{Matrix{Float64}}}()
+    for (i, j) in scalar_indices(p, shape)
+        push!(functions, [legendre_product(i, j, p), zero_coeffs(p)], [zero_coeffs(p), legendre_product(i, j, p)])
+    end
+    return pack_primes(functions, p, 2)
+end
+
+"Mirrored Gauss–Radau points (ascending, including -1, the primal-vertex side) and weights."
+function dual_radau(n)
+    x, w = gauss_radau(n)
+    return -reverse(x), reverse(w)
+end
+
+function dof_functionals(f::KiteDualRadau, shape::Quadrilateral)
+    p = f.order
+    r, _ = dual_radau(p + 1)
+    e1, e2 = SVector(1.0, 0.0), SVector(0.0, 1.0)
+    interior = [[DofFunctional([SVector(r[i], r[j])], [e1]) for j in 1:(p + 1) for i in 2:(p + 1)];
+                [DofFunctional([SVector(r[i], r[j])], [e2]) for j in 2:(p + 1) for i in 1:(p + 1)]]
+    # edge 1 (y = -1) from the primal vertex; edge 4 (x = -1) towards the primal vertex
+    edge1 = [DofFunctional([SVector(r[i], -1.0)], [edge_normal(shape, 1)]) for i in 1:(p + 1)]
+    edge4 = [DofFunctional([SVector(-1.0, r[j])], [edge_normal(shape, 4)]) for j in (p + 1):-1:1]
+    nodes = [SVector(r[i], r[j]) for j in 1:(p + 1) for i in 1:(p + 1)]
+    return [interior; edge1; edge4], nodes
+end
+
+function nodal_weights(f::KiteDualRadau, ::Quadrilateral, nodes)
+    r, w = dual_radau(f.order + 1)
+    return [rule_weight(r, w, ξ[1]) * rule_weight(r, w, ξ[2]) for ξ in nodes]
+end
+
+prime_basis(::Union{KiteBrokenBDM, KiteDualRadau}, shape::Triangle) = check_kite_shape(shape)

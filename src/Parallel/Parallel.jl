@@ -15,7 +15,7 @@ using ..FEM
 using ..FEM: BlockInverse
 
 export equal_area_zones, equal_area_partition, HaloExchange, exchange!, KiteDistribution, DofDistribution,
-    is_distributed, global_sum, gather_owned, restrict
+    is_distributed, global_sum, gather, local_solver, owned, num_local, owned_kites, num_local_kites
 
 include("Partition.jl")
 include("Halo.jl")

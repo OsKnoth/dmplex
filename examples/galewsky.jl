@@ -79,7 +79,7 @@ function main(args)
     hb = balanced_height()
     height(x) = hb(latitude(x)) + (perturbed ? perturbation(x) : 0.0)
     y = initial_state(model, velocity, height)
-    y0 = copy(y)
+    y0 = gather_state(model, y)
 
     wave_speed = sqrt(G * 1.1) + U_MAX
     dt = 0.15 * kite_size / wave_speed
@@ -94,7 +94,7 @@ function main(args)
         if step % max(1, nsteps ÷ 10) == 0 || step == nsteps
             mass, energy = total_mass(model, y), total_energy(model, y)
             state = gather_state(model, y)
-            dh = (state - y0)[height_dofs(model)]
+            dh = (state - y0)[global_height_dofs(model)]
             root && @printf("day %5.2f  |h - h0| = %.3e  mass %.1e  energy %.1e\n", step * dt / DAY,
                             sqrt(dot(dh, model.Mh * dh)), mass - mass0, (energy - energy0) / energy0)
         end
@@ -103,7 +103,7 @@ function main(args)
 
     # relative vorticity at kite centers (1/s) for ParaView, from the gathered state
     y = gather_state(model, y)
-    ζ = mass_solver(model.Z; lumped=true) \ (-(model.R * y[velocity_dofs(model)]))
+    ζ = mass_solver(model.Z; lumped=true) \ (-(model.R * y[global_velocity_dofs(model)]))
     if root
         center = SVector(0.0, 0.0)
         vorticity = [evaluate(model.Z, ζ, c, center)[2] * OMEGA for c in cell_range(model.kites)]

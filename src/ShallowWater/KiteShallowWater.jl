@@ -16,6 +16,9 @@ with the kite divergence `B` (`assemble_kite_divergence`), whose adjoint is
 the kite gradient, and the Coriolis matrix `C`. Mass and energy
 `½ H uᵀ M_u u + ½ g hᵀ M_h h` are conserved exactly by the semi-discretization.
 The state vector is `[u; h]`. `centers` are passed to `create_kite_mesh`.
+`velocity` selects the velocity space: `:rt` (`KiteBrokenRT(k)`, default),
+`:bdm` (`KiteBrokenBDM(k)`) or `:dual_radau` (`KiteDualRadau(k)`, the pair of
+Wess et al. with lumped velocity mass).
 
 Use `k ≥ 1`. At lowest order the pairing is inconsistent: with
 `KiteRadau(0) × KiteBrokenRT(0)` the discrete gradient does not converge (a
@@ -40,11 +43,11 @@ struct LinearKiteShallowWater{SU, SH}
 end
 
 function LinearKiteShallowWater(primal::Plex, k::Integer; height_order::Integer=k, gravity::Real=1.0,
-                                depth::Real=1.0, coriolis=x -> 2x[3], centers=nothing)
+                                depth::Real=1.0, coriolis=x -> 2x[3], centers=nothing, velocity::Symbol=:rt)
     kites = create_kite_mesh(primal; centers)
     H = FESpace(kites, KiteRadau(height_order); name="h")
-    U = FESpace(kites, KiteBrokenRT(k); name="u")
-    Sh, Su = mass_solver(H; lumped=height_order > 0), mass_solver(U)
+    U = FESpace(kites, kite_velocity_family(velocity, k); name="u")
+    Sh, Su = mass_solver(H; lumped=height_order > 0), mass_solver(U; lumped=velocity == :dual_radau)
     B = assemble_kite_divergence(H, U; degree=2 * max(k, height_order) + 2)
     return LinearKiteShallowWater(primal, kites, U, H, Su.matrix, Sh.matrix, Su, Sh, B,
                                   assemble_coriolis(U, coriolis), Float64(gravity), Float64(depth))
@@ -66,4 +69,12 @@ total_mass(m::LinearKiteShallowWater, y) = sum(m.Mh * view(y, height_dofs(m)))
 function total_energy(m::LinearKiteShallowWater, y)
     u, h = view(y, velocity_dofs(m)), view(y, height_dofs(m))
     return (m.depth * dot(u, m.Mu * u) + m.gravity * dot(h, m.Mh * h)) / 2
+end
+
+"Velocity family of the kite models: broken RT, broken BDM or the dual-Radau space of Wess et al."
+function kite_velocity_family(velocity::Symbol, k::Integer)
+    velocity == :rt && return KiteBrokenRT(k)
+    velocity == :bdm && return KiteBrokenBDM(k)
+    velocity == :dual_radau && return KiteDualRadau(k)
+    throw(ArgumentError("velocity must be :rt, :bdm or :dual_radau"))
 end

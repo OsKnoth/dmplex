@@ -135,6 +135,26 @@ The exact mass matrix is block diagonal with one block per dual cell (9 for
 RT0 on a triangular dual cell, 12 for a quadrilateral one, 30 for RT1 on a
 triangular dual cell).
 
+\paragraph{Other velocity spaces.} Two alternatives with the same continuity
+pattern (normal components continuous across half edges, broken across
+interior edges) are implemented:
+\begin{itemize}
+\item \code{KiteBrokenBDM(k)}: $\mathrm{BDM}_k$ on every kite,
+  $[P_k]^2\oplus\mathrm{span}\{\mathrm{curl}(x^{k+1}y),\mathrm{curl}(xy^{k+1})\}$,
+  normal components at the $k+1$ Gauss points of each edge and, for $k\ge2$,
+  moments against $[P_{k-2}]^2$; 8 instead of 12 degrees of freedom per kite for
+  $k=1$. The interior-edge degrees of freedom are stored with the kite as for RT.
+\item \code{KiteDualRadau(p)}, the velocity space of the dual cell method of Wess,
+  Kapidani, Codecasa and Sch\"oberl (2024): $Q_p\times Q_p$ on every kite with nodes at
+  the tensor Gauss--Radau points that include the primal-vertex side (the mirror
+  image of the height nodes). On the half edges the degrees of freedom are the
+  normal components, shared by the two kites of the dual cell; inside the kite the
+  component values. There are no nodes on the interior edges, so the field is
+  broken there without any special storage. With the nodes as quadrature the mass
+  matrix couples only the components at one node: blocks of size 3 for $p=1$ on
+  hexagon kites, independent of the mesh.
+\end{itemize}
+
 \paragraph{Vorticity.} Continuous $Q_{k+1}$ (\code{Lagrange(k+1)}) on the kites
 with Gauss--Lobatto nodes and lumped, diagonal mass.
 
@@ -337,6 +357,44 @@ cost the same; chordal (flat bilinear) kites give $9.10\cdot10^{-4}$ and
 $2.50\cdot10^{-4}$ (rate 1.87) instead of $3.60\cdot10^{-4}$ and
 $8.80\cdot10^{-5}$ (rate 2.03). Curved elements are the default.
 
+\subsection{Velocity spaces: RT, BDM and the pair of Wess et al.}
+Operator consistency ($L^2$ errors of the discrete gradient and divergence on
+hexagon kites with 960, 3840, 15360 kites) and the linear geostrophic steady state
+with Coriolis ($\|h(1)-h(0)\|$, RK4, finest mesh and rate):
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+pair (velocity / height) & gradient & divergence & geostrophic, finest (rate) \\
+\midrule
+RT1 / $Q_1$            & 0.21, 0.11, 0.052     & 0.016, 0.0060, 0.0027 & $1.94\cdot10^{-4}$ (1.99) \\
+RT1 / $Q_2$            & 0.0038, 0.00091, 0.00023 & 0.088, 0.045, 0.023 & $4.12\cdot10^{-5}$ (2.10) \\
+BDM1 / $Q_1$           & 0.13, 0.065, 0.032    & 0.28, 0.26, 0.25      & $1.46\cdot10^{-4}$ (1.78) \\
+BDM1 / $Q_2$           & 0.0021, 0.00048, 0.00012 & 0.84, 0.83, 0.82   & $1.61\cdot10^{-4}$ (1.20) \\
+Wess $p=1$ ($Q_1^2$ / $Q_1$) & 0.14, 0.069, 0.035 & 0.21, 0.18, 0.18    & $1.68\cdot10^{-4}$ (1.86) \\
+Wess $p=2$ ($Q_2^2$ / $Q_2$) & 0.0070, 0.0018, 0.00044 & 0.026, 0.013, 0.0064 & $5.61\cdot10^{-6}$ (2.07) \\
+\bottomrule
+\end{tabular}
+\end{center}
+The divergence error of BDM1 and of the Wess pair with $p=1$ does not converge in
+this norm (the discrete divergence of the broken velocity tested with the height
+space), yet the geostrophic steady state converges for all pairs. The Wess pair
+with $p=2$ is the most accurate, about seven times better than RT1/$Q_2$; energy is
+conserved exactly by all pairs.
+
+\paragraph{Wess pair with Coriolis.} Assembling the Coriolis term with the velocity
+nodes as quadrature (lumped) instead of exactly makes no difference
+($1.68\cdot10^{-4}$ versus $1.63\cdot10^{-4}$ for $p=1$, $5.61\cdot10^{-6}$ versus
+$5.62\cdot10^{-6}$ for $p=2$ on the finest mesh, same rates). In the nonlinear
+Williamson test case~2 (conservative variant, SSP-RK3) the Wess pair with $p=2$
+gives $8.54\cdot10^{-5}$ and $2.02\cdot10^{-5}$ on hex(2), hex(3) (rate 2.08)
+against $3.61\cdot10^{-4}$, $8.77\cdot10^{-5}$ for RT1/$Q_2$, with mass and energy
+conserved; with $p=1$ it converges with rate 1.4. In this implementation the pair
+therefore works with Coriolis and in the nonlinear case. Differences to a failing
+implementation could lie in the face terms (here the kite divergence $B$ and
+$G=-B^T$, both checked independently), in the orientation of the shared normal
+components at the half edges, or in the nonlinear terms (here the conservative
+variant with projected flux).
+
 \subsection{Kite method versus the standard mixed setup on the kite quads}
 The kite grid is an ordinary quadrilateral mesh, so the compatible pair
 RT1 $\times$ DG1 $\times$ CG2 of McRae and Cotter (global, non-diagonal mass
@@ -378,33 +436,10 @@ $8\cdot10^{-10}$.
 \section{Open questions and proposals}
 
 \subsection{Other velocity elements}
-\begin{itemize}
-\item \emph{Broken BDM.} $\mathrm{BDM}_1$ on the quadrilateral has 8 instead of
-  12 degrees of freedom, with the same normal-trace space as RT1; the broken
-  version on dual cells keeps the block-diagonal mass. The generic element
-  construction (prime basis plus dual functionals) needs only the BDM prime
-  space $[P_k]^2\oplus\mathrm{span}\{\mathrm{curl}(x^{k+1}y),\mathrm{curl}(xy^{k+1})\}$.
-\item \emph{Broken N\'ed\'elec / the dual-cell pair of Wess et al.} See below.
-\end{itemize}
-
-\subsection{The pair of Wess et al.\ with Coriolis}
-The dual-cell method with mass lumping (Wess et al.\ 2024) works for linear
-acoustics on the sphere but, in a first attempt, not with Coriolis or in the
-nonlinear case. A plausible reason: for acoustics only the pair
-(gradient, divergence) has to be compatible, $G = -D^T$. Coriolis adds the map
-$\bu\mapsto\rhat\times\bu$, which turns a field with continuous normal component
-into one with continuous tangential component. If the velocity space carries
-only one kind of continuity across the edges where the dual cells meet, the
-Coriolis form is still antisymmetric (energy neutral), but geostrophic balance
-$f\,\rhat\times\bu = -\nabla(gh)$ has to hold discretely for a consistent steady
-state: the range of $M_u^{-1}C$ restricted to balanced states must lie in the
-range of $M_u^{-1}B^T$. With lumped or broken spaces the dimensions of these
-ranges need not match, which gives inconsistent or spurious geostrophic modes
-(the analogue of the TRiSK $W$ operator on C grids). The kite RT space works
-because it is broken only across interior edges and rich enough there (TC2
-converges at second order). Proposal: implement the Wess pair in
-\code{dmplex.jl} and run the same diagnostics (operator consistency, geostrophic
-steady state, $f$-plane inertia-gravity modes) to locate the failure.
+Broken BDM and the space of Wess et al.\ are implemented (Section~3 and the
+results). Open: BDM2 and $p\ge3$ for the Wess pair, the dual-cell method on
+triangles only (Wess et al.\ use triangular primal meshes) versus general
+polygons, and a lumped version of the RT velocity mass.
 
 \subsection{Damping}
 For comparison, Gusto's standard shallow-water model (\code{SIQNModel}) obtains
@@ -452,14 +487,16 @@ cell, velocity dofs their dual-cell block (the smallest part around the dual
 vertex), vorticity dofs the smallest part among the kites touching them. With
 the ghost ring every owned dof has all its kites locally, so a rank computes
 the right-hand sides over its owned and ghost kites, and they are complete for
-its owned dofs; all mass blocks of owned dofs are local. A tendency evaluation
-needs four halo exchanges (state, $\zeta$, $K$, $\bF$). The linear operators
-are applied to the owned rows only. The run on one and on three ranks agree to
-$10^{-12}$, and mass and energy are conserved across ranks.
-
-In the first version every rank keeps the global mesh and global-length vectors
-and works on its local part only; a local numbering is the next step for large
-meshes.
+its owned dofs; all mass blocks of owned dofs are local. Kites and degrees of freedom
+are numbered locally (owned first, then ghosts); the global numbering is only used
+during setup and to gather states. Per tendency evaluation the halo exchange
+updates the velocity $\bu$ and height $h$ (prognostic), the vorticity $\zeta$ and,
+in the conservative variant, the mass flux $\bF$ (diagnostic). The kinetic energy
+is not exchanged: it lives in the height space, whose ghost degrees of freedom
+belong to ghost primal cells whose kites are all local. The linear operators are
+applied to the owned rows only. The runs on one and on three ranks agree to
+$10^{-12}$, and mass and energy are conserved across ranks. The global mesh is
+still built on every rank during setup.
 
 \paragraph{First scaling test.} Galewsky setup, 2562 hexagons (15360 kites),
 Mac with 8 performance and 8 efficiency cores, warmed-up SSP-RK3 steps; per
@@ -479,7 +516,9 @@ ranks & ms/step & kernels & halo (4$\times$) & sparse products & block solves \\
 Up to four ranks the speed-up is reasonable (2.7); from four to eight ranks the
 kernels hardly get faster, although each rank has half the kites. The
 per-kite cost grows by a factor of 2.4, which points to the global-length
-vectors (poor locality of the gathers) and to ranks on efficiency cores. A
-local numbering of kites and degrees of freedom is the next step.
+vectors (poor locality of the gathers) and to ranks on efficiency cores. With
+the local numbering 1, 2 and 4 ranks took 205, 129 and 82\,ms per step; a repeated
+test on a loaded machine (load average 9--11) was not meaningful, so the
+scaling beyond four ranks still has to be measured on an idle machine.
 
 \end{document}
