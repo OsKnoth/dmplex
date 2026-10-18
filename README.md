@@ -143,3 +143,12 @@ julia --project examples/nonlinear_shallow_water.jl 1 healpix 8   # Williamson T
 julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days
 julia --project docs/bickley_figure.jl quadrilateral 32 40   # Bickley jet on a periodic plane
 ```
+
+## License
+
+Copyright 2026 Oswald Knoth. Licensed under the [Apache License 2.0](LICENSE).
+
+The equal-area partitioning follows the implementation in
+[CGDycore.jl](https://github.com/CliMA/CGDycore.jl) (Apache License 2.0), which
+in turn follows the zonal equal-area algorithm of Leopardi (2006) as used in
+ECMWF's Atlas library.
