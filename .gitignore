@@ -10,3 +10,5 @@ docs/notes/*.fls
 docs/notes/*.fdb_latexmk
 docs/notes/*.out
 docs/notes/*.toc
+*.bp/
+LocalPreferences.toml

@@ -8,6 +8,7 @@ module FEM
 using LinearAlgebra
 using SparseArrays
 using StaticArrays
+using KernelAbstractions
 using ..Topology
 using ..Geometry
 
@@ -17,7 +18,8 @@ export ElementFamily, Lagrange, Discontinuous, RaviartThomas, Nedelec, KiteRadau
 export QuadratureRule, quadrature_rule, gauss_legendre, gauss_lobatto, gauss_radau, legendre
 export ReferenceElement, DofFunctional, num_dofs, tabulate, entity_dofs
 export FESpace, reference_element, cell_dofs, evaluate, Tabulation, cell_basis, precompute_basis
-export MassSolver, mass_solver, block_size
+export MassSolver, mass_solver, block_size, BlockSolver, block_solver, to_backend, cudss_solver, HostSolver,
+    device_solver, RowMatrix, row_mul!
 export assemble_kite_divergence, assemble_kite_gradient
 export assemble_mass, assemble_bilinear, assemble_divergence, assemble_coriolis, assemble_load, project
 
@@ -31,6 +33,7 @@ include("KiteElements.jl")
 include("FESpace.jl")
 include("Assembly.jl")
 include("MassSolver.jl")
+include("DeviceSolvers.jl")
 include("KiteOperators.jl")
 
 end # module

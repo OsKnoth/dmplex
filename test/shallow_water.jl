@@ -97,3 +97,36 @@ end
     dh = (y - y0)[height_dofs(m)]
     @test sqrt(dot(dh, m.Mh * dh)) < 2e-2
 end
+
+@testset "Distributed classical shallow water (MPI)" begin
+    # local cells: owned first, then the vertex ring of ghosts; every rank's ghosts are owned elsewhere
+    dm = create_cubed_sphere_mesh(3)
+    part = equal_area_partition(dm, 3)
+    for rank in 0:2
+        cells = CellDistribution(dm, part, 3, rank)
+        @test all(part[cells.cell_ids[owned_cells(cells)]] .== rank + 1)
+        @test all(part[cells.cell_ids[(cells.n_owned_cells + 1):end]] .!= rank + 1)
+    end
+
+    script = joinpath(@__DIR__, "mpi_fem.jl")
+    project = dirname(@__DIR__)
+    results = map((1, 3)) do n
+        file = tempname()
+        run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file`)
+        lines = readlines(file)
+        runs, i = [], 1
+        while i <= length(lines)
+            dmass, denergy, len = parse.(Float64, split(lines[i]))
+            push!(runs, (dmass, denergy, parse.(Float64, lines[(i + 1):(i + Int(len))])))
+            i += Int(len) + 1
+        end
+        runs
+    end
+    for ((dmass1, denergy1, y1), (dmass3, denergy3, y3)) in zip(results...)
+        @test length(y1) == length(y3)
+        @test maximum(abs, y1 - y3) < 1e-12 * maximum(abs, y1)
+        @test abs(dmass3) < 1e-13          # summed over ranks
+        @test abs(denergy3 - denergy1) < 1e-12
+        @test abs(denergy3) < 1e-8         # RK4 time error only
+    end
+end

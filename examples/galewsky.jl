@@ -3,14 +3,29 @@
 #
 #   julia --project examples/galewsky.jl [mesh] [resolution] [days] [perturbed]
 #   mpiexec -n 6 julia --project examples/galewsky.jl hexagon 5 6
+#   mpiexec -n 4 julia --project=examples/gpu examples/galewsky.jl hexagon 6 6 --gpu --adios
 #
 # mesh: hexagon | triangle | cubed, or an ICON/MPAS grid file (resolution is
 # then ignored). Nondimensional units: a = Ω = 1, heights in units of 10 km.
+# --gpu runs the model on CUDA GPUs (one per rank), --adios writes the
+# vorticity every output interval with ADIOS2 (VTX, galewsky_*.bp, straight
+# from the device with a CUDA-enabled ADIOS2); both need the environment
+# examples/gpu (see docs/levante.md).
+using KernelAbstractions
 using LinearAlgebra
 using MPI
 using Printf
 using StaticArrays
 using dmplex
+
+const USE_GPU = "--gpu" in ARGS
+const USE_ADIOS = "--adios" in ARGS
+if USE_GPU
+    using CUDA
+end
+if USE_ADIOS
+    using ADIOS2
+end
 
 const EARTH_RADIUS = 6.37122e6
 const OMEGA = 7.292e-5
@@ -60,7 +75,16 @@ function load_primal(mesh, resolution)
     return read_grid(mesh)
 end
 
+"Backend of the model: the node-local GPU of this rank, or the CPU."
+function select_backend(comm)
+    USE_GPU || return KernelAbstractions.CPU()
+    local_rank = MPI.Comm_rank(MPI.Comm_split_type(comm, MPI.COMM_TYPE_SHARED, MPI.Comm_rank(comm)))
+    CUDA.device!(local_rank % length(CUDA.devices()))
+    return CUDA.CUDABackend()
+end
+
 function main(args)
+    args = filter(a -> !startswith(a, "--"), args)
     mesh = length(args) >= 1 ? args[1] : "hexagon"
     resolution = length(args) >= 2 ? parse(Int, args[2]) : 4
     days = length(args) >= 3 ? parse(Float64, args[3]) : 1.0
@@ -70,11 +94,12 @@ function main(args)
     comm = MPI.COMM_WORLD
     nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
     primal = load_primal(mesh, resolution)
-    model = NonlinearKiteShallowWater(primal, 1; gravity=G, coriolis=x -> 2x[3], comm=nranks > 1 ? comm : nothing)
+    model = NonlinearKiteShallowWater(primal, 1; gravity=G, coriolis=x -> 2x[3], comm=nranks > 1 ? comm : nothing,
+                                      backend=select_backend(comm))
     kite_size = sqrt(4π / num_cells(model.kites))
-    root && @printf("%d primal cells, %d kites (≈ %.0f km), %d + %d dofs, %d ranks\n", num_cells(primal),
+    root && @printf("%d primal cells, %d kites (≈ %.0f km), %d + %d dofs, %d ranks on %s\n", num_cells(primal),
                     num_cells(model.kites), kite_size * EARTH_RADIUS / 1000, num_dofs(model.U), num_dofs(model.H),
-                    nranks)
+                    nranks, nameof(typeof(model.backend)))
 
     hb = balanced_height()
     height(x) = hb(latitude(x)) + (perturbed ? perturbation(x) : 0.0)
@@ -87,11 +112,20 @@ function main(args)
     dt = days * DAY / nsteps
     root && @printf("dt = %.1f s, %d steps\n", dt / OMEGA, nsteps)
 
+    d = model.distribution
+    writer = USE_ADIOS ? vtx_writer("galewsky_$(basename(mesh))_$(resolution).bp", model.kites;
+                                    cells=d.kite_ids[owned_kites(d)], cell_data=(:vorticity,),
+                                    comm=nranks > 1 ? comm : nothing) : nothing
+    output(step) = writer === nothing ||
+        write_vtx!(writer, step * dt / DAY; vorticity=OMEGA .* center_values(model, y))
+
     cache = SSPRK3Cache(y)
     mass0, energy0 = total_mass(model, y), total_energy(model, y)
+    output(0)
     elapsed = @elapsed for step in 1:nsteps
         ssprk3_step!(y, dt, tendency!, cache, model)
         if step % max(1, nsteps ÷ 10) == 0 || step == nsteps
+            output(step)
             mass, energy = total_mass(model, y), total_energy(model, y)
             state = gather_state(model, y)
             dh = (state - y0)[global_height_dofs(model)]
@@ -99,7 +133,8 @@ function main(args)
                             sqrt(dot(dh, model.Mh * dh)), mass - mass0, (energy - energy0) / energy0)
         end
     end
-    root && @printf("%.1f s wall time, %.1f ms per step\n", elapsed, 1000elapsed / nsteps)
+    root && @printf("%.1f s wall time, %.1f ms per step (with output)\n", elapsed, 1000elapsed / nsteps)
+    writer === nothing || (close(writer); root && println("wrote galewsky_$(basename(mesh))_$(resolution).bp"))
 
     # relative vorticity at kite centers (1/s) for ParaView, from the gathered state
     y = gather_state(model, y)

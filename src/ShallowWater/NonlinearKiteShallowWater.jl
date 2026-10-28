@@ -9,14 +9,17 @@ reference basis tabulated once, a physical H(div) basis function is
 `φ = P φ̂`, so a kernel gathers `û = Σ sᵢ uᵢ φ̂ᵢ`, applies the 3×2 factor and
 scatters `φ̂ᵢ ⋅ (Pᵀ g)`; no per-cell basis is stored.
 """
-struct KiteQuadrature
-    points::Vector{SVector{2, Float64}}
-    weights::Vector{Float64}
-    piola::Matrix{SMatrix{3, 2, Float64, 6}}  # (point, cell)
-    dA::Matrix{Float64}
-    normal::Matrix{SVector{3, Float64}}
-    coriolis::Matrix{Float64}
+struct KiteQuadrature{V, P, M, N}
+    points::Vector{SVector{2, Float64}}     # host only, for tabulation
+    weights::V
+    piola::P      # SMatrix{3, 2} per (point, cell)
+    dA::M
+    normal::N     # SVector{3} per (point, cell)
+    coriolis::M
 end
+
+FEM.to_backend(backend, Q::KiteQuadrature) =
+    KiteQuadrature(Q.points, (to_backend(backend, x) for x in (Q.weights, Q.piola, Q.dA, Q.normal, Q.coriolis))...)
 
 function KiteQuadrature(dm::Plex, degree::Integer, coriolis; projected::Bool=true,
                         cells::AbstractVector{<:Integer}=1:num_cells(dm))
@@ -53,20 +56,21 @@ function dense_tables(V::FESpace, points)
 end
 
 "Preallocated work vectors of one tendency evaluation."
-struct KiteWorkspace
-    ζ::Vector{Float64}
-    rhs_ζ::Vector{Float64}
-    K::Vector{Float64}
-    rhs_K::Vector{Float64}
-    F::Vector{Float64}
-    rhs_F::Vector{Float64}
-    p::Vector{Float64}
-    rhs_u::Vector{Float64}
-    rhs_h::Vector{Float64}
+struct KiteWorkspace{V<:AbstractVector{Float64}}
+    ζ::V
+    rhs_ζ::V
+    K::V
+    rhs_K::V
+    F::V
+    rhs_F::V
+    p::V
+    rhs_u::V
+    rhs_h::V
+    energy::V    # kinetic energy per owned kite
 end
 
-KiteWorkspace(nu, nh, nz) = KiteWorkspace(zeros(nz), zeros(nz), zeros(nh), zeros(nh), zeros(nu), zeros(nu),
-                                          zeros(nh), zeros(nu), zeros(nh))
+KiteWorkspace(backend, nu, nh, nz, nk) =
+    KiteWorkspace((KernelAbstractions.zeros(backend, Float64, n) for n in (nz, nz, nh, nh, nu, nu, nh, nu, nh, nk))...)
 
 
 """
@@ -111,49 +115,57 @@ ghosts); `tendency!` updates the ghosts of the state, the vorticity and the
 mass flux by halo exchange and computes the owned dofs. The state vector is
 the local `[u; h]`; `gather_state` assembles the global one. `Mu` and `Mh` are
 the global mass matrices (for diagnostics on gathered states).
+
+`backend` is the KernelAbstractions backend of all run-time arrays
+(`CPU()` by default, `CUDABackend()` after `using CUDA`): the state, the work
+vectors, the metric terms, the dof tables, the block-diagonal mass solvers
+(`BlockSolver`) and the halo buffers live there, so a time step runs entirely
+on the device. Halo exchange passes device buffers to MPI if it is CUDA-aware.
 """
-struct NonlinearKiteShallowWater{SU, SH, SHL, SZ, T, D}
+struct NonlinearKiteShallowWater{Q, A3, A4, IM, FM, V, S, RM, T, W, D, BE}
     primal::Plex
     kites::Plex
     U::FESpace
     H::FESpace
     Z::FESpace
-    quadrature::KiteQuadrature            # metric terms of the local kites
-    φu::Array{Float64, 3}   # (dof, component, point)
-    φh::Array{Float64, 3}
-    ∇φh::Array{Float64, 4}  # reference gradients (dof, 1, direction, point)
-    φz::Array{Float64, 3}
-    iu::Matrix{Int}         # (dof, local kite), local dof numbers
-    su::Matrix{Float64}
-    ih::Matrix{Int}
-    iz::Matrix{Int}
+    quadrature::Q           # metric terms of the local kites
+    φu::A3                  # (dof, component, point)
+    φh::A3
+    ∇φh::A4                 # reference gradients (dof, 1, direction, point)
+    φz::A3
+    iu::IM                  # (dof, local kite), local dof numbers
+    su::FM
+    ih::IM
+    iz::IM
     Mu::SparseMatrixCSC{Float64, Int}     # global mass matrices
     Mh::SparseMatrixCSC{Float64, Int}
-    mass_h::Vector{Float64}               # local diagonal of the height mass
-    Mu_solver::SU                         # owned velocity blocks (local numbering)
-    Mh_solver::SH                         # owned height dofs
-    Mh_local_solver::SHL                  # all local height dofs (kinetic energy)
-    Mz_solver::SZ                         # owned vorticity dofs
+    mass_h::V                             # local diagonal of the height mass
+    Mu_solver::S                          # owned velocity blocks (local numbering)
+    Mh_solver::S                          # owned height dofs
+    Mh_local_solver::S                    # all local height dofs (kinetic energy)
+    Mz_solver::S                          # owned vorticity dofs
     B::SparseMatrixCSC{Float64, Int}      # global operators
     R::SparseMatrixCSC{Float64, Int}      # ∫ φ_j ⋅ (r̂ × ∇γ_i): ⟨ζ, γ⟩ = -R u
-    R_owned::SparseMatrixCSC{Float64, Int}   # owned rows, transposed, local columns
-    Bt_owned::SparseMatrixCSC{Float64, Int}
-    B_owned::SparseMatrixCSC{Float64, Int}
+    R_owned::RM                           # owned rows, transposed, local columns
+    Bt_owned::RM
+    B_owned::RM
     faces::T                              # primal-face tables for the pointwise flux
-    work::KiteWorkspace
-    row_buffers::NTuple{3, Vector{Float64}}
-    distribution::D
+    work::W
+    row_buffers::NTuple{3, V}
+    distribution::D                       # halo buffers on the backend
     velocity_range::UnitRange{Int}
     height_range::UnitRange{Int}
     gravity::Float64
     flux::Symbol
     vorticity::Symbol
+    backend::BE
 end
 
 function NonlinearKiteShallowWater(primal::Plex, k::Integer; height_order::Integer=k + 1, gravity::Real=1.0,
                                    coriolis=x -> 2x[3], flux::Symbol=:projected, vorticity::Symbol=:potential,
                                    degree::Integer=2 * (k + 1), geometry::Symbol=:sphere, centers=nothing,
-                                   comm=nothing, part=nothing, velocity::Symbol=:rt)
+                                   comm=nothing, part=nothing, velocity::Symbol=:rt,
+                                   backend=KernelAbstractions.CPU())
     flux in (:pointwise, :projected) || throw(ArgumentError("flux must be :pointwise or :projected"))
     vorticity in (:absolute, :potential) || throw(ArgumentError("vorticity must be :absolute or :potential"))
     vorticity == :potential && flux != :projected &&
@@ -184,16 +196,24 @@ function NonlinearKiteShallowWater(primal::Plex, k::Integer; height_order::Integ
     φu, _, iu, su = tables(U, d.u)
     φh, ∇φh, ih, _ = tables(H, d.h)
     φz, _, iz, _ = tables(Z, d.z)
-    rows(A, dr, dc) = sparse(A[dr.global_ids[owned(dr)], dc.global_ids]')  # owned rows, transposed
+    # owned rows, transposed
+    rows(A, dr, dc) = RowMatrix(sparse(A[dr.global_ids[owned(dr)], dc.global_ids]'), backend)
+    solver(S, dd; ghosts=false) = block_solver(local_solver(S, dd; ghosts), backend)
+    dev(x) = to_backend(backend, x)
+    faces = map(primal_face_tables(H, U, degree)) do f
+        (weights=dev(f.weights), η=dev(f.η), φ=dev(f.φ), ν=f.ν)
+    end
     nu, nh, nz = num_local(d.u), num_local(d.h), num_local(d.z)
-    return NonlinearKiteShallowWater(primal, kites, U, H, Z, Q, φu, φh, ∇φh, φz, iu, su, ih, iz,
-                                     Su.matrix, Sh.matrix, [Sh.matrix[i, i] for i in d.h.global_ids],
-                                     local_solver(Su, d.u), local_solver(Sh, d.h),
-                                     local_solver(Sh, d.h; ghosts=true), local_solver(Sz, d.z), B, R,
-                                     rows(R, d.z, d.u), rows(sparse(B'), d.u, d.h), rows(B, d.h, d.u),
-                                     primal_face_tables(H, U, degree), KiteWorkspace(nu, nh, nz),
-                                     (zeros(d.z.n_owned), zeros(d.u.n_owned), zeros(d.h.n_owned)),
-                                     d, 1:nu, nu .+ (1:nh), Float64(gravity), flux, vorticity)
+    return NonlinearKiteShallowWater(primal, kites, U, H, Z, dev(Q), dev(φu), dev(φh), dev(∇φh), dev(φz),
+                                     dev(iu), dev(su), dev(ih), dev(iz),
+                                     Su.matrix, Sh.matrix, dev([Sh.matrix[i, i] for i in d.h.global_ids]),
+                                     solver(Su, d.u), solver(Sh, d.h), solver(Sh, d.h; ghosts=true), solver(Sz, d.z),
+                                     B, R, rows(R, d.z, d.u), rows(sparse(B'), d.u, d.h), rows(B, d.h, d.u),
+                                     faces, KiteWorkspace(backend, nu, nh, nz, d.n_owned_kites),
+                                     Tuple(KernelAbstractions.zeros(backend, Float64, n)
+                                           for n in (d.z.n_owned, d.u.n_owned, d.h.n_owned)),
+                                     to_backend(backend, d), 1:nu, nu .+ (1:nh), Float64(gravity), flux, vorticity,
+                                     backend)
 end
 
 "Reference tables of the height and velocity elements on the primal faces of a kite."
@@ -214,17 +234,17 @@ height_dofs(m::NonlinearKiteShallowWater) = m.height_range
 global_velocity_dofs(m::NonlinearKiteShallowWater) = 1:num_dofs(m.U)
 global_height_dofs(m::NonlinearKiteShallowWater) = num_dofs(m.U) .+ (1:num_dofs(m.H))
 
-"Local state `[u; h]` from the L2 projections of velocity and height fields."
+"Local state `[u; h]` from the L2 projections of velocity and height fields, on the model's backend."
 function initial_state(m::NonlinearKiteShallowWater, velocity, height)
     d = m.distribution
-    return [project(m.U, velocity)[d.u.global_ids]; project(m.H, height)[d.h.global_ids]]
+    return to_backend(m.backend, [project(m.U, velocity)[d.u.global_ids]; project(m.H, height)[d.h.global_ids]])
 end
 
-"Global state vector `[u; h]` with the owned values of all ranks (identical on every rank)."
+"Global state vector `[u; h]` with the owned values of all ranks (identical on every rank, on the host)."
 function gather_state(m::NonlinearKiteShallowWater, y)
     d = m.distribution
-    return [gather(d.u, view(y, velocity_dofs(m)), num_dofs(m.U), d.comm);
-            gather(d.h, view(y, height_dofs(m)), num_dofs(m.H), d.comm)]
+    return [gather(d.u, Array(view(y, velocity_dofs(m))), num_dofs(m.U), d.comm);
+            gather(d.h, Array(view(y, height_dofs(m))), num_dofs(m.H), d.comm)]
 end
 
 # --- kernels -------------------------------------------------------------------
@@ -315,17 +335,20 @@ function launch!(kernel, array, n, args...)
     return nothing
 end
 
-"Rows of `A` stored transposed (one CSC column per row): `y = α A x` in the work of the stored rows."
-function row_mul!(y, At::SparseMatrixCSC, x, α=1.0)
-    values, indices = nonzeros(At), rowvals(At)
-    @inbounds for j in axes(At, 2)
-        s = 0.0
-        for k in nzrange(At, j)
-            s += values[k] * x[indices[k]]
-        end
-        y[j] = α * s
+@kernel function kinetic_energy_kernel!(energy, @Const(u), @Const(h), @Const(piola), @Const(dA), @Const(φu),
+                                        @Const(iu), @Const(su), @Const(φh), @Const(ih))
+    c = @index(Global)
+    e = 0.0
+    @inbounds for q in axes(dA, 1)
+        uq = piola[q, c] * gather_vector(u, φu, iu, su, c, q)
+        e += gather_scalar(h, φh, ih, c, q) * dot(uq, uq) / 2 * dA[q, c]
     end
-    return y
+    @inbounds energy[c] = e
+end
+
+@kernel function center_value_kernel!(values, @Const(x), @Const(φ), @Const(idx))
+    c = @index(Global)
+    @inbounds values[c] = gather_scalar(x, φ, idx, c, 1)
 end
 
 # --- diagnostics and tendency ----------------------------------------------------
@@ -396,8 +419,8 @@ end
 
 "Total mass `Σ M_h h` over the owned height dofs of all ranks."
 function total_mass(m::NonlinearKiteShallowWater, y)
-    h = view(y, height_dofs(m))
-    return global_sum(m.distribution, sum(m.mass_h[i] * h[i] for i in owned(m.distribution.h); init=0.0))
+    o = owned(m.distribution.h)
+    return global_sum(m.distribution, dot(view(m.mass_h, o), view(view(y, height_dofs(m)), o)))
 end
 
 """
@@ -409,12 +432,31 @@ function total_energy(m::NonlinearKiteShallowWater, y)
     u, h = view(y, velocity_dofs(m)), view(y, height_dofs(m))
     exchange!(u, d.u, d.comm)
     exchange!(h, d.h, d.comm)
-    Q = m.quadrature
-    kinetic = 0.0
-    for c in owned_kites(d), q in axes(Q.dA, 1)
-        uq = Q.piola[q, c] * gather_vector(u, m.φu, m.iu, m.su, c, q)
-        kinetic += gather_scalar(h, m.φh, m.ih, c, q) * dot(uq, uq) / 2 * Q.dA[q, c]
-    end
-    potential = sum(m.mass_h[i] * h[i]^2 for i in owned(d.h); init=0.0)
-    return global_sum(d, kinetic + m.gravity * potential / 2)
+    Q, w, o = m.quadrature, m.work, owned(d.h)
+    launch!(kinetic_energy_kernel!, w.energy, d.n_owned_kites, w.energy, u, h, Q.piola, Q.dA, m.φu, m.iu, m.su,
+            m.φh, m.ih)
+    ho = view(h, o)
+    potential = dot(view(m.mass_h, o) .* ho, ho)
+    return global_sum(d, sum(w.energy) + m.gravity * potential / 2)
+end
+
+"""
+    center_values(m, y; field=:vorticity) -> values per owned kite
+
+Values of the relative vorticity (`field=:vorticity`, diagnosed from `y`) or
+the height (`field=:height`) at the centers of the owned local kites, as a
+vector on the model's backend (for output with `write_vtx!` without a copy
+to the host). Updates the ghost entries of `y`.
+"""
+function center_values(m::NonlinearKiteShallowWater, y; field::Symbol=:vorticity)
+    d = m.distribution
+    u, h = view(y, velocity_dofs(m)), view(y, height_dofs(m))
+    exchange!(u, d.u, d.comm)
+    exchange!(h, d.h, d.comm)
+    V, x, idx = field == :vorticity ? (m.Z, (compute_diagnostics!(m, u, h); m.work.ζ), m.iz) :
+                field == :height ? (m.H, h, m.ih) : throw(ArgumentError("field must be :vorticity or :height"))
+    φ = to_backend(m.backend, first(tabulate(reference_element(V, first(cell_range(V.dm))), [SVector(0.0, 0.0)])))
+    values = KernelAbstractions.zeros(m.backend, Float64, d.n_owned_kites)
+    launch!(center_value_kernel!, values, d.n_owned_kites, values, x, φ, idx)
+    return values
 end

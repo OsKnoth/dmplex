@@ -49,7 +49,9 @@ The figures are generated with `julia --project docs/make_figures.jl`.
 | `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection |
 | `src/TimeSteppers` | `TimeSteppers` | explicit Euler, classical RK4 |
 | `src/ShallowWater` | `ShallowWater` | linear and nonlinear rotating shallow water: mixed RT_k × DG_k (× CG_{k+1}) and the staggered kite method, mass and energy conserving |
-| `src/Outputs` | `Outputs` | VTKHDF output for ParaView |
+| `src/Parallel` | `Parallel` | equal-area partition, MPI distribution of kite models and of classical spaces, halo exchange |
+| `src/Outputs` | `Outputs` | VTKHDF output for ParaView; ADIOS2/VTX output from host or GPU arrays (`using ADIOS2`) |
+| `ext` | | package extensions: ADIOS2 output, cuDSS mass solvers on one or many GPUs (`using CUDA, CUDSS`) |
 | `docs` | | figure generation (`make_figures.jl`, plain SVG) |
 
 ## Grids
@@ -140,9 +142,15 @@ julia --project -e 'using Pkg; Pkg.test()'
 julia --project examples/advection.jl 4 cubed            # FV upwind advection, writes VTKHDF
 julia --project examples/linear_shallow_water.jl 2 cubed 8   # RT2 × DG2 linear shallow water
 julia --project examples/nonlinear_shallow_water.jl 1 healpix 8   # Williamson TC2, also with an ICON/MPAS file
+mpiexec -n 4 julia --project examples/nonlinear_shallow_water.jl 1 cubed 16   # the same over MPI
+mpiexec -n 4 julia --project=examples/gpu examples/nonlinear_shallow_water.jl 1 cubed 64 --gpu   # GPUs, cuDSS
 julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days
 julia --project docs/bickley_figure.jl quadrilateral 32 40   # Bickley jet on a periodic plane
+mpiexec -n 4 julia --project=examples/gpu examples/galewsky.jl hexagon 6 6 --gpu --adios   # GPUs, ADIOS2 output
 ```
+
+GPU runs (kite model on CUDA, ADIOS2 output straight from the device, cuDSS
+mass solvers over MPI) are described in [docs/levante.md](docs/levante.md).
 
 ## License
 

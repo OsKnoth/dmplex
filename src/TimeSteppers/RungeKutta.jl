@@ -1,13 +1,13 @@
 "Work arrays for `rk4_step!`."
-struct RK4Cache{T}
-    k1::Vector{T}
-    k2::Vector{T}
-    k3::Vector{T}
-    k4::Vector{T}
-    stage::Vector{T}
+struct RK4Cache{V<:AbstractVector}
+    k1::V
+    k2::V
+    k3::V
+    k4::V
+    stage::V
 end
 
-RK4Cache(y::AbstractVector{T}) where {T} = RK4Cache((similar(y) for _ in 1:5)...)
+RK4Cache(y::AbstractVector) = RK4Cache((similar(y) for _ in 1:5)...)
 
 """
     rk4_step!(y, dt, tendency!, cache, args...)
@@ -29,12 +29,12 @@ function rk4_step!(y::AbstractVector, dt::Real, tendency!, cache::RK4Cache, args
 end
 
 "Work arrays for `ssprk3_step!`."
-struct SSPRK3Cache{T}
-    k::Vector{T}
-    stage::Vector{T}
+struct SSPRK3Cache{V<:AbstractVector}
+    k::V
+    stage::V
 end
 
-SSPRK3Cache(y::AbstractVector{T}) where {T} = SSPRK3Cache(similar(y), similar(y))
+SSPRK3Cache(y::AbstractVector) = SSPRK3Cache(similar(y), similar(y))
 
 """
     ssprk3_step!(y, dt, tendency!, cache, args...)

@@ -15,7 +15,17 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 VTKHDF = "45d8cf6f-ab5f-45bc-ab92-77e36ab192e6"
 
+[weakdeps]
+ADIOS2 = "e0ce9d3b-0dbd-416f-8264-ccca772f60ec"
+CUDSS = "45b445bb-4962-46a0-9369-b4df9d0f772e"
+
+[extensions]
+dmplexADIOS2Ext = "ADIOS2"
+dmplexCUDSSExt = "CUDSS"
+
 [compat]
+ADIOS2 = "1.5"
+CUDSS = "0.8"
 Atomix = "1.6.0"
 HDF5 = "0.17.4"
 KernelAbstractions = "0.10.0"

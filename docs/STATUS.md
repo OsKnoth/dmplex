@@ -13,6 +13,20 @@ Working notes for continuing development (on another machine or in a new session
   `flux=:pointwise, vorticity=:absolute`).
 - Parallel: KernelAbstractions kernels with atomics, MPI distribution with equal-area partition,
   one vertex ring of ghost cells, local numbering, halo exchange of u, h, ζ, F.
+- Classical models over MPI and KernelAbstractions: `LinearShallowWater`/`NonlinearShallowWater(...; comm, backend)` on a
+  `CellDistribution` (owned cells + vertex ring of ghosts), owned rows of the global operators, nonlinear
+  terms over the local cells, `distributed_mass_solver`: local blocks + halo for DG, `GatheredMassSolver`
+  (Allgatherv + replicated Cholesky, exact) for RT/CG, `solver=:cudss` for GPUs; 1 and 3 ranks agree with
+  serial to round-off (`test/mpi_fem.jl`). Run-time data on the backend: operator rows as `RowMatrix`,
+  nonlinear terms, energy and enstrophy as kernels over dense per-cell bases (`CellTables`, one cell shape
+  per mesh), DG solves as `BlockSolver`; coupled mass matrices with cuDSS or through the host
+  (`HostSolver`, `GatheredMassSolver`).
+- GPU: `NonlinearKiteShallowWater(...; backend)` keeps all run-time arrays on the backend
+  (block solves `BlockSolver`, `RowMatrix` products, halo pack/unpack as kernels; plain loops on the CPU).
+- Output: ADIOS2 in the VTX data model (`vtx_writer`, `write_vtx!`, extension `dmplexADIOS2Ext`),
+  one block per rank, device arrays by pointer; checked in ParaView 6.1 (serial and 2 ranks, CPU).
+- cuDSS (extension `dmplexCUDSSExt`): `cudss_solver` (one GPU) and `distributed_cudss_solver` (MGMN,
+  rows in the contiguous numbering of `DofDistribution(V, cells)`) for the classical element pairs.
 - Documentation: `README.md`, `docs/notes/kite_shallow_water.tex` (+ PDF), wiki pages (see below).
 
 ## Open items
@@ -25,12 +39,18 @@ Working notes for continuing development (on another machine or in a new session
 3. **Galewsky at poster resolution** (`hexagon 5` ≈ 61k kites, or `x1.40962.grid.nc` ≈ 245k kites) on 6 ranks.
 4. **Damping**: APVM in the potential-vorticity term (energy conserving), upwind height flux on primal
    edges, biharmonic hyperviscosity for comparison.
-5. **Distributed mesh construction** (the global mesh is still built on every rank), GPU arrays.
+5. **Distributed mesh construction** (the global mesh is still built on every rank).
+6. **Levante GPU runs** (`docs/levante.md`, `examples/gpu/levante.sbatch`): the CUDA paths (kernels,
+   CUDA-aware halo exchange, ADIOS2 from device pointers, cuDSS single and MGMN) are untested so far.
+7. **Classical models on GPUs**: all run-time parts are KernelAbstractions kernels (checked on the CPU
+   backend); untested on CUDA. Run `examples/nonlinear_shallow_water.jl ... --gpu` (`solver=:cudss`) on
+   Levante. `GatheredMassSolver` replicates the factorization (not scalable) and is the CPU reference.
 
 ## Environment notes
 
 - Julia 1.12; `julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.test()'` (the test suite runs an
   `mpiexec` job with 1 and 3 ranks, a few minutes).
+- GPU, ADIOS2 and cuDSS runs use the environment `examples/gpu` (weak dependencies); see `docs/levante.md`.
 - NCDatasets must be ≥ 0.14 (uses NetCDF_jll). An old 0.10 version tries to install NetCDF via Conda.
 - MPI.jl uses `MPICH_jll`; start parallel runs with `mpiexec` from `MPI.mpiexec()` or the system `mpiexec`
   if it is MPICH-compatible.
