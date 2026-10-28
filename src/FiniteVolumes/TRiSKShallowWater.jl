@@ -49,7 +49,7 @@ and computes the owned tendencies, the ghost entries of `dy` are zero.
 `gather_state` assembles the global state (edges by `edge_index`, cells by
 `cell_index`), which serially is the state itself. `grid` is the global grid.
 """
-struct TRiSKShallowWater{I, M, V, G, D, BE}
+struct TRiSKShallowWater{I, M, V, G, D, BE} <: CGridShallowWater
     grid::TRiSKGrid
     cell_edges::I
     divergence::M        # n_{e,i} l_e / A_i
@@ -139,32 +139,32 @@ end
 TRiSKShallowWater(dm::Plex; centers=nothing, kwargs...) = TRiSKShallowWater(TRiSKGrid(dm; centers); kwargs...)
 
 "Local state ranges of velocity (edges) and height (cells)."
-velocity_dofs(m::TRiSKShallowWater) = 1:num_local(m.distribution.edges)
-height_dofs(m::TRiSKShallowWater) = num_local(m.distribution.edges) .+ (1:num_local(m.distribution.cells))
+velocity_dofs(m::CGridShallowWater) = 1:num_local(m.distribution.edges)
+height_dofs(m::CGridShallowWater) = num_local(m.distribution.edges) .+ (1:num_local(m.distribution.cells))
 "Global state ranges (of `gather_state`)."
-global_velocity_dofs(m::TRiSKShallowWater) = 1:num_edges(m.grid)
-global_height_dofs(m::TRiSKShallowWater) = num_edges(m.grid) .+ (1:num_cells(m.grid))
+global_velocity_dofs(m::CGridShallowWater) = 1:num_edges(m.grid)
+global_height_dofs(m::CGridShallowWater) = num_edges(m.grid) .+ (1:num_cells(m.grid))
 
 """
 Local state `[u; h]` on the model's backend: normal components of
 `velocity(x)` at the edge points and point values of `height(x)` at the
 generators.
 """
-function initial_state(m::TRiSKShallowWater, velocity, height)
+function initial_state(m::CGridShallowWater, velocity, height)
     g, d = m.grid, m.distribution
     u = [dot(velocity(g.edge_points[e]), g.edge_normals[e]) for e in d.edges.global_ids]
     return to_backend(m.backend, [u; map(height, g.centers[d.cells.global_ids])])
 end
 
 "Global state `[u; h]` with the owned values of all ranks (identical on every rank, on the host)."
-function gather_state(m::TRiSKShallowWater, y)
+function gather_state(m::CGridShallowWater, y)
     d = m.distribution
     return [gather(d.edges, Array(view(y, velocity_dofs(m))), num_edges(m.grid), d.comm);
             gather(d.cells, Array(view(y, height_dofs(m))), num_cells(m.grid), d.comm)]
 end
 
 "Update the ghost entries of the local state `y` (one message per neighbour)."
-exchange_state!(m::TRiSKShallowWater, y) = exchange!(y, m.distribution.state, m.distribution.comm)
+exchange_state!(m::CGridShallowWater, y) = exchange!(y, m.distribution.state, m.distribution.comm)
 
 # --- kernels -------------------------------------------------------------------
 
@@ -259,7 +259,7 @@ of a tendency run in stream order without waiting (the halo exchange
 synchronizes before MPI); on the CPU backend every kernel is waited for,
 since host code reads the results.
 """
-function run!(m::TRiSKShallowWater, kernel, n, args...)
+function run!(m::CGridShallowWater, kernel, n, args...)
     n == 0 && return nothing
     kernel(m.backend)(args...; ndrange=n)
     m.backend isa KernelAbstractions.CPU && KernelAbstractions.synchronize(m.backend)
@@ -276,7 +276,7 @@ function kinetic_energy!(m::TRiSKShallowWater, u, h)
 end
 
 "Potential vorticity and height at the local vertices, in the work vectors."
-function vertex_pv!(m::TRiSKShallowWater, u, h)
+function vertex_pv!(m::CGridShallowWater, u, h)
     w = m.work
     run!(m, vertex_pv_kernel!, length(w.qv), w.qv, w.ζv, w.hv, u, h, m.vertex_edges, m.curl, m.vertex_cells,
          m.vertex_height, m.coriolis)
@@ -318,15 +318,16 @@ function tendency!(dy::AbstractVector, y::AbstractVector, m::TRiSKShallowWater)
 end
 
 "Total mass `Σ_i A_i h_i` over the owned cells of all ranks."
-total_mass(m::TRiSKShallowWater, y) =
+total_mass(m::CGridShallowWater, y) =
     global_sum(m.distribution, dot(view(m.cell_areas, owned(m.distribution.cells)),
                                    view(view(y, height_dofs(m)), owned(m.distribution.cells))))
 
 """
-Energy `Σ_i A_i (h_i K_i + g h_i²/2)` over the owned cells of all ranks,
-conserved by the semi-discretization. Updates the ghost entries of `y` first.
+Energy `Σ_i A_i (h_i K_i + g h_i²/2)` over the owned cells of all ranks, with
+the model's kinetic energy `K_i` (conserved by the TRiSK and Gassmann
+semi-discretizations). Updates the ghost entries of `y` first.
 """
-function total_energy(m::TRiSKShallowWater, y)
+function total_energy(m::CGridShallowWater, y)
     exchange_state!(m, y)
     h = view(y, height_dofs(m))
     w, o = kinetic_energy!(m, view(y, velocity_dofs(m)), h), owned(m.distribution.cells)
@@ -334,7 +335,7 @@ function total_energy(m::TRiSKShallowWater, y)
 end
 
 "Potential enstrophy `Σ_v A_v h_v q_v² / 2` over the owned vertices of all ranks."
-function potential_enstrophy(m::TRiSKShallowWater, y)
+function potential_enstrophy(m::CGridShallowWater, y)
     exchange_state!(m, y)
     w = vertex_pv!(m, view(y, velocity_dofs(m)), view(y, height_dofs(m)))
     o = 1:m.distribution.n_owned_vertices
@@ -342,7 +343,7 @@ function potential_enstrophy(m::TRiSKShallowWater, y)
 end
 
 "Relative vorticity `ζ_v` at the local vertices (on the model's backend; valid away from the halo edge)."
-function relative_vorticity(m::TRiSKShallowWater, y)
+function relative_vorticity(m::CGridShallowWater, y)
     ζ = KernelAbstractions.zeros(m.backend, Float64, length(m.vertex_areas))
     run!(m, edge_sum_kernel!, length(ζ), ζ, view(y, velocity_dofs(m)), m.vertex_edges, m.curl)
     return ζ

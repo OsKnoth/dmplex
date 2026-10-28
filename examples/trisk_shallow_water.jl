@@ -1,14 +1,17 @@
-# Nonlinear shallow water with the TRiSK C-grid finite-volume scheme (as in
-# MPAS and the hexagonal ICON), Williamson test case 2: steady geostrophic
-# solid-body rotation.
+# Nonlinear shallow water with C-grid finite volumes, Williamson test case 2:
+# steady geostrophic solid-body rotation. TRiSK scheme on Voronoi meshes (as in
+# MPAS and the hexagonal ICON), or with --icon the triangular C grid of ICON
+# (RBF tangential velocity).
 #
 #   julia --project examples/trisk_shallow_water.jl [mesh] [resolution]
 #   mpiexec -n 4 julia --project examples/trisk_shallow_water.jl hexagon 7
 #   srun -n 4 julia --project=examples/gpu examples/trisk_shallow_water.jl hexagon 8 --gpu
 #   julia --project examples/trisk_shallow_water.jl hexagon 6 --gassmann
+#   julia --project examples/trisk_shallow_water.jl triangle 6 --icon
 #
-# mesh: hexagon (Voronoi dual of the icosahedral mesh), or an MPAS grid file
-# (Voronoi cells) or an ICON grid file (its hexagonal dual). Units: a = Ω = g = 1.
+# mesh: hexagon (Voronoi dual of the icosahedral mesh), triangle (the
+# icosahedral mesh, --icon), or an MPAS grid file (Voronoi cells) or an ICON grid
+# file (its hexagonal dual, or its triangles with --icon). Units: a = Ω = g = 1.
 # --gassmann uses the PV flux of Gassmann (2013, 2018) instead of TRiSK's (as in
 # ICON-IAP), --gassmann-mean the same reconstruction with the mean edge PV.
 using KernelAbstractions
@@ -17,18 +20,24 @@ using StaticArrays
 using dmplex
 
 const USE_GPU = "--gpu" in ARGS
+const USE_ICON = "--icon" in ARGS
 const PV_FLUX = "--gassmann-mean" in ARGS ? :gassmann_mean : "--gassmann" in ARGS ? :gassmann : :trisk
 if USE_GPU
     using CUDA
 end
 
-"Voronoi mesh and its generators (`nothing`: computed by `TRiSKGrid`)."
-function load_voronoi_mesh(mesh, resolution)
+"""
+Mesh and its mass points (`nothing`: computed by `TRiSKGrid`): Voronoi cells for
+TRiSK, triangles with circumcenters for the ICON model (`--icon`).
+"""
+function load_mesh(mesh, resolution)
+    mesh == "triangle" && return create_spherical_mesh(resolution), nothing
     if mesh == "hexagon"   # the generators are the vertices of the icosahedral mesh
         return create_hexagon_mesh(resolution), create_spherical_mesh(resolution).coordinates
     end
     isfile(mesh) || error("unknown mesh $mesh")
-    return read_grid(mesh; dual=NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)), nothing  # ICON: hexagonal dual
+    icon_file = NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)
+    return read_grid(mesh; dual=icon_file && !USE_ICON), nothing   # TRiSK on ICON grids: the hexagonal dual
 end
 
 "Backend of the model: the node-local GPU of this rank, or the CPU."
@@ -41,14 +50,15 @@ end
 
 function main(args)
     args = filter(a -> !startswith(a, "--"), args)
-    mesh = length(args) >= 1 ? args[1] : "hexagon"
+    mesh = length(args) >= 1 ? args[1] : USE_ICON ? "triangle" : "hexagon"
     resolution = length(args) >= 2 ? parse(Int, args[2]) : 5
 
     MPI.Initialized() || MPI.Init()
     comm = MPI.COMM_WORLD
     nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
-    dm, centers = load_voronoi_mesh(mesh, resolution)
-    model = TRiSKShallowWater(dm; centers, pv_flux=PV_FLUX, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
+    dm, centers = load_mesh(mesh, resolution)
+    options = (; centers, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
+    model = USE_ICON ? ICONShallowWater(dm; options...) : TRiSKShallowWater(dm; pv_flux=PV_FLUX, options...)
     root && println("$(num_cells(dm)) cells, $(num_edges(dm)) edges, $(num_vertices(dm)) vertices, $nranks ranks on ",
                     nameof(typeof(model.backend)))
 

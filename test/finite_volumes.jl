@@ -109,6 +109,43 @@ end
     @test all(errors[2, :] .< errors[1, :] ./ 2.5)   # about second order in the L2 norm
 end
 
+@testset "ICON triangle shallow water" begin
+    g = TRiSKGrid(create_spherical_mesh(3))   # circumcenters
+    @test dmplex.orthogonality_defect(g.dm, g.centers) < 1e-12
+    # RBF tangential velocity: exact for constant vectors along r̂ × n_e by construction, consistent
+    E, C = rbf_coefficients(g)
+    ω = SVector(0.3, -0.2, 1.0)
+    solid = [dot(cross(ω, x), n) for (x, n) in zip(g.edge_points, g.edge_normals)]
+    tangential = [dot(cross(ω, x), cross(x, n)) for (x, n) in zip(g.edge_points, g.edge_normals)]
+    @test maximum(abs, [sum(C[k, e] * solid[E[k, e]] for k in 1:4) for e in 1:num_edges(g)] - tangential) < 0.01
+    # bilinear weights: partition of unity, no first moment
+    B = dmplex.FiniteVolumes.bilinear_weights(g)
+    @test all(sum(B; dims=1) .≈ 1)
+    @test all(i -> norm(cross(g.centers[i], sum(B[k, i] * g.edge_points[g.cell_edges[k, i]] for k in 1:3))) < 1e-14,
+              1:num_cells(g))
+
+    u0 = 0.2
+    velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
+    height(x) = 1 - (u0 + u0^2 / 2) * x[3]^2
+    errors = map((3, 4)) do n
+        m = ICONShallowWater(create_spherical_mesh(n))
+        y = initial_state(m, velocity, height)
+        y0 = copy(y)
+        mass0, energy0 = total_mass(m, y), total_energy(m, y)
+        dt = 0.2 * minimum(m.grid.dual_lengths)
+        cache = RK4Cache(y)
+        for _ in 1:ceil(Int, 1 / dt)
+            rk4_step!(y, dt, tendency!, cache, m)
+        end
+        @test abs(total_mass(m, y) - mass0) < 1e-13
+        @test abs(total_energy(m, y) - energy0) / energy0 < 1e-5
+        dh = (y - y0)[height_dofs(m)]
+        sqrt(sum(m.grid.cell_areas .* dh .^ 2) / 4π)
+    end
+    @test errors[1] < 1e-4
+    @test errors[2] < errors[1] / 3
+end
+
 @testset "TRiSK distribution (MPI)" begin
     # ownership without MPI: every cell and edge owned exactly once, owned edges have an owned cell
     g = TRiSKGrid(create_hexagon_mesh(3))
@@ -126,7 +163,7 @@ end
     # 1 and 3 ranks give the same state (gathers only, no atomics: bitwise)
     script = joinpath(@__DIR__, "mpi_trisk.jl")
     project = dirname(@__DIR__)
-    for pv_flux in ("trisk", "gassmann", "gassmann_mean")
+    for pv_flux in ("trisk", "gassmann", "gassmann_mean", "icon")
         results = map((1, 3)) do n
             file = tempname()
             run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file $pv_flux`)
@@ -136,7 +173,7 @@ end
         ((dmass1, denergy1, enstrophy1, _), y1), ((dmass3, denergy3, enstrophy3, _), y3) = results
         @test y3 == y1
         @test abs(dmass3) < 1e-13
-        @test abs(denergy3) < 1e-9
+        @test abs(denergy3) < (pv_flux == "icon" ? 1e-6 : 1e-9)   # ICON's scheme does not conserve energy
         @test abs(denergy3 - denergy1) < 1e-14     # summation order of the reduction only
         @test enstrophy3 ≈ enstrophy1
     end

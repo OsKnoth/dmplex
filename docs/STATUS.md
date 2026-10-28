@@ -32,6 +32,22 @@ Working notes for continuing development (on another machine or in a new session
   Levante A100, hexagon 8 (655k cells): TC2 per RK4 step `:gassmann` 11.6 ms (1 GPU) / 4.4 ms (4 GPUs),
   `:gassmann_mean` 8.3 / 3.5 ms, 1 and 4 GPUs identical errors; Galewsky 6 days on 4 GPUs 28 s (TRiSK),
   58 s (`:gassmann`), 43 s (`:gassmann_mean`).
+- Finite volumes, triangles: `ICONShallowWater(dm; divergence_damping, comm, backend)`, the triangular C grid of
+  ICON's nonhydrostatic core (ported from ICON 2024.07 on Levante, `icon-model/src`): RBF tangential velocity
+  (`rbf_vec_compute_coeff_edge`, 4 edges, inverse multiquadric, scale 0.5), `K_e = (u² + v²)/2`, bilinear
+  `e_bln_c_s` to the cells, `coeff_gradekin`, vertex vorticity averaged to the edges, `c_lin_e` heights, optional
+  fourth-order divergence damping. Reuses `TRiSKGrid` (circumcenters) and `TRiSKDistribution`; shared code in
+  `CGridShallowWater`. MPI bitwise identical on 1 and 3 ranks. TC2 L2 height error 8.5e-5 → 3.9e-6 (1280 → 82k
+  cells), the max error converges too; mass to round-off, energy 1e-8 (not conserved by construction).
+  Galewsky (`trisk_galewsky.jl <ICON grid file> 0 6 --icon`) on the public ICON grids R02B05/R02B06
+  (`/pool/data/ICON/grids/public/mpim`): stable, the expected roll-up, energy -4e-8 over 6 days; on R02B06 less
+  grid imprint than TRiSK on hexagon 7. On dmplex's own bisection triangle mesh (not spring-optimized) the jet
+  blows up after 0.5–2.4 days at a fixed place (independent of perturbation, time step and damping): use ICON
+  grids, as MPAS grids for the hexagons.
+  Levante A100 on the ICON grids: TC2 L2 height error 2.5e-7 / 6.3e-8 / 1.6e-8 for R02B06/07/08 (second
+  order), 1 and 4 GPUs identical; per RK4 step R02B06 (328k cells) 1.5 ms (1 GPU) / 1.8 ms (4), R02B07
+  (1.3M) 2.4 / 1.7 ms, R02B08 (5.2M) 7.8 ms on 1 GPU. Galewsky R02B07 (≈ 20 km), 6 days with divergence
+  damping, 4 GPUs: 40406 steps in 60 s, |ζ| ≤ 1.7e-4 1/s.
   Next: APVM/upwind PV or hyperdiffusion, distributed mesh construction (the global grid and TRiSK tables
   are still built on every rank); Voronoi generation itself is not a priority (MPAS grids are used).
 - Parallel: KernelAbstractions kernels with atomics, MPI distribution with equal-area partition,

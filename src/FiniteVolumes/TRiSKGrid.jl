@@ -213,3 +213,34 @@ function gassmann_coefficients(g::TRiSKGrid)
     end
     return edges, pv_edges, weights
 end
+
+"""
+    rbf_coefficients(g::TRiSKGrid; scale=0.5) -> (edges, weights)
+
+Coefficients of the tangential velocity at the edges by vector radial basis
+functions, as in ICON (`rbf_vec_compute_coeff_edge`, `rbf_vec_kern_e = 3`):
+the stencil of edge `e` are the other edges of its two cells (four on a
+triangle mesh), the kernel is the inverse multiquadric
+`φ(r) = 1/√(1 + (r/scale)²)` of the great-circle distance times the dot
+product of the normals, and the weights are normalized so that they
+reproduce a constant vector exactly in the direction `r̂ × n_e`:
+
+    Σ_k weights[k, e] u_{edges[k, e]}  ≈  u ⋅ (r̂ × n_e).
+
+`scale` is in units of the sphere radius; ICON uses 0.5 down to a resolution
+of 2 km.
+"""
+function rbf_coefficients(g::TRiSKGrid; scale::Real=0.5)
+    n, x = g.edge_normals, g.edge_points
+    kernel(a, b) = 1 / sqrt(1 + (arc_length(a, b) / scale)^2)
+    sides(i) = (g.cell_edges[k, i] for k in axes(g.cell_edges, 1) if g.cell_signs[k, i] != 0)
+    columns = map(1:num_edges(g)) do e
+        stencil = Int[f for s in 1:2 for f in sides(g.edge_cells[s, e]) if f != e]
+        A = [dot(n[i], n[j]) * kernel(x[i], x[j]) for i in stencil, j in stencil]
+        t = cross(x[e], n[e])
+        c = cholesky(Symmetric(A)) \ [dot(t, n[j]) * kernel(x[e], x[j]) for j in stencil]
+        c ./= sum(c[k] * dot(t, n[stencil[k]]) for k in eachindex(stencil))
+        return stencil, c
+    end
+    return padded(first.(columns), 1), padded(last.(columns), 0.0)
+end

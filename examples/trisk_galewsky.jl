@@ -1,19 +1,23 @@
-# Galewsky et al. (2004) barotropically unstable mid-latitude jet with the TRiSK
-# C-grid finite-volume shallow-water model (as in MPAS and the hexagonal ICON).
+# Galewsky et al. (2004) barotropically unstable mid-latitude jet with the C-grid
+# finite-volume shallow-water models: TRiSK on Voronoi meshes (as in MPAS and the
+# hexagonal ICON), or with --icon the triangular C grid of ICON.
 #
 #   julia --project examples/trisk_galewsky.jl [mesh] [resolution] [days] [perturbed] [--gassmann[-mean]]
 #   mpiexec -n 4 julia --project examples/trisk_galewsky.jl hexagon 7 6 --gassmann-mean
 #   srun -n 4 julia --project=examples/gpu examples/trisk_galewsky.jl hexagon 8 6 --gpu
+#   mpiexec -n 4 julia --project examples/trisk_galewsky.jl triangle 7 6 --icon
 #
-# mesh: hexagon (Voronoi dual of the icosahedral mesh), or an MPAS grid file
-# (Voronoi cells) or an ICON grid file (its hexagonal dual). Nondimensional
-# units: a = Ω = 1, heights in units of 10 km. --gassmann uses the PV flux of
+# mesh: hexagon (Voronoi dual of the icosahedral mesh), triangle (the
+# icosahedral mesh, --icon), or an MPAS grid file (Voronoi cells) or an ICON
+# grid file (its hexagonal dual, or its triangles with --icon). Nondimensional
+# units: a = Ω = 1, heights in units of 10 km. The ICON model runs with ICON's
+# fourth-order divergence damping (divdamp_fac = 0.0025). --gassmann uses the PV flux of
 # Gassmann (2013, 2018) instead of TRiSK's (as in ICON-IAP), --gassmann-mean
 # the same reconstruction with the mean edge PV; --gpu runs on CUDA GPUs (one
 # per rank, environment examples/gpu). No dissipation: the energy- and
 # mass-conserving schemes run inviscid (--gassmann then develops grid-scale
 # vorticity after day 3). Writes the relative vorticity (1/s) at the cells to
-# trisk_galewsky_<mesh>_<resolution>_<pv flux>.vtkhdf.
+# trisk_galewsky_<mesh>_<scheme>.vtkhdf.
 using KernelAbstractions
 using LinearAlgebra
 using MPI
@@ -22,7 +26,9 @@ using StaticArrays
 using dmplex
 
 const USE_GPU = "--gpu" in ARGS
+const USE_ICON = "--icon" in ARGS
 const PV_FLUX = "--gassmann-mean" in ARGS ? :gassmann_mean : "--gassmann" in ARGS ? :gassmann : :trisk
+const SCHEME = USE_ICON ? :icon : PV_FLUX
 if USE_GPU
     using CUDA
 end
@@ -68,13 +74,18 @@ function perturbation(x)
     return 120 / MEAN_DEPTH * cos(φ) * exp(-(3λ)^2) * exp(-(15 * (π / 4 - φ))^2)
 end
 
-"Voronoi mesh and its generators (`nothing`: computed by `TRiSKGrid`)."
-function load_voronoi_mesh(mesh, resolution)
+"""
+Mesh and its mass points (`nothing`: computed by `TRiSKGrid`): Voronoi cells for
+TRiSK, triangles with circumcenters for the ICON model (`--icon`).
+"""
+function load_mesh(mesh, resolution)
+    mesh == "triangle" && return create_spherical_mesh(resolution), nothing
     if mesh == "hexagon"   # the generators are the vertices of the icosahedral mesh
         return create_hexagon_mesh(resolution), create_spherical_mesh(resolution).coordinates
     end
     isfile(mesh) || error("unknown mesh $mesh")
-    return read_grid(mesh; dual=NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)), nothing  # ICON: hexagonal dual
+    icon_file = NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)
+    return read_grid(mesh; dual=icon_file && !USE_ICON), nothing   # TRiSK on ICON grids: the hexagonal dual
 end
 
 "Backend of the model: the node-local GPU of this rank, or the CPU."
@@ -95,7 +106,7 @@ end
 
 function main(args)
     args = filter(a -> !startswith(a, "--"), args)
-    mesh = length(args) >= 1 ? args[1] : "hexagon"
+    mesh = length(args) >= 1 ? args[1] : USE_ICON ? "triangle" : "hexagon"
     resolution = length(args) >= 2 ? parse(Int, args[2]) : 6
     days = length(args) >= 3 ? parse(Float64, args[3]) : 6.0
     perturbed = length(args) >= 4 ? parse(Bool, args[4]) : true
@@ -103,12 +114,19 @@ function main(args)
     MPI.Initialized() || MPI.Init()
     comm = MPI.COMM_WORLD
     nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
-    dm, centers = load_voronoi_mesh(mesh, resolution)
-    model = TRiSKShallowWater(dm; centers, gravity=G, pv_flux=PV_FLUX, comm=nranks > 1 ? comm : nothing,
-                              backend=select_backend(comm))
-    dx = minimum(model.grid.dual_lengths)
-    root && @printf("%d cells (≈ %.0f km), %s PV flux, %d ranks on %s\n", num_cells(dm),
-                    sqrt(4π / num_cells(dm)) * EARTH_RADIUS / 1000, PV_FLUX, nranks, nameof(typeof(model.backend)))
+    dm, centers = load_mesh(mesh, resolution)
+    grid = TRiSKGrid(dm; centers)
+    dt = 0.5 * minimum(grid.dual_lengths) / (sqrt(G * 1.1) + U_MAX)
+    nsteps = ceil(Int, days * DAY / dt)
+    dt = days * DAY / nsteps
+    options = (; gravity=G, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
+    model = if USE_ICON   # ICON's fourth-order divergence damping, divdamp_fac = 0.0025 per time step
+        ICONShallowWater(grid; divergence_damping=0.0025 * (4π / num_cells(dm))^2 / dt, options...)
+    else
+        TRiSKShallowWater(grid; pv_flux=PV_FLUX, options...)
+    end
+    root && @printf("%d cells (≈ %.0f km), %s scheme, %d ranks on %s\n", num_cells(dm),
+                    sqrt(4π / num_cells(dm)) * EARTH_RADIUS / 1000, SCHEME, nranks, nameof(typeof(model.backend)))
 
     hb = balanced_height()
     height(x) = hb(latitude(x)) + (perturbed ? perturbation(x) : 0.0)
@@ -116,9 +134,6 @@ function main(args)
     h0 = gather_state(model, y)[global_height_dofs(model)]
     areas = model.grid.cell_areas
 
-    dt = 0.5 * dx / (sqrt(G * 1.1) + U_MAX)
-    nsteps = ceil(Int, days * DAY / dt)
-    dt = days * DAY / nsteps
     root && @printf("dt = %.1f s, %d RK4 steps\n", dt / OMEGA, nsteps)
 
     cache = RK4Cache(y)
@@ -143,7 +158,8 @@ function main(args)
     if root
         vorticity = OMEGA .* cell_vorticity(model.grid, state[global_velocity_dofs(model)])
         @printf("relative vorticity: min %.2e, max %.2e 1/s\n", minimum(vorticity), maximum(vorticity))
-        filename = write_vtkhdf("trisk_galewsky_$(basename(mesh))_$(resolution)_$PV_FLUX.vtkhdf", dm; vorticity)
+        name = isfile(mesh) ? splitext(basename(mesh))[1] : "$(mesh)_$(resolution)"
+        filename = write_vtkhdf("trisk_galewsky_$(name)_$SCHEME.vtkhdf", dm; vorticity)
         println("wrote $filename")
     end
     return model, state
