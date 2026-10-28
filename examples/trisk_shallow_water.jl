@@ -5,15 +5,19 @@
 #   julia --project examples/trisk_shallow_water.jl [mesh] [resolution]
 #   mpiexec -n 4 julia --project examples/trisk_shallow_water.jl hexagon 7
 #   srun -n 4 julia --project=examples/gpu examples/trisk_shallow_water.jl hexagon 8 --gpu
+#   julia --project examples/trisk_shallow_water.jl hexagon 6 --gassmann
 #
 # mesh: hexagon (Voronoi dual of the icosahedral mesh), or an MPAS grid file
 # (Voronoi cells) or an ICON grid file (its hexagonal dual). Units: a = Ω = g = 1.
+# --gassmann uses the PV flux of Gassmann (2013, 2018) instead of TRiSK's (as in
+# ICON-IAP), --gassmann-mean the same reconstruction with the mean edge PV.
 using KernelAbstractions
 using MPI
 using StaticArrays
 using dmplex
 
 const USE_GPU = "--gpu" in ARGS
+const PV_FLUX = "--gassmann-mean" in ARGS ? :gassmann_mean : "--gassmann" in ARGS ? :gassmann : :trisk
 if USE_GPU
     using CUDA
 end
@@ -44,7 +48,7 @@ function main(args)
     comm = MPI.COMM_WORLD
     nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
     dm, centers = load_voronoi_mesh(mesh, resolution)
-    model = TRiSKShallowWater(dm; centers, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
+    model = TRiSKShallowWater(dm; centers, pv_flux=PV_FLUX, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
     root && println("$(num_cells(dm)) cells, $(num_edges(dm)) edges, $(num_vertices(dm)) vertices, $nranks ranks on ",
                     nameof(typeof(model.backend)))
 

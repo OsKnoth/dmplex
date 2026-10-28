@@ -21,7 +21,8 @@ import ..ShallowWater: velocity_dofs, height_dofs, global_velocity_dofs, global_
     tendency!, total_mass, total_energy, potential_enstrophy, gather_state
 
 export init_edge_velocity, init_tracer, compute_advection_rhs!
-export TRiSKGrid, TRiSKDistribution, TRiSKShallowWater, relative_vorticity, tangential_velocity
+export TRiSKGrid, TRiSKDistribution, TRiSKShallowWater, gassmann_coefficients, relative_vorticity,
+       tangential_velocity
 
 include("DataInit.jl")
 include("Advection.jl")

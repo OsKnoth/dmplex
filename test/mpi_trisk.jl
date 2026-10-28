@@ -1,12 +1,13 @@
 # Run with mpiexec: distributed TRiSK shallow water on the hexagon mesh; rank 0 writes
 # the changes of mass and energy, the potential enstrophy and the gathered state after
-# a few steps of a perturbed TC2 state to the file given as first argument.
+# a few steps of a perturbed TC2 state to the file given as first argument; the second
+# argument is the PV flux (trisk or gassmann).
 using MPI
 using StaticArrays
 using dmplex
 MPI.Init()
 comm = MPI.COMM_WORLD
-m = TRiSKShallowWater(create_hexagon_mesh(3); comm)
+m = TRiSKShallowWater(create_hexagon_mesh(3); comm, pv_flux=Symbol(ARGS[2]))
 velocity(x) = 0.2 * SVector(-x[2], x[1], 0.0) + 0.05 * SVector(0.0, x[3], -x[2])
 height(x) = 1 - 0.22 * x[3]^2 + 0.05 * x[1]
 y = initial_state(m, velocity, height)

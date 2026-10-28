@@ -20,8 +20,20 @@ Working notes for continuing development (on another machine or in a new session
   1 A100 2.3/4.6/16.7 ms, 4 A100 2.4/2.8/5.8 ms (one merged halo message per neighbour; kernels are
   not synchronized individually on GPUs). TC2: mass to round-off, semi-discrete dE/dt = 0, L2 height error
   ≈ 1.5th order; the max error saturates (TRiSK is inconsistent on unoptimized icosahedral grids).
-  Next: Galewsky, Gassmann's reconstruction (`i_cori_method = 1`), APVM/upwind PV, distributed mesh
-  construction (the global grid and TRiSK tables are still built on every rank).
+  `pv_flux = :gassmann`: reconstruction of Gassmann (2013) with the PV usage of Gassmann (2018), ICON-IAP
+  `i_cori_method = 1` (12 edges, rhombus PV; the metric `n_k ⋅ (r̂ × n_e)` with `r̂` at the midpoint of both
+  edges makes it exactly antisymmetric, so energy is conserved); consistent where TRiSK is not (tangential
+  max error 0.015 → 0.0016 for hexagon 3 → 6, TRiSK 0.12), TC2 L2 height errors 2–4× smaller.
+  Without dissipation its PV usage lets grid-scale vorticity grow in the Galewsky jet from day 3 (also
+  for the unperturbed jet; mixing the pairings does not help). `pv_flux = :gassmann_mean` uses the mean
+  `(q_e + q_e')/2` (needs three ghost rings) and stays smooth. `examples/trisk_galewsky.jl` (hexagon 7,
+  6 days, 4 ranks): TRiSK and `:gassmann_mean` give the expected vortex roll-up (|ζ| ≤ 1.6e-4 1/s,
+  potential enstrophy +0.4 %), `:gassmann` |ζ| 5e-4 and +51 % enstrophy.
+  Levante A100, hexagon 8 (655k cells): TC2 per RK4 step `:gassmann` 11.6 ms (1 GPU) / 4.4 ms (4 GPUs),
+  `:gassmann_mean` 8.3 / 3.5 ms, 1 and 4 GPUs identical errors; Galewsky 6 days on 4 GPUs 28 s (TRiSK),
+  58 s (`:gassmann`), 43 s (`:gassmann_mean`).
+  Next: APVM/upwind PV or hyperdiffusion, distributed mesh construction (the global grid and TRiSK tables
+  are still built on every rank); Voronoi generation itself is not a priority (MPAS grids are used).
 - Parallel: KernelAbstractions kernels with atomics, MPI distribution with equal-area partition,
   one vertex ring of ghost cells, local numbering, halo exchange of u, h, ζ, F.
 - Classical models over MPI and KernelAbstractions: `LinearShallowWater`/`NonlinearShallowWater(...; comm, backend)` on a

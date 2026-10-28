@@ -153,3 +153,63 @@ function TRiSKGrid(dm::Plex; centers=nothing, tolerance::Real=1e-8)
                      padded(vertex_cells, 1), padded(vertex_kites, 0.0), padded(trisk_edges, 1),
                      padded(trisk_weights, 0.0))
 end
+
+"""
+    gassmann_coefficients(g::TRiSKGrid) -> (edges, pv_edges, weights)
+
+Coefficients of the PV flux term of Gassmann (2013), with the PV usage of
+Gassmann (2018), as in ICON-IAP (`i_cori_method = 1`, `cori_coeff`): the
+tangential flux at edge `e` is reconstructed from the twelve edges of the two
+vertices of `e` (inner edges) and of their outer vertices (outer edges),
+
+    Σ_k weights[k, e] F_{edges[k, e]} q_{pv_edges[k, e]}  ≈  q F ⋅ (r̂ × n_e),
+
+with the rhombus PV `q` of the inner edges: an outer edge carries the PV of
+its inner edge, an inner edge that of the third edge of the shared vertex.
+The weights combine the triangle of the vertex and the three rhombi around
+it; with the edge inner product `l_e d_e` they are antisymmetric (the pair
+`(e, k)` uses the same PV in both directions), so the term does no work. The
+metric `n_k ⋅ (r̂ × n_e)` takes `r̂` at the midpoint of both edge points
+(ICON: at edge `e`), which makes the antisymmetry exact on the sphere. All
+vertices need three edges (a Voronoi mesh). Unlike the TRiSK weights the
+reconstruction is consistent on the hexagon mesh (first order in the maximum
+norm).
+"""
+function gassmann_coefficients(g::TRiSKGrid)
+    ne = num_edges(g)
+    l, d, n, A = g.primal_lengths, g.dual_lengths, g.edge_normals, g.vertex_areas
+    edges, pv_edges, weights = zeros(Int, 12, ne), zeros(Int, 12, ne), zeros(12, ne)
+    to_vertex(e, v) = arc_length(g.edge_points[e], g.vertices[v])      # ICON `edge_vert_length`
+    rhombus(e) = A[g.edge_vertices[1, e]] + A[g.edge_vertices[2, e]]   # ICON `quad_area`
+    other(e, v) = g.edge_vertices[1, e] == v ? g.edge_vertices[2, e] : g.edge_vertices[1, e]
+    edges_of(v) = [g.vertex_edges[k, v] for k in axes(g.vertex_edges, 1) if g.vertex_signs[k, v] != 0]
+    for e in 1:ne
+        # r̂ × n_e at the midpoint of both edges: exactly antisymmetric (ICON takes r̂ at e)
+        metric(f) = dot(n[f], cross(normalize(g.edge_points[e] + g.edge_points[f]), n[e]))
+        area = l[e] * d[e]
+        k = 0
+        for v in g.edge_vertices[:, e]
+            inner = filter(!=(e), edges_of(v))
+            length(inner) == 2 || throw(ArgumentError("Gassmann's reconstruction needs three edges per vertex"))
+            a = to_vertex(e, v) * d[e] / area
+            for (j, f) in enumerate(inner)
+                third = inner[3 - j]
+                b = to_vertex(f, v) * d[f]
+                k += 1
+                edges[k, e], pv_edges[k, e] = f, third
+                weights[k, e] = metric(f) * (-a * b / A[v] +                         # triangle
+                                                  2 / 3 * (a * l[f] * d[f] / rhombus(f) +  # rhombus of f
+                                                           b / rhombus(e) +                # rhombus of e
+                                                           a * b / rhombus(third)))        # opposite rhombus
+                w = other(f, v)
+                for o in edges_of(w)
+                    o == f && continue
+                    k += 1
+                    edges[k, e], pv_edges[k, e] = o, f
+                    weights[k, e] = 2 / 3 * metric(o) * a * to_vertex(o, w) * d[o] / rhombus(f)
+                end
+            end
+        end
+    end
+    return edges, pv_edges, weights
+end

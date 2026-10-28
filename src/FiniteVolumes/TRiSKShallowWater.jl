@@ -1,6 +1,6 @@
 """
-    TRiSKShallowWater(dm; gravity=1, coriolis=x -> 2x[3], centers=nothing, comm=nothing, part=nothing,
-                      backend=CPU())
+    TRiSKShallowWater(dm; gravity=1, coriolis=x -> 2x[3], pv_flux=:trisk, centers=nothing, comm=nothing,
+                      part=nothing, backend=CPU())
     TRiSKShallowWater(grid::TRiSKGrid; kwargs...)
 
 Nonlinear rotating shallow-water equations in vector-invariant form,
@@ -25,6 +25,18 @@ With the antisymmetric weights the PV flux term does no work, and `K` and `h_e`
 are consistent with the energy `Σ_i A_i (h_i K_i + g h_i²/2)`: mass and energy
 are conserved by the semi-discretization (up to the time-stepping error).
 
+`pv_flux = :gassmann` replaces the PV flux term by the reconstruction of
+Gassmann (2013) with the PV usage of Gassmann (2018), ICON-IAP
+`i_cori_method = 1` (`gassmann_coefficients`): twelve edges per edge, rhombus
+PV `q_e = (ζ_e + f_e) / h_e` with the dual-area averages
+`ζ_e = (A_{v1} ζ_{v1} + A_{v2} ζ_{v2}) / (A_{v1} + A_{v2})` (likewise `h_e`)
+and `f` at the edge points. It is energy conserving as well, and unlike TRiSK
+consistent on the hexagon mesh, but without dissipation its PV usage lets
+grid-scale vorticity grow in a barotropically unstable jet (ICON-IAP runs with
+horizontal diffusion). `pv_flux = :gassmann_mean` uses the same weights with
+the TRiSK-like mean `(q_e + q_{e'})/2` of the rhombus PV, which stays smooth;
+its stencil needs three ghost rings.
+
 Every term is a KernelAbstractions kernel gathering over the neighbour tables
 (no atomics); with `backend` (`CUDABackend()` after `using CUDA`) the state,
 the tables, the work vectors and the halo buffers live on the device.
@@ -37,7 +49,7 @@ and computes the owned tendencies, the ghost entries of `dy` are zero.
 `gather_state` assembles the global state (edges by `edge_index`, cells by
 `cell_index`), which serially is the state itself. `grid` is the global grid.
 """
-struct TRiSKShallowWater{I, M, V, D, BE}
+struct TRiSKShallowWater{I, M, V, G, D, BE}
     grid::TRiSKGrid
     cell_edges::I
     divergence::M        # n_{e,i} l_e / A_i
@@ -55,14 +67,17 @@ struct TRiSKShallowWater{I, M, V, D, BE}
     trisk::M             # w_{e,e'} l_{e'} / d_e
     cell_areas::V        # local
     vertex_areas::V
-    work::NamedTuple{(:K, :B, :F, :hv, :qv, :qe), NTuple{6, V}}
+    gassmann::G          # nothing, or (edges, pv_edges, weights, rhombus = A_v / (A_v1 + A_v2), coriolis at edges, mean)
+    work::NamedTuple{(:K, :B, :F, :ζv, :hv, :qv, :qe), NTuple{7, V}}
     distribution::D      # on the backend
     gravity::Float64
     backend::BE
 end
 
-function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[3], comm=nothing, part=nothing,
-                           backend=KernelAbstractions.CPU())
+function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[3], pv_flux::Symbol=:trisk,
+                           comm=nothing, part=nothing, backend=KernelAbstractions.CPU())
+    pv_flux in (:trisk, :gassmann, :gassmann_mean) ||
+        throw(ArgumentError("pv_flux must be :trisk, :gassmann or :gassmann_mean"))
     nc, ne, nv = num_cells(grid), num_edges(grid), num_vertices(grid)
     l, d = grid.primal_lengths, grid.dual_lengths
     # coefficients of the global grid
@@ -86,28 +101,38 @@ function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[
     end
 
     # restricted to the local entities, in local numbering
-    dist = TRiSKDistribution(grid, comm; part)
+    dist = TRiSKDistribution(grid, comm; part, rings=pv_flux == :gassmann_mean ? 3 : 2)
     cells, edges, vertices = dist.cells.global_ids, dist.edges.global_ids, dist.vertex_ids
     local_cell, local_edge = local_numbers(cells, nc), local_numbers(edges, ne)
     local_vertex = local_numbers(vertices, nv)
     cell_edges, divergence = local_table(grid.cell_edges, divergence, cells, local_edge)
     _, kinetic = local_table(grid.cell_edges, kinetic, cells, local_edge)
     edge_cells, edge_height = local_table(grid.edge_cells, grid.cell_distances ./ d', edges, local_cell)
-    edge_vertices, _ = local_table(grid.edge_vertices, nothing, edges, local_vertex)
+    rhombus = grid.vertex_areas[grid.edge_vertices]
+    rhombus ./= sum(rhombus; dims=1)
+    edge_vertices, rhombus = local_table(grid.edge_vertices, rhombus, edges, local_vertex)
     vertex_edges, curl = local_table(grid.vertex_edges, curl, vertices, local_edge)
     vertex_cells, vertex_height = local_table(grid.vertex_cells, vertex_height, vertices, local_cell)
     trisk_edges, trisk = local_table(grid.trisk_edges, trisk, edges, local_edge)
 
     dev(x) = to_backend(backend, x)
     zero_vector(n) = KernelAbstractions.zeros(backend, Float64, n)
+    gassmann = nothing
+    if pv_flux != :trisk
+        E, P, W = gassmann_coefficients(grid)
+        flux_edges, weights = local_table(E, W, edges, local_edge)
+        pv_edges, _ = local_table(P, nothing, edges, local_edge)
+        gassmann = (edges=dev(flux_edges), pv_edges=dev(pv_edges), weights=dev(weights), rhombus=dev(rhombus),
+                    coriolis=dev(map(coriolis, grid.edge_points[edges])), mean=pv_flux == :gassmann_mean)
+    end
     nlc, nle, nlv = length(cells), length(edges), length(vertices)
-    work = (K=zero_vector(nlc), B=zero_vector(nlc), F=zero_vector(nle), hv=zero_vector(nlv), qv=zero_vector(nlv),
-            qe=zero_vector(nle))
+    work = (K=zero_vector(nlc), B=zero_vector(nlc), F=zero_vector(nle), ζv=zero_vector(nlv), hv=zero_vector(nlv),
+            qv=zero_vector(nlv), qe=zero_vector(nle))
     return TRiSKShallowWater(grid, dev(cell_edges), dev(divergence), dev(kinetic), dev(edge_cells),
                              dev(edge_vertices), dev(edge_height), dev(1 ./ d[edges]), dev(vertex_edges), dev(curl),
                              dev(vertex_cells), dev(vertex_height), dev(map(coriolis, grid.vertices[vertices])),
                              dev(trisk_edges), dev(trisk), dev(grid.cell_areas[cells]),
-                             dev(grid.vertex_areas[vertices]), work, to_backend(backend, dist), Float64(gravity),
+                             dev(grid.vertex_areas[vertices]), gassmann, work, to_backend(backend, dist), Float64(gravity),
                              backend)
 end
 
@@ -158,7 +183,7 @@ end
     @inbounds F[e] = (edge_height[1, e] * h[edge_cells[1, e]] + edge_height[2, e] * h[edge_cells[2, e]]) * u[e]
 end
 
-@kernel function vertex_pv_kernel!(qv, hv, @Const(u), @Const(h), @Const(vertex_edges), @Const(curl),
+@kernel function vertex_pv_kernel!(qv, ζv, hv, @Const(u), @Const(h), @Const(vertex_edges), @Const(curl),
                                    @Const(vertex_cells), @Const(vertex_height), @Const(coriolis))
     v = @index(Global)
     ζ = η = 0.0
@@ -168,6 +193,7 @@ end
     @inbounds for k in axes(vertex_cells, 1)
         η += vertex_height[k, v] * h[vertex_cells[k, v]]
     end
+    @inbounds ζv[v] = ζ
     @inbounds hv[v] = η
     @inbounds qv[v] = (ζ + coriolis[v]) / η
 end
@@ -175,6 +201,15 @@ end
 @kernel function edge_pv_kernel!(qe, @Const(qv), @Const(edge_vertices))
     e = @index(Global)
     @inbounds qe[e] = (qv[edge_vertices[1, e]] + qv[edge_vertices[2, e]]) / 2
+end
+
+@kernel function rhombus_pv_kernel!(qe, @Const(ζv), @Const(hv), @Const(edge_vertices), @Const(rhombus),
+                                    @Const(coriolis))
+    e = @index(Global)
+    @inbounds v1, v2 = edge_vertices[1, e], edge_vertices[2, e]
+    @inbounds ζ = rhombus[1, e] * ζv[v1] + rhombus[2, e] * ζv[v2]
+    @inbounds η = rhombus[1, e] * hv[v1] + rhombus[2, e] * hv[v2]
+    @inbounds qe[e] = (ζ + coriolis[e]) / η
 end
 
 @kernel function momentum_kernel!(du, @Const(F), @Const(qe), @Const(B), @Const(trisk_edges), @Const(trisk),
@@ -186,6 +221,18 @@ end
         s += trisk[k, e] * F[e′] * (qe[e] + qe[e′])
     end
     @inbounds du[e] = s / 2 - (B[edge_cells[2, e]] - B[edge_cells[1, e]]) * inverse_dual[e]
+end
+
+@kernel function gassmann_momentum_kernel!(du, @Const(F), @Const(qe), @Const(B), @Const(edges), @Const(pv_edges),
+                                           @Const(weights), @Const(edge_cells), @Const(inverse_dual), mean)
+    e = @index(Global)
+    s = 0.0
+    @inbounds for k in axes(edges, 1)
+        e′ = edges[k, e]
+        q = mean ? (qe[e] + qe[e′]) / 2 : qe[pv_edges[k, e]]
+        s += weights[k, e] * F[e′] * q
+    end
+    @inbounds du[e] = s - (B[edge_cells[2, e]] - B[edge_cells[1, e]]) * inverse_dual[e]
 end
 
 @kernel function continuity_kernel!(dh, @Const(F), @Const(cell_edges), @Const(divergence))
@@ -231,9 +278,26 @@ end
 "Potential vorticity and height at the local vertices, in the work vectors."
 function vertex_pv!(m::TRiSKShallowWater, u, h)
     w = m.work
-    run!(m, vertex_pv_kernel!, length(w.qv), w.qv, w.hv, u, h, m.vertex_edges, m.curl, m.vertex_cells,
+    run!(m, vertex_pv_kernel!, length(w.qv), w.qv, w.ζv, w.hv, u, h, m.vertex_edges, m.curl, m.vertex_cells,
          m.vertex_height, m.coriolis)
     return w
+end
+
+"Momentum tendency of the owned edges: TRiSK PV flux (`nothing`) or Gassmann's, and the gradient."
+function pv_flux!(du, m::TRiSKShallowWater, ::Nothing)
+    w = m.work
+    run!(m, edge_pv_kernel!, length(w.qe), w.qe, w.qv, m.edge_vertices)
+    run!(m, momentum_kernel!, m.distribution.edges.n_owned, du, w.F, w.qe, w.B, m.trisk_edges, m.trisk,
+         m.edge_cells, m.inverse_dual)
+    return du
+end
+
+function pv_flux!(du, m::TRiSKShallowWater, g::NamedTuple)
+    w = m.work
+    run!(m, rhombus_pv_kernel!, length(w.qe), w.qe, w.ζv, w.hv, m.edge_vertices, g.rhombus, g.coriolis)
+    run!(m, gassmann_momentum_kernel!, m.distribution.edges.n_owned, du, w.F, w.qe, w.B, g.edges, g.pv_edges,
+         g.weights, m.edge_cells, m.inverse_dual, g.mean)
+    return du
 end
 
 function tendency!(dy::AbstractVector, y::AbstractVector, m::TRiSKShallowWater)
@@ -244,9 +308,7 @@ function tendency!(dy::AbstractVector, y::AbstractVector, m::TRiSKShallowWater)
     kinetic_energy!(m, u, h)
     run!(m, mass_flux_kernel!, length(w.F), w.F, u, h, m.edge_cells, m.edge_height)
     vertex_pv!(m, u, h)
-    run!(m, edge_pv_kernel!, length(w.qe), w.qe, w.qv, m.edge_vertices)
-    run!(m, momentum_kernel!, d.edges.n_owned, du, w.F, w.qe, w.B, m.trisk_edges, m.trisk, m.edge_cells,
-         m.inverse_dual)
+    pv_flux!(du, m, m.gassmann)
     run!(m, continuity_kernel!, d.cells.n_owned, dh, w.F, m.cell_edges, m.divergence)
     if is_distributed(d)
         fill!(view(du, (d.edges.n_owned + 1):length(du)), 0.0)

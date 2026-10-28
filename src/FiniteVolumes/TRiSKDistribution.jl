@@ -1,12 +1,13 @@
 """
-    TRiSKDistribution(grid, comm; part=equal_area_partition(grid.dm, size))
+    TRiSKDistribution(grid, comm; part=equal_area_partition(grid.dm, size), rings=2)
     TRiSKDistribution(grid)                       # serial
 
 Distribution of a TRiSK C grid over MPI ranks. Cells are partitioned (equal
-area by default); every rank holds its owned cells plus two vertex rings of
-ghost cells, and all edges and vertices of these cells. Edges and vertices are
+area by default); every rank holds its owned cells plus `rings` vertex rings of
+ghost cells (two for TRiSK and Gassmann's PV flux, three for its averaged PV),
+and all edges and vertices of these cells. Edges and vertices are
 owned by the smallest part among their cells, so every owned edge has an owned
-cell. With two rings the whole stencil of the owned tendencies is local: the
+cell. With enough rings the whole stencil of the owned tendencies is local: the
 state `[u; h]` is exchanged once per tendency, the intermediate quantities
 (kinetic energy, mass flux, PV) are computed on all local entities and the
 tendencies on the owned ones.
@@ -58,16 +59,16 @@ function TRiSKDistribution(g::TRiSKGrid)
                              collect(1:num_vertices(g)), num_vertices(g))
 end
 
-function TRiSKDistribution(g::TRiSKGrid, comm; part=nothing)
+function TRiSKDistribution(g::TRiSKGrid, comm; part=nothing, rings::Integer=2)
     comm === nothing && return TRiSKDistribution(g)
     nranks, rank = MPI.Comm_size(comm), MPI.Comm_rank(comm)
     part = part === nothing ? equal_area_partition(g.dm, nranks; centers=g.centers) : collect(Int, part)
-    return TRiSKDistribution(g, part, nranks, rank; comm)
+    return TRiSKDistribution(g, part, nranks, rank; comm, rings)
 end
 
 "Distribution of `rank` (0-based) for a given partition, also without MPI (for tests)."
 function TRiSKDistribution(g::TRiSKGrid, part::AbstractVector{<:Integer}, nranks::Integer, rank::Integer;
-                           comm=nothing)
+                           comm=nothing, rings::Integer=2)
     nc, ne, nv = num_cells(g), num_edges(g), num_vertices(g)
     corners(i) = (g.cell_vertices[k, i] for k in axes(g.cell_vertices, 1) if g.cell_kites[k, i] > 0)
     sides(i) = (g.cell_edges[k, i] for k in axes(g.cell_edges, 1) if g.cell_signs[k, i] != 0)
@@ -76,7 +77,11 @@ function TRiSKDistribution(g::TRiSKGrid, part::AbstractVector{<:Integer}, nranks
         push!(cells_of_vertex[v], i)
     end
     ring(cells) = union(cells, (c for i in cells for v in corners(i) for c in cells_of_vertex[v]))
-    local_cells = [sort!(collect(Int, ring(ring(findall(==(p), part))))) for p in 1:nranks]
+    local_cells = map(1:nranks) do p
+        cells = findall(==(p), part)
+        foreach(_ -> (cells = ring(cells)), 1:rings)
+        return sort!(collect(Int, cells))
+    end
     local_edges = [sort!(unique!(Int[e for i in cells for e in sides(i)])) for cells in local_cells]
 
     edge_owner = [min(part[g.edge_cells[1, e]], part[g.edge_cells[2, e]]) for e in 1:ne]

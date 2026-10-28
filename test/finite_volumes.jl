@@ -62,15 +62,27 @@ end
     @test maximum(abs, relative_vorticity(m, [solid; zeros(nc)]) - [2dot(ω, x) for x in g.vertices]) < 0.03
     tangential = [dot(cross(ω, x), cross(x, n)) for (x, n) in zip(g.edge_points, g.edge_normals)]
     @test maximum(abs, tangential_velocity(m, solid) - tangential) < 0.15
+
+    # Gassmann's reconstruction: antisymmetric with the same PV, and consistent
+    E, P, Wg = gassmann_coefficients(g)
+    l, d = g.primal_lengths, g.dual_lengths
+    @test all(CartesianIndices(E)) do I
+        k, e = Tuple(I)
+        f = E[k, e]
+        j = findfirst(j -> E[j, f] == e && P[j, f] == P[k, e], axes(E, 1))
+        j !== nothing && abs(l[e] * d[e] * Wg[k, e] + l[f] * d[f] * Wg[j, f]) < 1e-15
+    end
+    gassmann = [sum(Wg[k, e] * solid[E[k, e]] for k in axes(E, 1)) for e in 1:ne]
+    @test maximum(abs, gassmann - tangential) < 0.02
 end
 
 @testset "TRiSK shallow water: Williamson test case 2" begin
     u0 = 0.2
     velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
     height(x) = 1 - (u0 + u0^2 / 2) * x[3]^2
-    errors = map((3, 4)) do n
+    errors = map(Iterators.product((3, 4), (:trisk, :gassmann, :gassmann_mean))) do (n, pv_flux)
         dm = create_hexagon_mesh(n)
-        m = TRiSKShallowWater(dm)
+        m = TRiSKShallowWater(dm; pv_flux)
         y = initial_state(m, velocity, height)
         y0 = copy(y)
 
@@ -93,8 +105,8 @@ end
         dh = (y - y0)[height_dofs(m)]
         sqrt(sum(m.grid.cell_areas .* dh .^ 2) / 4π)
     end
-    @test errors[1] < 2e-3
-    @test errors[2] < errors[1] / 2.5   # about second order in the L2 norm
+    @test all(<(2e-3), errors[1, :])
+    @test all(errors[2, :] .< errors[1, :] ./ 2.5)   # about second order in the L2 norm
 end
 
 @testset "TRiSK distribution (MPI)" begin
@@ -114,16 +126,18 @@ end
     # 1 and 3 ranks give the same state (gathers only, no atomics: bitwise)
     script = joinpath(@__DIR__, "mpi_trisk.jl")
     project = dirname(@__DIR__)
-    results = map((1, 3)) do n
-        file = tempname()
-        run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file`)
-        lines = readlines(file)
-        parse.(Float64, split(lines[1])), parse.(Float64, lines[2:end])
+    for pv_flux in ("trisk", "gassmann", "gassmann_mean")
+        results = map((1, 3)) do n
+            file = tempname()
+            run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file $pv_flux`)
+            lines = readlines(file)
+            parse.(Float64, split(lines[1])), parse.(Float64, lines[2:end])
+        end
+        ((dmass1, denergy1, enstrophy1, _), y1), ((dmass3, denergy3, enstrophy3, _), y3) = results
+        @test y3 == y1
+        @test abs(dmass3) < 1e-13
+        @test abs(denergy3) < 1e-9
+        @test abs(denergy3 - denergy1) < 1e-14     # summation order of the reduction only
+        @test enstrophy3 ≈ enstrophy1
     end
-    ((dmass1, denergy1, enstrophy1, _), y1), ((dmass3, denergy3, enstrophy3, _), y3) = results
-    @test y3 == y1
-    @test abs(dmass3) < 1e-13
-    @test abs(denergy3) < 1e-9
-    @test abs(denergy3 - denergy1) < 1e-14     # summation order of the reduction only
-    @test enstrophy3 ≈ enstrophy1
 end
