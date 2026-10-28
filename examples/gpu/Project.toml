@@ -13,6 +13,9 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 dmplex = "36ef4206-de53-44d7-bf13-cc065695ea34"
 
+[extras]
+OpenMPI_jll = "fe0851c0-eecd-5654-98d4-656369965a5c"   # for its library-path preferences (docs/levante.md)
+
 [sources]
 dmplex = {path = "../.."}
 

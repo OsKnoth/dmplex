@@ -40,11 +40,15 @@ Working notes for continuing development (on another machine or in a new session
 4. **Damping**: APVM in the potential-vorticity term (energy conserving), upwind height flux on primal
    edges, biharmonic hyperviscosity for comparison.
 5. **Distributed mesh construction** (the global mesh is still built on every rank).
-6. **Levante GPU runs** (`docs/levante.md`, `examples/gpu/levante.sbatch`): the CUDA paths (kernels,
-   CUDA-aware halo exchange, ADIOS2 from device pointers, cuDSS single and MGMN) are untested so far.
-7. **Classical models on GPUs**: all run-time parts are KernelAbstractions kernels (checked on the CPU
-   backend); untested on CUDA. Run `examples/nonlinear_shallow_water.jl ... --gpu` (`solver=:cudss`) on
-   Levante. `GatheredMassSolver` replicates the factorization (not scalable) and is the CPU reference.
+6. **Levante GPU runs** (2026-10-28, 1 node, 4 × A100, `docs/levante.md`): working on CUDA —
+   cuDSS single GPU and MGMN for RT1/DG1/CG2 (errors ≤ 4e-15), classical TC2 with `--gpu` on 1 and 4
+   ranks (identical diagnostics, mass 1e-15, energy 3e-14), kite Galewsky `hexagon 5` on 4 GPUs
+   (7.7 ms per step), CUDA-aware OpenMPI. Open: ADIOS2 from device pointers (needs an ADIOS2 built with
+   CUDA, none on Levante yet); scaling — at `cubed 32` 4 GPUs are slower than 1 (TC2 52 s vs 18 s; the
+   distributed cuDSS solve takes 4 ms against 0.5 ms on one GPU), measure at larger meshes.
+7. **Classical models on GPUs**: all run-time parts are KernelAbstractions kernels and run on CUDA.
+   `GatheredMassSolver` replicates the factorization (not scalable) and is the CPU reference; for
+   many GPUs compare `solver=:cudss` with replicated single-GPU cuDSS factorizations.
 
 ## Environment notes
 

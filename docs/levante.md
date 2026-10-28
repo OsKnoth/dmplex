@@ -26,13 +26,37 @@ environment with dmplex (as a path source) plus CUDA, CUDSS, ADIOS2 and MPI,
 which are only weak dependencies of dmplex.
 
 1. **Julia** 1.12 (juliaup in `$HOME`).
-2. **OpenMPI**: load a CUDA-aware OpenMPI module and make MPI.jl use it:
-   ```sh
-   module load openmpi        # check `module avail openmpi`
-   julia --project=examples/gpu -e 'using Pkg; Pkg.instantiate(); using MPIPreferences; MPIPreferences.use_system_binary()'
+2. **OpenMPI**: the CUDA-aware system OpenMPI 4.1.6 (UCX, PMIx 3.1.5), the same as for
+   CGDycore.jl. Write `examples/gpu/LocalPreferences.toml` (not in git):
+   ```toml
+   [MPIPreferences]
+   _format = "1.0"
+   abi = "OpenMPI"
+   binary = "system"
+   cclibs = []
+   libmpi = "/sw/spack-levante/openmpi-4.1.6-mjsagq/lib/libmpi.so"
+   mpiexec = "/sw/spack-levante/openmpi-4.1.6-mjsagq/bin/mpiexec"
+   preloads = []
+
+   # one MPI per process: the MPI-dependent JLLs (HDF5, NetCDF, ADIOS2) use the system OpenMPI too
+   [OpenMPI_jll]
+   libmpi_path = "/sw/spack-levante/openmpi-4.1.6-mjsagq/lib/libmpi.so"
+   libmpi_mpifh_path = "/sw/spack-levante/openmpi-4.1.6-mjsagq/lib/libmpi_mpifh.so"
+   libmpi_usempi_ignore_tkr_path = "/sw/spack-levante/openmpi-4.1.6-mjsagq/lib/libmpi_usempi_ignore_tkr.so"
+   libmpi_usempif08_path = "/sw/spack-levante/openmpi-4.1.6-mjsagq/lib/libmpi_usempif08.so"
+   mpiexec_path = "/sw/spack-levante/openmpi-4.1.6-mjsagq/bin/mpiexec"
    ```
-   On a GPU node, `julia --project=examples/gpu -e 'using MPI, CUDA; @show MPI.has_gpu()'` should give `true`.
-   Set `JULIA_CUDA_MEMORY_POOL=none` for device buffers in MPI.
+   Without the `OpenMPI_jll` section, HDF5_jll, NetCDF_jll and ADIOS2_jll load
+   the OpenMPI 5 of the artifact next to the system one, and its `libopen-pal`
+   binds to the already loaded PMIx 3 (`undefined symbol: pmix_framework_names`).
+   (`OpenMPI_jll` is listed under `[extras]` of `examples/gpu/Project.toml` so
+   that these preferences apply.) Do not put the OpenMPI `lib` directory on
+   `LD_LIBRARY_PATH`. Then, on the login node (downloads only):
+   ```sh
+   JULIA_PKG_PRECOMPILE_AUTO=0 julia --project=examples/gpu -e 'using Pkg; Pkg.instantiate()'
+   ```
+   and precompile in the first job on a GPU node. Run with
+   `srun --mpi=pmix`; set `JULIA_CUDA_MEMORY_POOL=none` for device buffers in MPI.
 3. **ADIOS2 with CUDA**, built against the same OpenMPI (spack or CMake with
    `-DADIOS2_USE_CUDA=ON -DADIOS2_USE_MPI=ON`). Point ADIOS2.jl at it:
    ```sh

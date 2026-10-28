@@ -55,6 +55,17 @@ mutable struct DistributedCudssSolver{D, C}
     comm_handle::Base.RefValue{MPI.MPI_Comm}
     distribution::D
     comm::C
+    released::Bool
+end
+
+"Destroy the cuDSS objects (once): before `MPI_Finalize`, since cuDSS frees its own communicator with the data."
+function release!(S::DistributedCudssSolver)
+    S.released && return nothing
+    S.released = true
+    foreach(CUDSS.cudssMatrixDestroy, (S.A, S.X, S.B))
+    finalize(S.data)
+    CUDSS.cudssDestroy(S.handle)
+    return nothing
 end
 
 "Communication layer library: argument, `CUDSS_COMM_LIB`, or the OpenMPI layer next to `libcudss`."
@@ -76,7 +87,9 @@ function distributed_cudss_solver(M::SparseMatrixCSC, d::DofDistribution, owner:
     nzval = CUDACore.CuVector{Float64}(T.nzval)
     rhs, solution = CUDACore.zeros(Float64, n_owned), CUDACore.zeros(Float64, n_owned)
 
-    handle = CUDSS.handle()
+    # an own handle: the communication layer makes it a distributed (MGMN) handle, the shared
+    # `CUDSS.handle()` must stay a single-GPU one
+    handle = CUDSS.cudssCreate()
     CUDSS.cudssSetCommLayer(handle, comm_layer_library(comm_layer))
     config, data = CudssConfig(), CudssData(handle)
     comm_handle = Ref(comm.val)
@@ -94,10 +107,9 @@ function distributed_cudss_solver(M::SparseMatrixCSC, d::DofDistribution, owner:
         CUDSS.cudssMatrixSetDistributionRow1d(matrix[], first_row, last_row)
     end
     S = DistributedCudssSolver(handle, config, data, A[], X[], B[], (rowptr, colval, nzval), rhs, solution,
-                               comm_handle, d, comm)
-    finalizer(S) do S
-        foreach(CUDSS.cudssMatrixDestroy, (S.A, S.X, S.B))
-    end
+                               comm_handle, d, comm, false)
+    finalizer(release!, S)
+    MPI.add_finalize_hook!(() -> release!(S))
     execute!(S, "analysis")
     execute!(S, "factorization")
     return S
