@@ -46,7 +46,7 @@ The figures are generated with `julia --project docs/make_figures.jl`.
 | `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal, HEALPix and periodic plane meshes; ICON and MPAS grid-file readers (primal or dual); kite grids |
 | `src/Geometry` | `Geometry` | reference triangle/quadrilateral, reference-to-sphere map, Piola maps, FV metrics |
 | `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, assembly (mass, divergence, Coriolis, load, projection), cached `mass_solver` |
-| `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection |
+| `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection; C-grid shallow water with TRiSK operators on Voronoi meshes (`TRiSKShallowWater`, as in MPAS and the hexagonal ICON) |
 | `src/TimeSteppers` | `TimeSteppers` | explicit Euler, classical RK4 |
 | `src/ShallowWater` | `ShallowWater` | linear and nonlinear rotating shallow water: mixed RT_k × DG_k (× CG_{k+1}) and the staggered kite method, mass and energy conserving |
 | `src/Parallel` | `Parallel` | equal-area partition, MPI distribution of kite models and of classical spaces, halo exchange |
@@ -142,6 +142,7 @@ julia --project -e 'using Pkg; Pkg.test()'
 julia --project examples/advection.jl 4 cubed            # FV upwind advection, writes VTKHDF
 julia --project examples/linear_shallow_water.jl 2 cubed 8   # RT2 × DG2 linear shallow water
 julia --project examples/nonlinear_shallow_water.jl 1 healpix 8   # Williamson TC2, also with an ICON/MPAS file
+julia --project examples/trisk_shallow_water.jl hexagon 6         # TC2 with the TRiSK finite-volume scheme
 mpiexec -n 4 julia --project examples/nonlinear_shallow_water.jl 1 cubed 16   # the same over MPI
 mpiexec -n 4 julia --project=examples/gpu examples/nonlinear_shallow_water.jl 1 cubed 64 --gpu   # GPUs, cuDSS
 julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days

@@ -7,9 +7,9 @@ include("Grids/Grids.jl")
 include("Geometry/Geometry.jl")
 include("FEM/FEM.jl")
 include("Parallel/Parallel.jl")
-include("FiniteVolumes/FiniteVolumes.jl")
 include("TimeSteppers/TimeSteppers.jl")
 include("ShallowWater/ShallowWater.jl")
+include("FiniteVolumes/FiniteVolumes.jl")
 include("Outputs/Outputs.jl")
 
 @reexport using .Topology
@@ -17,9 +17,9 @@ include("Outputs/Outputs.jl")
 @reexport using .Geometry
 @reexport using .FEM
 @reexport using .Parallel
-@reexport using .FiniteVolumes
 @reexport using .TimeSteppers
 @reexport using .ShallowWater
+@reexport using .FiniteVolumes
 @reexport using .Outputs
 
 end # module dmplex

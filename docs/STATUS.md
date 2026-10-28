@@ -11,6 +11,17 @@ Working notes for continuing development (on another machine or in a new session
 - Shallow water: mixed RT×DG(×CG) linear and nonlinear; linear and nonlinear kite models
   (`velocity = :rt | :bdm | :dual_radau`, conservative variant default, poster form via
   `flux=:pointwise, vorticity=:absolute`).
+- Finite volumes: `TRiSKShallowWater(dm; comm, backend)` (C grid on Voronoi meshes: hexagon mesh, MPAS,
+  dual of ICON; TRiSK weights of Thuburn et al. 2009 as `i_cori_method = 4` in ICON-IAP,
+  energy-conserving PV flux, ICON kinetic energy). KernelAbstractions kernels without atomics (gathers
+  over padded neighbour tables); MPI with `TRiSKDistribution` (equal-area cells, two vertex rings of
+  ghost cells, one halo exchange of `[u; h]` per tendency): 1, 3, 4 ranks bitwise identical, on CUDA
+  (Levante, 1 and 4 A100) too. Time per RK4 step (TC2, hexagon 7/8/9 = 164k/655k/2.6M cells):
+  1 A100 2.3/4.6/16.7 ms, 4 A100 2.4/2.8/5.8 ms (one merged halo message per neighbour; kernels are
+  not synchronized individually on GPUs). TC2: mass to round-off, semi-discrete dE/dt = 0, L2 height error
+  ≈ 1.5th order; the max error saturates (TRiSK is inconsistent on unoptimized icosahedral grids).
+  Next: Galewsky, Gassmann's reconstruction (`i_cori_method = 1`), APVM/upwind PV, distributed mesh
+  construction (the global grid and TRiSK tables are still built on every rank).
 - Parallel: KernelAbstractions kernels with atomics, MPI distribution with equal-area partition,
   one vertex ring of ghost cells, local numbering, halo exchange of u, h, ζ, F.
 - Classical models over MPI and KernelAbstractions: `LinearShallowWater`/`NonlinearShallowWater(...; comm, backend)` on a
