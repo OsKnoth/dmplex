@@ -18,7 +18,9 @@
 # --spring[=β] optimizes the icosahedral mesh by spring dynamics (β = 1.2), --scvt
 # makes it centroidal (Lloyd's algorithm: the hexagons are an SCVT, as MPAS grids); with --icon and a
 # grid file --spring[=β] cleans up its triangles (`relax_triangles`, β = 1), --centered-k takes the
-# centered kinetic-energy gradient instead of ICON's `coeff_gradekin`.
+# centered kinetic-energy gradient instead of ICON's `coeff_gradekin`. --kinetic=cell|mixed|vertex|α sets
+# TRiSK's kinetic energy (`kinetic_energy`: the cell one, Skamarock's mixture α = 3/8, the consistent
+# vertex one).
 using KernelAbstractions
 using MPI
 using StaticArrays
@@ -31,6 +33,9 @@ const SPRING = filter(a -> startswith(a, "--spring"), ARGS)
 const SPRING_BETA = isempty(SPRING) ? nothing : SPRING[1] == "--spring" ? 1.2 : parse(Float64, split(SPRING[1], "=")[2])
 const CENTROIDAL = "--scvt" in ARGS
 const KINETIC_GRADIENT = "--centered-k" in ARGS ? :centered : :icon
+const KINETIC = filter(a -> startswith(a, "--kinetic="), ARGS)
+const KINETIC_ENERGY = isempty(KINETIC) ? :cell :
+                       (k = split(KINETIC[1], "=")[2]; k in ("cell", "mixed", "vertex") ? Symbol(k) : parse(Float64, k))
 if USE_GPU
     using CUDA
 end
@@ -73,7 +78,7 @@ function main(args)
     nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
     dm, centers = load_mesh(mesh, resolution)
     options = (; centers, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
-    model = USE_ICON ? ICONShallowWater(dm; kinetic_gradient=KINETIC_GRADIENT, options...) : TRiSKShallowWater(dm; pv_flux=PV_FLUX, options...)
+    model = USE_ICON ? ICONShallowWater(dm; kinetic_gradient=KINETIC_GRADIENT, options...) : TRiSKShallowWater(dm; pv_flux=PV_FLUX, kinetic_energy=KINETIC_ENERGY, options...)
     root && println("$(num_cells(dm)) cells, $(num_edges(dm)) edges, $(num_vertices(dm)) vertices, $nranks ranks on ",
                     nameof(typeof(model.backend)))
 

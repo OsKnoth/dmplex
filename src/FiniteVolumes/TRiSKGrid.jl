@@ -162,6 +162,35 @@ function TRiSKGrid(dm::Plex; centers=nothing, tolerance::Real=1e-8)
 end
 
 """
+    vertex_edge_areas(g::TRiSKGrid) -> (by_vertex, by_edge)
+
+Areas `A_{e,v}` of the triangles `(left generator, right generator, vertex v)`
+that split the dual cell of `v` along its edges, per vertex (`by_vertex[k, v]`
+for `g.vertex_edges[k, v]`) and per edge (`by_edge[s, e]` for
+`g.edge_vertices[s, e]`). They are signed with the orientation of the dual
+cell (topologically: in the counter-clockwise left cell, crossing an edge that
+ends at `v` turns counter-clockwise around `v`), so for an obtuse dual
+triangle the area beyond its edge is negative and `Σ_e A_{e,v} = A_v`. On
+a dual triangle the circumcenter projects onto the midpoints of its sides, so
+`Σ_e A_{e,v} n_e n_eᵀ = A_v I/2` up to the curvature, unlike the cell analogue
+`Σ_e l_e d_{e,i} n_e n_eᵀ / 2`, which is off where the edge point is not
+the midpoint of the primal edge.
+"""
+function vertex_edge_areas(g::TRiSKGrid)
+    function area(e, v)
+        left = g.edge_cells[1, e]
+        n = count(!=(0), view(g.cell_signs, :, left))
+        j = findfirst(k -> g.cell_edges[k, left] == e, 1:n)
+        orientation = g.cell_vertices[mod1(j + 1, n), left] == v ? 1 : -1   # corner j + 1 ends edge j
+        return orientation * signed_triangle_area(g.centers[left], g.centers[g.edge_cells[2, e]], g.vertices[v])
+    end
+    by_vertex = [g.vertex_signs[k, v] == 0 ? 0.0 : area(g.vertex_edges[k, v], v)
+                 for k in axes(g.vertex_edges, 1), v in 1:num_vertices(g)]
+    by_edge = [area(e, g.edge_vertices[s, e]) for s in 1:2, e in 1:num_edges(g)]
+    return by_vertex, by_edge
+end
+
+"""
     gassmann_coefficients(g::TRiSKGrid) -> (edges, pv_edges, weights)
 
 Coefficients of the PV flux term of Gassmann (2013), with the PV usage of

@@ -46,7 +46,7 @@ The figures are generated with `julia --project docs/make_figures.jl`.
 | `src/Grids` | `Grids` | icosahedral, cubed-sphere, hexagonal, HEALPix and periodic plane meshes; ICON and MPAS grid-file readers (primal or dual); kite grids |
 | `src/Geometry` | `Geometry` | reference triangle/quadrilateral, reference-to-sphere map, Piola maps, FV metrics |
 | `src/FEM` | `FEM` | quadrature, element families of arbitrary order, `ReferenceElement`, `FESpace`, assembly (mass, divergence, Coriolis, load, projection), cached `mass_solver` |
-| `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection; C-grid shallow water with TRiSK operators on Voronoi meshes (`TRiSKShallowWater`, as in MPAS and the hexagonal ICON; PV flux of TRiSK or Gassmann); the triangular C grid of ICON with RBF tangential velocity (`ICONShallowWater`) |
+| `src/FiniteVolumes` | `FiniteVolumes` | first-order upwind advection; C-grid shallow water with TRiSK operators on Voronoi meshes (`TRiSKShallowWater`, as in MPAS and the hexagonal ICON; PV flux of TRiSK or Gassmann, cell or consistent vertex kinetic energy); the triangular C grid of ICON with RBF tangential velocity (`ICONShallowWater`) |
 | `src/TimeSteppers` | `TimeSteppers` | explicit Euler, classical RK4 |
 | `src/ShallowWater` | `ShallowWater` | linear and nonlinear rotating shallow water: mixed RT_k × DG_k (× CG_{k+1}) and the staggered kite method, mass and energy conserving |
 | `src/Parallel` | `Parallel` | equal-area partition, MPI distribution of kite models and of classical spaces, halo exchange |
@@ -149,6 +149,7 @@ julia --project examples/trisk_shallow_water.jl hexagon 6         # TC2 with the
 mpiexec -n 4 julia --project examples/trisk_galewsky.jl hexagon 7 6 --gassmann-mean   # Galewsky, finite volumes
 mpiexec -n 4 julia --project examples/trisk_galewsky.jl icon_grid_0021_R02B06_G.nc 0 6 --icon   # ICON triangles
 julia --project examples/trisk_galewsky.jl x4.163842.grid.nc 0 6 --icon --spring --centered-k   # refined MPAS dual
+julia --project examples/trisk_shallow_water.jl hexagon 6 --spring --kinetic=vertex   # consistent TRiSK K
 mpiexec -n 4 julia --project examples/nonlinear_shallow_water.jl 1 cubed 16   # the same over MPI
 mpiexec -n 4 julia --project=examples/gpu examples/nonlinear_shallow_water.jl 1 cubed 64 --gpu   # GPUs, cuDSS
 julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days

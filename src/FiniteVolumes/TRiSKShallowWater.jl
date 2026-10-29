@@ -1,6 +1,6 @@
 """
-    TRiSKShallowWater(dm; gravity=1, coriolis=x -> 2x[3], pv_flux=:trisk, centers=nothing, comm=nothing,
-                      part=nothing, backend=CPU())
+    TRiSKShallowWater(dm; gravity=1, coriolis=x -> 2x[3], pv_flux=:trisk, kinetic_energy=:cell,
+                      centers=nothing, comm=nothing, part=nothing, backend=CPU())
     TRiSKShallowWater(grid::TRiSKGrid; kwargs...)
 
 Nonlinear rotating shallow-water equations in vector-invariant form,
@@ -24,6 +24,21 @@ heights `h_i` at the generators, vorticity at the vertices (dual triangles).
 With the antisymmetric weights the PV flux term does no work, and `K` and `h_e`
 are consistent with the energy `Σ_i A_i (h_i K_i + g h_i²/2)`: mass and energy
 are conserved by the semi-discretization (up to the time-stepping error).
+
+The cell kinetic energy is consistent only where `Σ_e l_e d_{e,i} n_e n_eᵀ = A_i I`,
+which fails next to the pentagons (and on irregular meshes): its error is
+O(1) and that of `∇K` O(1/h). `kinetic_energy` mixes in the vertex kinetic
+energy of Ringler et al. (2010) and Skamarock et al. (2012),
+
+    K_v = (1/A_v) Σ_{e∈v} A_{e,v} u_e²,   K_i = α K_i^cell + (1 - α) Σ_v (K_{i,v}/A_i) K_v,
+
+with `α = 1` (`:cell`, the default), `0` (`:vertex`), `3/8` (`:mixed`) or
+any real `α`. `A_{e,v}` are the exact parts of the dual cell at the edges
+(`vertex_edge_areas`; MPAS takes `l_e d_e / 4`), with which `K_v` is
+consistent on any Delaunay triangle. The energy stays conserved because the
+mass flux uses the matching edge height
+`h_e = α (d_{e,l} h_l + d_{e,r} h_r)/d_e + 2(1 - α)(A_{e,v1} h_{v1} + A_{e,v2} h_{v2})/(l_e d_e)`,
+so that `∂E/∂u_e = l_e d_e h_e u_e`.
 
 `pv_flux = :gassmann` replaces the PV flux term by the reconstruction of
 Gassmann (2013) with the PV usage of Gassmann (2018), ICON-IAP
@@ -49,14 +64,16 @@ and computes the owned tendencies, the ghost entries of `dy` are zero.
 `gather_state` assembles the global state (edges by `edge_index`, cells by
 `cell_index`), which serially is the state itself. `grid` is the global grid.
 """
-struct TRiSKShallowWater{I, M, V, G, D, BE} <: CGridShallowWater
+struct TRiSKShallowWater{I, M, V, VK, G, D, BE} <: CGridShallowWater
     grid::TRiSKGrid
     cell_edges::I
     divergence::M        # n_{e,i} l_e / A_i
-    kinetic::M           # l_e d_{e,i} / (2 A_i)
+    kinetic::M           # α l_e d_{e,i} / (2 A_i)
+    vertex_kinetic::VK   # nothing, or (cell_vertices, kites = (1 - α) K_{i,v} / A_i, weights = A_{e,v} / A_v,
+                         #   height = 2 (1 - α) A_{e,v} / (l_e d_e) at the edge vertices)
     edge_cells::I
     edge_vertices::I
-    edge_height::M       # d_{e,i} / d_e
+    edge_height::M       # α d_{e,i} / d_e
     inverse_dual::V      # 1 / d_e
     vertex_edges::I
     curl::M              # t_{e,v} d_e / A_v
@@ -68,16 +85,21 @@ struct TRiSKShallowWater{I, M, V, G, D, BE} <: CGridShallowWater
     cell_areas::V        # local
     vertex_areas::V
     gassmann::G          # nothing, or (edges, pv_edges, weights, rhombus = A_v / (A_v1 + A_v2), coriolis at edges, mean)
-    work::NamedTuple{(:K, :B, :F, :ζv, :hv, :qv, :qe), NTuple{7, V}}
+    work::NamedTuple{(:K, :B, :F, :ζv, :hv, :qv, :qe, :Kv), NTuple{8, V}}
     distribution::D      # on the backend
     gravity::Float64
     backend::BE
 end
 
 function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[3], pv_flux::Symbol=:trisk,
-                           comm=nothing, part=nothing, backend=KernelAbstractions.CPU())
+                           kinetic_energy::Union{Symbol, Real}=:cell, comm=nothing, part=nothing,
+                           backend=KernelAbstractions.CPU())
     pv_flux in (:trisk, :gassmann, :gassmann_mean) ||
         throw(ArgumentError("pv_flux must be :trisk, :gassmann or :gassmann_mean"))
+    α = kinetic_energy isa Real ? Float64(kinetic_energy) :
+        get(Dict(:cell => 1.0, :mixed => 3 / 8, :vertex => 0.0), kinetic_energy) do
+            throw(ArgumentError("kinetic_energy must be :cell, :mixed, :vertex or a weight"))
+        end
     nc, ne, nv = num_cells(grid), num_edges(grid), num_vertices(grid)
     l, d = grid.primal_lengths, grid.dual_lengths
     # coefficients of the global grid
@@ -88,7 +110,7 @@ function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[
         s == 0 && continue
         side = grid.edge_cells[1, e] == i ? 1 : 2
         divergence[k, i] = s * l[e] / grid.cell_areas[i]
-        kinetic[k, i] = l[e] * grid.cell_distances[side, e] / (2 * grid.cell_areas[i])
+        kinetic[k, i] = α * l[e] * grid.cell_distances[side, e] / (2 * grid.cell_areas[i])
     end
     curl = similar(grid.vertex_signs)
     for v in 1:nv, k in axes(curl, 1)
@@ -107,7 +129,7 @@ function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[
     local_vertex = local_numbers(vertices, nv)
     cell_edges, divergence = local_table(grid.cell_edges, divergence, cells, local_edge)
     _, kinetic = local_table(grid.cell_edges, kinetic, cells, local_edge)
-    edge_cells, edge_height = local_table(grid.edge_cells, grid.cell_distances ./ d', edges, local_cell)
+    edge_cells, edge_height = local_table(grid.edge_cells, α .* grid.cell_distances ./ d', edges, local_cell)
     rhombus = grid.vertex_areas[grid.edge_vertices]
     rhombus ./= sum(rhombus; dims=1)
     edge_vertices, rhombus = local_table(grid.edge_vertices, rhombus, edges, local_vertex)
@@ -125,10 +147,19 @@ function TRiSKShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[
         gassmann = (edges=dev(flux_edges), pv_edges=dev(pv_edges), weights=dev(weights), rhombus=dev(rhombus),
                     coriolis=dev(map(coriolis, grid.edge_points[edges])), mean=pv_flux == :gassmann_mean)
     end
+    vertex_kinetic = nothing
+    if α != 1
+        cell_vertices, kites = local_table(grid.cell_vertices, (1 - α) .* grid.cell_kites ./ grid.cell_areas', cells,
+                                           local_vertex)
+        by_vertex, by_edge = vertex_edge_areas(grid)
+        _, weights = local_table(grid.vertex_edges, by_vertex ./ grid.vertex_areas', vertices, local_edge)
+        _, height = local_table(grid.edge_vertices, (1 - α) .* 2 .* by_edge ./ (l .* d)', edges, local_vertex)
+        vertex_kinetic = (cell_vertices=dev(cell_vertices), kites=dev(kites), weights=dev(weights), height=dev(height))
+    end
     nlc, nle, nlv = length(cells), length(edges), length(vertices)
     work = (K=zero_vector(nlc), B=zero_vector(nlc), F=zero_vector(nle), ζv=zero_vector(nlv), hv=zero_vector(nlv),
-            qv=zero_vector(nlv), qe=zero_vector(nle))
-    return TRiSKShallowWater(grid, dev(cell_edges), dev(divergence), dev(kinetic), dev(edge_cells),
+            qv=zero_vector(nlv), qe=zero_vector(nle), Kv=zero_vector(vertex_kinetic === nothing ? 0 : nlv))
+    return TRiSKShallowWater(grid, dev(cell_edges), dev(divergence), dev(kinetic), vertex_kinetic, dev(edge_cells),
                              dev(edge_vertices), dev(edge_height), dev(1 ./ d[edges]), dev(vertex_edges), dev(curl),
                              dev(vertex_cells), dev(vertex_height), dev(map(coriolis, grid.vertices[vertices])),
                              dev(trisk_edges), dev(trisk), dev(grid.cell_areas[cells]),
@@ -178,9 +209,38 @@ exchange_state!(m::CGridShallowWater, y) = exchange!(y, m.distribution.state, m.
     @inbounds B[i] = s + gravity * h[i]
 end
 
+@kernel function vertex_kinetic_energy_kernel!(Kv, @Const(u), @Const(vertex_edges), @Const(weights))
+    v = @index(Global)
+    s = 0.0
+    @inbounds for k in axes(vertex_edges, 1)
+        s += weights[k, v] * u[vertex_edges[k, v]]^2
+    end
+    @inbounds Kv[v] = s
+end
+
+"Add the vertex part `Σ_v kites[k, i] K_v` to `K` and `B`."
+@kernel function cell_from_vertex_kernel!(K, B, @Const(Kv), @Const(cell_vertices), @Const(kites))
+    i = @index(Global)
+    s = 0.0
+    @inbounds for k in axes(cell_vertices, 1)
+        s += kites[k, i] * Kv[cell_vertices[k, i]]
+    end
+    @inbounds K[i] += s
+    @inbounds B[i] += s
+end
+
 @kernel function mass_flux_kernel!(F, @Const(u), @Const(h), @Const(edge_cells), @Const(edge_height))
     e = @index(Global)
     @inbounds F[e] = (edge_height[1, e] * h[edge_cells[1, e]] + edge_height[2, e] * h[edge_cells[2, e]]) * u[e]
+end
+
+"Mass flux with the edge height mixed from the cells and the vertices (`hv`)."
+@kernel function mixed_mass_flux_kernel!(F, @Const(u), @Const(h), @Const(hv), @Const(edge_cells),
+                                         @Const(edge_height), @Const(edge_vertices), @Const(vertex_height))
+    e = @index(Global)
+    @inbounds F[e] = (edge_height[1, e] * h[edge_cells[1, e]] + edge_height[2, e] * h[edge_cells[2, e]] +
+                      vertex_height[1, e] * hv[edge_vertices[1, e]] + vertex_height[2, e] * hv[edge_vertices[2, e]]) *
+                     u[e]
 end
 
 @kernel function vertex_pv_kernel!(qv, ζv, hv, @Const(u), @Const(h), @Const(vertex_edges), @Const(curl),
@@ -270,8 +330,24 @@ end
 
 "Kinetic energy and Bernoulli function `K + g h` at the local cells, in the work vectors."
 function kinetic_energy!(m::TRiSKShallowWater, u, h)
-    w = m.work
+    w, vk = m.work, m.vertex_kinetic
     run!(m, kinetic_energy_kernel!, length(w.K), w.K, w.B, u, h, m.cell_edges, m.kinetic, m.gravity)
+    if vk !== nothing
+        run!(m, vertex_kinetic_energy_kernel!, length(w.Kv), w.Kv, u, m.vertex_edges, vk.weights)
+        run!(m, cell_from_vertex_kernel!, length(w.K), w.K, w.B, w.Kv, vk.cell_vertices, vk.kites)
+    end
+    return w
+end
+
+"Mass flux `h_e u_e` at the local edges (after `vertex_pv!` for the mixed edge height)."
+function mass_flux!(m::TRiSKShallowWater, u, h)
+    w, vk = m.work, m.vertex_kinetic
+    if vk === nothing
+        run!(m, mass_flux_kernel!, length(w.F), w.F, u, h, m.edge_cells, m.edge_height)
+    else
+        run!(m, mixed_mass_flux_kernel!, length(w.F), w.F, u, h, w.hv, m.edge_cells, m.edge_height,
+             m.edge_vertices, vk.height)
+    end
     return w
 end
 
@@ -306,8 +382,8 @@ function tendency!(dy::AbstractVector, y::AbstractVector, m::TRiSKShallowWater)
     u, h = view(y, velocity_dofs(m)), view(y, height_dofs(m))
     du, dh = view(dy, velocity_dofs(m)), view(dy, height_dofs(m))
     kinetic_energy!(m, u, h)
-    run!(m, mass_flux_kernel!, length(w.F), w.F, u, h, m.edge_cells, m.edge_height)
     vertex_pv!(m, u, h)
+    mass_flux!(m, u, h)
     pv_flux!(du, m, m.gassmann)
     run!(m, continuity_kernel!, d.cells.n_owned, dh, w.F, m.cell_edges, m.divergence)
     if is_distributed(d)

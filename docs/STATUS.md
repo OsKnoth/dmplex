@@ -81,8 +81,24 @@ Working notes for continuing development (on another machine or in a new session
   `ν₄ = 0.0025 Ā²/Δt` NaN before day 0.5 (explicitly unstable on the small cells); `divergence_damping` now
   takes one `ν₄` per edge, the example uses the local area `A_e`: stable, energy ≤ 1.5e-6, enstrophy -1.6e-4,
   the expected roll-up without imprint of the refinement, close to R02B06.
-  Next: a consistent energy-conserving K (e.g. the
-  cell/vertex mixture of Skamarock 2012 or Gassmann 2013).
+  Consistent energy-conserving K for TRiSK: `TRiSKShallowWater(...; kinetic_energy=:cell|:mixed|:vertex|α)`
+  (`--kinetic=` in the examples) mixes the cell K with the vertex K of Ringler et al. (2010) / Skamarock et al.
+  (2012), `K_i = α K_i^cell + (1-α) Σ_v (K_{i,v}/A_i) K_v`, `K_v = Σ_e A_{e,v} u_e² / A_v` (`:mixed` is α = 3/8).
+  Why the vertex K can be consistent: `Σ_e |s_e| h_e n_e n_eᵀ = A I` holds for a polygon only if the centre
+  projects onto the midpoints of the sides, which is true for the circumcenter of a dual triangle, not for the
+  generator of a Voronoi cell (edge point ≠ primal edge midpoint: the cell K error is O(1)). This needs the exact
+  areas `A_{e,v}` of the triangles (generator l, generator r, vertex) (`vertex_edge_areas`, signed topologically
+  for obtuse triangles); MPAS's `l_e d_e/4` assumes the vertex in the middle of the primal edge and is no more
+  consistent than the cell K (spring hexagon 5: K error 3.1 % vs 1.4 %). Energy stays conserved (semi-discrete,
+  tested) with the matching edge height `h_e = α Σ d_{e,i} h_i/d_e + 2(1-α) Σ_v A_{e,v} h_v/(l_e d_e)`
+  (`∂E/∂u_e = l_e d_e h_e u_e`; the halo of two vertex rings suffices, 1 and 3 ranks bitwise equal). K error of
+  a solid-body rotation, hexagon 4/5/6: cell 1.5/1.4/1.25 % (spring), 2.0/2.0/2.0 % (SCVT), 5.8 % (plain);
+  vertex 0.60/0.27/0.13 % (spring), 0.50/0.21/0.09 % (SCVT), 0.71/0.33/0.16 % (plain): first order. TC2 at t = 1,
+  spring hexagon 4/5/6, max error cell 4.9e-4/3.2e-4/2.6e-4 (stalls), mixed 2.6e-4/1.4e-4/1.0e-4, vertex
+  1.75e-4/7.2e-5/3.8e-5 (first order), L2 cell 1.4e-4/3.9e-5/1.2e-5, vertex 9.0e-5/2.2e-5/5.7e-6 (SCVT alike:
+  max 3.5e-4 → 4.3e-5 on hexagon 6). Galewsky (6 days, hexagon 6 plain/spring with all three, SCVT and spring
+  hexagon 7 with the vertex K): stable, energy ≤ 5e-10, |ζ| and roll-up unchanged; 25–35 % more time per step.
+  (ICON's triangle K `e_inn_c` is consistent for the same reason: circumcenters.)
   Levante A100 on the ICON grids: TC2 L2 height error 2.5e-7 / 6.3e-8 / 1.6e-8 for R02B06/07/08 (second
   order), 1 and 4 GPUs identical; per RK4 step R02B06 (328k cells) 1.5 ms (1 GPU) / 1.8 ms (4), R02B07
   (1.3M) 2.4 / 1.7 ms, R02B08 (5.2M) 7.8 ms on 1 GPU. Galewsky R02B07 (≈ 20 km), 6 days with divergence

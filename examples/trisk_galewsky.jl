@@ -18,7 +18,9 @@
 # icosahedral mesh by spring dynamics (β = 1.2), --scvt makes it centroidal
 # (an SCVT, as MPAS grids); with --icon and a grid file --spring[=β] cleans up its
 # triangles (`relax_triangles`, β = 1), --centered-k takes the centered kinetic-energy
-# gradient instead of ICON's `coeff_gradekin`; --gpu runs on CUDA GPUs (one
+# gradient instead of ICON's `coeff_gradekin`; --kinetic=cell|mixed|vertex|α sets TRiSK's
+# kinetic energy (`kinetic_energy`: the cell one, Skamarock's mixture α = 3/8, the consistent
+# vertex one); --gpu runs on CUDA GPUs (one
 # per rank, environment examples/gpu). No dissipation: the energy- and
 # mass-conserving schemes run inviscid (--gassmann then develops grid-scale
 # vorticity after day 3). Writes the relative vorticity (1/s) at the cells to
@@ -38,6 +40,9 @@ const SPRING = filter(a -> startswith(a, "--spring"), ARGS)
 const SPRING_BETA = isempty(SPRING) ? nothing : SPRING[1] == "--spring" ? 1.2 : parse(Float64, split(SPRING[1], "=")[2])
 const CENTROIDAL = "--scvt" in ARGS
 const KINETIC_GRADIENT = "--centered-k" in ARGS ? :centered : :icon
+const KINETIC = filter(a -> startswith(a, "--kinetic="), ARGS)
+const KINETIC_ENERGY = isempty(KINETIC) ? :cell :
+                       (k = split(KINETIC[1], "=")[2]; k in ("cell", "mixed", "vertex") ? Symbol(k) : parse(Float64, k))
 if USE_GPU
     using CUDA
 end
@@ -141,7 +146,7 @@ function main(args)
         ICONShallowWater(grid; divergence_damping=0.0025 .* local_area .^ 2 ./ dt,
                          kinetic_gradient=KINETIC_GRADIENT, options...)
     else
-        TRiSKShallowWater(grid; pv_flux=PV_FLUX, options...)
+        TRiSKShallowWater(grid; pv_flux=PV_FLUX, kinetic_energy=KINETIC_ENERGY, options...)
     end
     root && @printf("%d cells (≈ %.0f km), %s scheme, %d ranks on %s\n", num_cells(dm),
                     sqrt(4π / num_cells(dm)) * EARTH_RADIUS / 1000, SCHEME, nranks, nameof(typeof(model.backend)))
@@ -180,7 +185,8 @@ function main(args)
                "$(mesh)_$(resolution)" * (SPRING_BETA === nothing ? "" : "_spring$(SPRING_BETA)") *
                (CENTROIDAL ? "_scvt" : "")
         name *= (isfile(mesh) && !isempty(SPRING) ? "_spring" : "") *
-                (KINETIC_GRADIENT == :centered ? "_centeredk" : "")
+                (KINETIC_GRADIENT == :centered ? "_centeredk" : "") *
+                (USE_ICON || KINETIC_ENERGY == :cell ? "" : "_k$KINETIC_ENERGY")
         filename = write_vtkhdf("trisk_galewsky_$(name)_$SCHEME.vtkhdf", dm; vorticity)
         println("wrote $filename")
     end

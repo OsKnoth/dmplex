@@ -176,6 +176,56 @@ end
     @test any(<(0), g.cell_distances)                 # circumcenters beyond an edge
     @test maximum(abs.(g.cell_areas .- exact) ./ exact) < 1e-10
     @test sum(g.vertex_areas) ≈ 4π
+    by_vertex, by_edge = vertex_edge_areas(g)
+    @test vec(sum(by_vertex; dims=1)) ≈ g.vertex_areas
+    @test any(<(0), by_edge)
+end
+
+@testset "TRiSK vertex kinetic energy" begin
+    p = create_spherical_mesh(4; spring_beta=1.2)
+    g = TRiSKGrid(create_hexagon_mesh(4; spring_beta=1.2); centers=p.coordinates)
+    by_vertex, by_edge = vertex_edge_areas(g)
+    @test vec(sum(by_vertex; dims=1)) ≈ g.vertex_areas
+    @test all(e -> isapprox(by_edge[1, e] + by_edge[2, e], g.primal_lengths[e] * g.dual_lengths[e] / 2; rtol=1e-3),
+              1:num_edges(g))
+    # consistent on the dual triangles: Σ_e A_{e,v} n_e n_eᵀ = A_v I/2 on the tangent plane
+    @test all(1:num_vertices(g)) do v
+        x = g.vertices[v]
+        T = sum(by_vertex[k, v] * (n = g.edge_normals[g.vertex_edges[k, v]]; n * n')
+                for k in axes(g.vertex_edges, 1)) / g.vertex_areas[v]
+        P = I - x * x'
+        maximum(abs, P * T * P - P / 2) < 2e-3
+    end
+    @test_throws ArgumentError TRiSKShallowWater(g; kinetic_energy=:edge)
+
+    u0 = 0.2
+    velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
+    height(x) = 1 - (u0 + u0^2 / 2) * x[3]^2
+    errors = map((:cell, :mixed, :vertex)) do kinetic_energy
+        m = TRiSKShallowWater(g; kinetic_energy)
+        y = initial_state(m, velocity, height)
+        y0 = copy(y)
+        # the mixed edge height keeps the semi-discretization energy conserving
+        Random.seed!(3)
+        z = y .+ 0.01 .* randn(length(y))
+        dz = tendency!(similar(z), z, m)
+        ε = 1e-6
+        dEdt = (total_energy(m, z .+ ε .* dz) - total_energy(m, z .- ε .* dz)) / 2ε
+        @test abs(dEdt) < 1e-8 * norm(dz)
+        # K of the solid-body rotation
+        K = dmplex.FiniteVolumes.kinetic_energy!(m, view(y, velocity_dofs(m)), view(y, height_dofs(m))).K
+        kerror = maximum(abs, K - [norm(velocity(x))^2 / 2 for x in g.centers]) / (u0^2 / 2)
+
+        dt = 0.2 * sqrt(4π / num_cells(g))
+        cache = RK4Cache(y)
+        for _ in 1:ceil(Int, 1 / dt)
+            rk4_step!(y, dt, tendency!, cache, m)
+        end
+        kerror, maximum(abs, (y - y0)[height_dofs(m)])
+    end
+    @test errors[3][1] < errors[1][1] / 2      # K: 0.6 % instead of 1.5 %
+    @test errors[3][2] < errors[1][2] / 2.5    # TC2 maximum error
+    @test errors[3][2] < errors[2][2] < errors[1][2]
 end
 
 @testset "TRiSK distribution (MPI)" begin
@@ -195,7 +245,7 @@ end
     # 1 and 3 ranks give the same state (gathers only, no atomics: bitwise)
     script = joinpath(@__DIR__, "mpi_trisk.jl")
     project = dirname(@__DIR__)
-    for pv_flux in ("trisk", "gassmann", "gassmann_mean", "icon")
+    for pv_flux in ("trisk", "gassmann", "gassmann_mean", "icon", "mixed")
         results = map((1, 3)) do n
             file = tempname()
             run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file $pv_flux`)
