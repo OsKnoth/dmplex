@@ -41,9 +41,21 @@ Working notes for continuing development (on another machine or in a new session
   cells), the max error converges too; mass to round-off, energy 1e-8 (not conserved by construction).
   Galewsky (`trisk_galewsky.jl <ICON grid file> 0 6 --icon`) on the public ICON grids R02B05/R02B06
   (`/pool/data/ICON/grids/public/mpim`): stable, the expected roll-up, energy -4e-8 over 6 days; on R02B06 less
-  grid imprint than TRiSK on hexagon 7. On dmplex's own bisection triangle mesh (not spring-optimized) the jet
-  blows up after 0.5–2.4 days at a fixed place (independent of perturbation, time step and damping): use ICON
-  grids, as MPAS grids for the hexagons.
+  grid imprint than TRiSK on hexagon 7. On dmplex's plain bisection triangle mesh the jet blows up (triangle
+  5/6/7 before day 3/2/1: energy grows exponentially from day 0.5, earlier on finer meshes, independent of time
+  step and damping). Cause: the grid defects of plain bisection do not shrink with refinement (max
+  |d_l - d_r|/d = 0.19 at every level, R02B04 → B05 0.15 → 0.12), and ICON's `coeff_gradekin` weighs the edge
+  kinetic energy `K_e` (with the RBF `v_t²` of the edge itself) by `a1 - a2 ∝ d_r/d_l - d_l/d_r`, which
+  vanishes only for symmetric circumcenters; with the centered gradient `(K_r - K_l)/d` triangle 5 stays
+  stable (a Hollingsworth-type inconsistency of K and the vorticity term). TC2 shows the same: L2 error
+  1.9e-5 / 7.0e-6 / 3.9e-6 for triangle 4/5/6 (convergence stalls). `create_spherical_mesh(n; spring_beta=1.2)`
+  (also `create_hexagon_mesh`, `--spring[=β]` in the examples) relaxes every bisection level by the spring
+  dynamics of Tomita et al. (2002) (12 icosahedron vertices fixed, natural length β times the side of the
+  equilateral triangle of mean area; β ≥ 1.3 folds the mesh over; level 8 in about 80 s): max asymmetry
+  0.10 / 0.089 for level 6/7, TC2 2.3e-5 / 5.6e-6 / 1.4e-6 (second order), Galewsky stable for 6 days on triangle 5/6/7 (β = 1.2, also β = 1.0 on
+  triangle 6), energy ≤ 3e-7 on triangle 7, roll-up as on R02B05. TRiSK on spring
+  hexagons: TC2 L2 3–4.5× and max error 3–5× smaller (hexagon 4–6), the max error still saturates slowly
+  (spring dynamics does not make the cells centroidal).
   Levante A100 on the ICON grids: TC2 L2 height error 2.5e-7 / 6.3e-8 / 1.6e-8 for R02B06/07/08 (second
   order), 1 and 4 GPUs identical; per RK4 step R02B06 (328k cells) 1.5 ms (1 GPU) / 1.8 ms (4), R02B07
   (1.3M) 2.4 / 1.7 ms, R02B08 (5.2M) 7.8 ms on 1 GPU. Galewsky R02B07 (≈ 20 km), 6 days with divergence

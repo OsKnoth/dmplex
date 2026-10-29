@@ -14,6 +14,7 @@
 # file (its hexagonal dual, or its triangles with --icon). Units: a = Ω = g = 1.
 # --gassmann uses the PV flux of Gassmann (2013, 2018) instead of TRiSK's (as in
 # ICON-IAP), --gassmann-mean the same reconstruction with the mean edge PV.
+# --spring[=β] optimizes the icosahedral mesh by spring dynamics (β = 1.2).
 using KernelAbstractions
 using MPI
 using StaticArrays
@@ -22,6 +23,8 @@ using dmplex
 const USE_GPU = "--gpu" in ARGS
 const USE_ICON = "--icon" in ARGS
 const PV_FLUX = "--gassmann-mean" in ARGS ? :gassmann_mean : "--gassmann" in ARGS ? :gassmann : :trisk
+const SPRING = filter(a -> startswith(a, "--spring"), ARGS)
+const SPRING_BETA = isempty(SPRING) ? nothing : SPRING[1] == "--spring" ? 1.2 : parse(Float64, split(SPRING[1], "=")[2])
 if USE_GPU
     using CUDA
 end
@@ -31,9 +34,10 @@ Mesh and its mass points (`nothing`: computed by `TRiSKGrid`): Voronoi cells for
 TRiSK, triangles with circumcenters for the ICON model (`--icon`).
 """
 function load_mesh(mesh, resolution)
-    mesh == "triangle" && return create_spherical_mesh(resolution), nothing
+    mesh == "triangle" && return create_spherical_mesh(resolution; spring_beta=SPRING_BETA), nothing
     if mesh == "hexagon"   # the generators are the vertices of the icosahedral mesh
-        return create_hexagon_mesh(resolution), create_spherical_mesh(resolution).coordinates
+        return (create_hexagon_mesh(resolution; spring_beta=SPRING_BETA),
+                create_spherical_mesh(resolution; spring_beta=SPRING_BETA).coordinates)
     end
     isfile(mesh) || error("unknown mesh $mesh")
     icon_file = NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)

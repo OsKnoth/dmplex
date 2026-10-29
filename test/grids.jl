@@ -86,6 +86,22 @@ total_area(dm) = sum(compute_mesh_metrics(dm).cell_areas)
     end
 end
 
+@testset "Spring dynamics" begin
+    plain, optimized = create_spherical_mesh(4), create_spherical_mesh(4; spring_beta=1.2)
+    @test num_cells(optimized) == num_cells(plain) && optimized.coordinates[1:12] == plain.coordinates[1:12]
+    @test all(x -> abs(norm(x) - 1) < 1e-14, optimized.coordinates)
+    @test total_area(optimized) ≈ 4π
+    areas(dm) = compute_mesh_metrics(dm).cell_areas
+    @test maximum(areas(optimized)) / minimum(areas(optimized)) < 1.2 < maximum(areas(plain)) / minimum(areas(plain))
+    # equilibrium: no tangential spring force on the free vertices
+    x = copy(optimized.coordinates)
+    edges = [Tuple(sort(vertex_index.(Ref(optimized), get_cone(optimized, e)))) for e in edge_range(optimized)]
+    @test spring_dynamics!(x, edges; beta=1.2, mean_length=sqrt(4π / (5sqrt(3))) / 16, fixed=1:12) < 10
+    @test maximum(norm.(x .- optimized.coordinates)) < 1e-9
+    hexagons = create_hexagon_mesh(4; spring_beta=1.2)
+    @test orthogonality_defect(hexagons, optimized.coordinates) < 1e-10
+end
+
 @testset "HEALPix" begin
     for nside in (1, 2, 4)
         dm = create_healpix_mesh(nside)

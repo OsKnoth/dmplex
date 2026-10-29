@@ -127,8 +127,8 @@ end
     u0 = 0.2
     velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
     height(x) = 1 - (u0 + u0^2 / 2) * x[3]^2
-    errors = map((3, 4)) do n
-        m = ICONShallowWater(create_spherical_mesh(n))
+    errors = map(((3, nothing), (4, nothing), (4, 1.2), (5, 1.2))) do (n, spring_beta)
+        m = ICONShallowWater(create_spherical_mesh(n; spring_beta))
         y = initial_state(m, velocity, height)
         y0 = copy(y)
         mass0, energy0 = total_mass(m, y), total_energy(m, y)
@@ -144,6 +144,7 @@ end
     end
     @test errors[1] < 1e-4
     @test errors[2] < errors[1] / 3
+    @test errors[4] < errors[3] / 3.5   # second order on spring-optimized meshes
 end
 
 @testset "TRiSK distribution (MPI)" begin
