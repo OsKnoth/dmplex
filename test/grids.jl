@@ -102,6 +102,34 @@ end
     @test orthogonality_defect(hexagons, optimized.coordinates) < 1e-10
 end
 
+@testset "Centroidal Voronoi tessellation (Lloyd)" begin
+    scvt = create_spherical_mesh(4; centroidal=true)
+    @test scvt.coordinates[1:12] == create_spherical_mesh(0).coordinates
+    @test all(x -> abs(norm(x) - 1) < 1e-14, scvt.coordinates) && total_area(scvt) ≈ 4π
+    # a fixed point: the vertices are the centroids of their Voronoi cells
+    x = copy(scvt.coordinates)
+    triangles = [Tuple(vertex_index.(Ref(scvt), get_cell_vertices(scvt, c))) for c in cell_range(scvt)]
+    @test lloyd!(x, triangles; fixed=1:12) < 3 && maximum(norm.(x .- scvt.coordinates)) < 1e-9
+    # Anderson mixing converges to the same tessellation as plain Lloyd
+    y, z = copy(create_spherical_mesh(4).coordinates), copy(create_spherical_mesh(4).coordinates)
+    lloyd!(y, triangles; fixed=1:12)
+    lloyd!(z, triangles; fixed=1:12, history=0)
+    @test maximum(norm.(y .- z)) < 1e-7
+    # TRiSK tangential reconstruction on the hexagonal dual: far more consistent than on plain bisection
+    tangential_error(opts) = begin
+        g = TRiSKGrid(create_hexagon_mesh(4; opts...); centers=create_spherical_mesh(4; opts...).coordinates)
+        @test orthogonality_defect(g.dm, g.centers) < 1e-10
+        ω = SVector(0.3, -0.2, 1.0)
+        u = [dot(cross(ω, x), n) for (x, n) in zip(g.edge_points, g.edge_normals)]
+        maximum(1:num_edges(g)) do e
+            vt = sum(g.trisk_weights[k, e] * g.primal_lengths[g.trisk_edges[k, e]] * u[g.trisk_edges[k, e]]
+                     for k in axes(g.trisk_edges, 1)) / g.dual_lengths[e]
+            abs(vt - dot(cross(ω, g.edge_points[e]), cross(g.edge_points[e], g.edge_normals[e])))
+        end
+    end
+    @test tangential_error((; centroidal=true)) < 0.1 * tangential_error((;))
+end
+
 @testset "HEALPix" begin
     for nside in (1, 2, 4)
         dm = create_healpix_mesh(nside)

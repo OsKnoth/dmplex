@@ -1,7 +1,7 @@
 const PHI = (1.0 + sqrt(5.0)) / 2.0
 
 """
-    create_spherical_mesh(subdivisions; spring_beta=nothing)
+    create_spherical_mesh(subdivisions; spring_beta=nothing, centroidal=false)
 
 Icosahedral triangle mesh on the unit sphere; every subdivision splits each
 triangle into four and projects the new edge midpoints onto the sphere.
@@ -12,8 +12,14 @@ grids of NICAM and, in a modified form, ICON: plain bisection leaves the cell
 shapes changing abruptly across the edges of the coarser levels, and the
 grid defects do not shrink with refinement. Tomita et al. recommend
 `spring_beta = 1.2`; larger values fold the mesh over.
+
+With `centroidal = true` the vertices are then moved by Lloyd's algorithm (see
+[`lloyd!`](@ref)) until they are the centroids of their Voronoi cells, after
+every subdivision too: the hexagonal dual is then a spherical centroidal
+Voronoi tessellation (SCVT) as the MPAS grids, on which the TRiSK operators
+are consistent.
 """
-function create_spherical_mesh(subdivisions::Int; spring_beta=nothing)
+function create_spherical_mesh(subdivisions::Int; spring_beta=nothing, centroidal::Bool=false)
     subdivisions >= 0 || throw(ArgumentError("subdivisions must be non-negative"))
     raw_coords = [
         SVector(-1.0,  PHI,  0.0), SVector( 1.0,  PHI,  0.0), SVector(-1.0, -PHI,  0.0), SVector( 1.0, -PHI,  0.0),
@@ -48,6 +54,7 @@ function create_spherical_mesh(subdivisions::Int; spring_beta=nothing)
             all(((a, b, c),) -> dot(cross(vertices[b] - vertices[a], vertices[c] - vertices[a]), vertices[a]) > 0,
                 triangles) || throw(ArgumentError("spring_beta = $spring_beta folds the mesh over; take a smaller one"))
         end
+        centroidal && lloyd!(vertices, triangles; fixed=1:12)
     end
 
     return plex_from_polygons([collect(t) for t in triangles], vertices)
@@ -96,4 +103,111 @@ function spring_dynamics!(x::Vector{SVector{3, Float64}}, edges; beta::Real=1.2,
     end
     @warn "spring dynamics did not converge in $max_iterations iterations"
     return max_iterations
+end
+
+"""
+    lloyd!(x, triangles; fixed=(), tolerance=1e-8, history=16, max_iterations=10_000)
+
+Move the vertices `x` of the counter-clockwise triangulation `triangles` of the
+unit sphere to the centroids of their Voronoi cells (Lloyd's algorithm for
+spherical centroidal Voronoi tessellations, Du, Gunzburger & Ju 2003). The
+Voronoi cell of a vertex is the polygon of the circumcenters `cₖ` of its
+triangles; its centroid is the normalized `∫ x dA = ½ Σₖ θₖ (cₖ × cₖ₊₁)/|cₖ × cₖ₊₁|`
+(`θₖ` the arc from `cₖ` to `cₖ₊₁`). The connectivity is kept, so the
+triangulation must stay Delaunay (checked at the end). The fixed-point
+iteration `x ← centroid(x)` is accelerated by Anderson mixing over the last
+`history` steps (`history = 0`: plain Lloyd); it stops when the largest
+distance of a free vertex from its centroid is below `tolerance` times the mean
+edge length. Returns the number of iterations.
+"""
+function lloyd!(x::Vector{SVector{3, Float64}}, triangles; fixed=(), tolerance::Real=1e-8,
+                history::Integer=16, max_iterations::Integer=10_000)
+    free = trues(length(x))
+    free[collect(fixed)] .= false
+    # triangles around every vertex, counter-clockwise: the triangle after (v, b, c) contains (v, c)
+    star = [Int[] for _ in eachindex(x)]
+    after = Dict{Tuple{Int, Int}, Int}()   # (v, b) -> triangle with the corner v followed by b
+    for (t, (a, b, c)) in enumerate(triangles)
+        after[(a, b)], after[(b, c)], after[(c, a)] = t, t, t
+    end
+    for (t, tri) in enumerate(triangles), k in 1:3
+        v, w = tri[k], tri[mod1(k + 2, 3)]   # corner v, previous corner w: the next triangle has (v, w)
+        isempty(star[v]) || continue
+        push!(star[v], t)
+        while true
+            next = after[(v, w)]
+            next == t && break
+            push!(star[v], next)
+            tn = triangles[next]
+            w = tn[mod1(findfirst(==(v), tn) + 2, 3)]
+        end
+    end
+    h = sum(((a, b, c),) -> norm(x[b] - x[a]), triangles) / length(triangles)
+    centers = similar(x, length(triangles))
+    # Anderson mixing (type II) over the last m steps: with the differences ΔX, ΔF of the iterates and of the
+    # steps f = g(x) - x, x ← x + f - (ΔX + ΔF) γ, γ = argmin |f - ΔF γ| (normal equations, regularized)
+    f, fold, xold = (zeros(SVector{3, Float64}, length(x)) for _ in 1:3)
+    ΔX, ΔF = zeros(3length(x), history), zeros(3length(x), history)
+    flat(v) = reinterpret(Float64, v)
+    m = 0
+    for iteration in 1:max_iterations
+        residual = lloyd_step!(f, centers, x, triangles, star, free)
+        if residual < tolerance * h
+            all(t -> is_delaunay(x, triangles, after, t), triangles) ||
+                throw(ArgumentError("Lloyd's algorithm left the triangulation non-Delaunay"))
+            return iteration
+        end
+        if history > 0 && iteration > 1
+            k = mod1(iteration - 1, history)    # ring buffer of the last `history` differences
+            ΔX[:, k] .= flat(x) .- flat(xold)
+            ΔF[:, k] .= flat(f) .- flat(fold)
+            m = min(m + 1, history)
+        end
+        xold .= x
+        fold .= f
+        if m > 0
+            A, B = view(ΔF, :, 1:m), view(ΔX, :, 1:m)
+            N = A' * A
+            γ = (N + 1e-12 * maximum(diag(N)) * I) \ (A' * flat(f))
+            flat(x) .+= flat(f) .- (B * γ .+ A * γ)
+        else
+            x .+= f
+        end
+        x .= normalize.(x)
+    end
+    @warn "Lloyd's algorithm did not converge in $max_iterations iterations"
+    return max_iterations
+end
+
+"Lloyd step `centroid - x` of the free vertices into `f`; returns its largest length."
+function lloyd_step!(f, centers, x, triangles, star, free)
+    for (t, (a, b, c)) in enumerate(triangles)
+        centers[t] = normalize(cross(x[b] - x[a], x[c] - x[a]))
+    end
+    residual = 0.0
+    for v in eachindex(x)
+        if !free[v]
+            f[v] = zero(eltype(f))
+            continue
+        end
+        ring = star[v]
+        m = zero(eltype(f))
+        for k in eachindex(ring)
+            p, q = centers[ring[k]], centers[ring[mod1(k + 1, length(ring))]]
+            n = cross(p, q)
+            m += atan(norm(n), dot(p, q)) / norm(n) * n
+        end
+        f[v] = normalize(m) - x[v]
+        residual = max(residual, norm(f[v]))
+    end
+    return residual
+end
+
+"Delaunay test of triangle `(a, b, c)`: the vertex opposite to every edge lies outside its circumcircle."
+function is_delaunay(x, triangles, after, (a, b, c))
+    center = normalize(cross(x[b] - x[a], x[c] - x[a]))
+    return all(((a, b), (b, c), (c, a))) do (p, q)
+        o = first(setdiff(triangles[after[(q, p)]], (p, q)))
+        dot(x[o], center) <= dot(x[a], center) + 1e-14
+    end
 end

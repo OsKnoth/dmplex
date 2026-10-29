@@ -14,7 +14,8 @@
 # fourth-order divergence damping (divdamp_fac = 0.0025). --gassmann uses the PV flux of
 # Gassmann (2013, 2018) instead of TRiSK's (as in ICON-IAP), --gassmann-mean
 # the same reconstruction with the mean edge PV; --spring[=β] optimizes the
-# icosahedral mesh by spring dynamics (β = 1.2); --gpu runs on CUDA GPUs (one
+# icosahedral mesh by spring dynamics (β = 1.2), --scvt makes it centroidal
+# (an SCVT, as MPAS grids); --gpu runs on CUDA GPUs (one
 # per rank, environment examples/gpu). No dissipation: the energy- and
 # mass-conserving schemes run inviscid (--gassmann then develops grid-scale
 # vorticity after day 3). Writes the relative vorticity (1/s) at the cells to
@@ -32,6 +33,7 @@ const PV_FLUX = "--gassmann-mean" in ARGS ? :gassmann_mean : "--gassmann" in ARG
 const SCHEME = USE_ICON ? :icon : PV_FLUX
 const SPRING = filter(a -> startswith(a, "--spring"), ARGS)
 const SPRING_BETA = isempty(SPRING) ? nothing : SPRING[1] == "--spring" ? 1.2 : parse(Float64, split(SPRING[1], "=")[2])
+const CENTROIDAL = "--scvt" in ARGS
 if USE_GPU
     using CUDA
 end
@@ -82,10 +84,11 @@ Mesh and its mass points (`nothing`: computed by `TRiSKGrid`): Voronoi cells for
 TRiSK, triangles with circumcenters for the ICON model (`--icon`).
 """
 function load_mesh(mesh, resolution)
-    mesh == "triangle" && return create_spherical_mesh(resolution; spring_beta=SPRING_BETA), nothing
+    optimization = (; spring_beta=SPRING_BETA, centroidal=CENTROIDAL)
+    mesh == "triangle" && return create_spherical_mesh(resolution; optimization...), nothing
     if mesh == "hexagon"   # the generators are the vertices of the icosahedral mesh
-        return (create_hexagon_mesh(resolution; spring_beta=SPRING_BETA),
-                create_spherical_mesh(resolution; spring_beta=SPRING_BETA).coordinates)
+        return (create_hexagon_mesh(resolution; optimization...),
+                create_spherical_mesh(resolution; optimization...).coordinates)
     end
     isfile(mesh) || error("unknown mesh $mesh")
     icon_file = NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)
@@ -163,7 +166,8 @@ function main(args)
         vorticity = OMEGA .* cell_vorticity(model.grid, state[global_velocity_dofs(model)])
         @printf("relative vorticity: min %.2e, max %.2e 1/s\n", minimum(vorticity), maximum(vorticity))
         name = isfile(mesh) ? splitext(basename(mesh))[1] :
-               "$(mesh)_$(resolution)" * (SPRING_BETA === nothing ? "" : "_spring$(SPRING_BETA)")
+               "$(mesh)_$(resolution)" * (SPRING_BETA === nothing ? "" : "_spring$(SPRING_BETA)") *
+               (CENTROIDAL ? "_scvt" : "")
         filename = write_vtkhdf("trisk_galewsky_$(name)_$SCHEME.vtkhdf", dm; vorticity)
         println("wrote $filename")
     end

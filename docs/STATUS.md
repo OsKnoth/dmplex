@@ -54,8 +54,19 @@ Working notes for continuing development (on another machine or in a new session
   equilateral triangle of mean area; β ≥ 1.3 folds the mesh over; level 8 in about 80 s): max asymmetry
   0.10 / 0.089 for level 6/7, TC2 2.3e-5 / 5.6e-6 / 1.4e-6 (second order), Galewsky stable for 6 days on triangle 5/6/7 (β = 1.2, also β = 1.0 on
   triangle 6), energy ≤ 3e-7 on triangle 7, roll-up as on R02B05. TRiSK on spring
-  hexagons: TC2 L2 3–4.5× and max error 3–5× smaller (hexagon 4–6), the max error still saturates slowly
-  (spring dynamics does not make the cells centroidal).
+  hexagons: TC2 L2 3–4.5× and max error 3–5× smaller (hexagon 4–6), the max error still saturates slowly.
+  `centroidal=true` (`--scvt`): Lloyd's algorithm after every bisection level makes the hexagons a spherical
+  centroidal Voronoi tessellation (exact centroids of the spherical Voronoi cells `½ Σ θₖ (cₖ × cₖ₊₁)/|·|`,
+  fixed connectivity checked to stay Delaunay, Anderson mixing over 16 steps: level 6 in 167 instead of 4270
+  iterations, level 7 in 8 s). TRiSK tangential reconstruction, max error for a solid-body field, level 5/6/7:
+  plain 0.11/0.11/0.11, spring 0.014/0.016/0.018, SCVT 0.0071/0.0072/0.0073 (inconsistent on every grid, as
+  Peixoto 2016 found). TC2 on SCVT hexagons is not better than on spring ones (L2 1.4e-4/4.0e-5/1.3e-5/5.4e-6
+  for hexagon 4–7, max 3–4e-4): the max error now comes from the kinetic energy `K_i = Σ l_e d_{e,i} u_e²/2A_i`,
+  which is consistent only if `Σ l_e d_{e,i} n_e n_eᵀ = A_i I`; next to the pentagons it is off by 2 % (SCVT) /
+  1.1 % (spring) at every resolution, so `∇K` has an O(1/h) error there (the momentum residual of the balanced
+  TC2 state doubles per level and sits next to a pentagon). Galewsky with TRiSK on SCVT hexagon 6: stable,
+  more regular vortices than on the plain hexagon 6. Next: a consistent energy-conserving K (e.g. the
+  cell/vertex mixture of Skamarock 2012 or Gassmann 2013).
   Levante A100 on the ICON grids: TC2 L2 height error 2.5e-7 / 6.3e-8 / 1.6e-8 for R02B06/07/08 (second
   order), 1 and 4 GPUs identical; per RK4 step R02B06 (328k cells) 1.5 ms (1 GPU) / 1.8 ms (4), R02B07
   (1.3M) 2.4 / 1.7 ms, R02B08 (5.2M) 7.8 ms on 1 GPU. Galewsky R02B07 (≈ 20 km), 6 days with divergence

@@ -59,6 +59,7 @@ The figures are generated with `julia --project docs/make_figures.jl`.
 ```julia
 dm = create_healpix_mesh(16)                              # 12·16² quads
 dm = create_spherical_mesh(6; spring_beta=1.2)            # icosahedral, spring dynamics (Tomita et al. 2002)
+dm = create_hexagon_mesh(6; centroidal=true)              # its Voronoi dual as an SCVT (Lloyd), as MPAS
 dm = read_grid("grid/icon_grid_0010_R02B04_G.nc")          # ICON triangles
 dm = read_grid("grid/x1.40962.grid.nc"; dual=true)         # MPAS Delaunay triangles
 ```
