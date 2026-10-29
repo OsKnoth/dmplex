@@ -61,7 +61,8 @@ function create_spherical_mesh(subdivisions::Int; spring_beta=nothing, centroida
 end
 
 """
-    spring_dynamics!(x, edges; beta=1.2, mean_length, fixed=(), tolerance=1e-10, max_iterations=100_000)
+    spring_dynamics!(x, edges; beta=1.2, mean_length, natural_lengths=nothing, fixed=(), tolerance=1e-10,
+                     max_iterations=100_000)
 
 Optimize the points `x` on the unit sphere by the spring dynamics of Tomita
 et al. (2002, J. Comput. Phys. 183): every edge `(i, j)` is a spring of
@@ -69,24 +70,26 @@ natural length `β d̄` (`d̄ = mean_length`, by default the mean chord length o
 the initial `x`), the force on a point is
 `Σⱼ (|xⱼ - xᵢ| - β d̄) eᵢⱼ` projected onto the tangent plane, and the damped
 motion is integrated to the equilibrium (the largest tangential force below
-`tolerance d̄`). The `fixed` points (the icosahedron vertices) do not
-move. Returns the number of iterations.
+`tolerance d̄`). With a vector `natural_lengths` (one per edge) edge `k` has
+the natural length `β natural_lengths[k]` instead (locally refined meshes).
+The `fixed` points (the icosahedron vertices) do not move. Returns the number
+of iterations.
 """
 function spring_dynamics!(x::Vector{SVector{3, Float64}}, edges; beta::Real=1.2,
                           mean_length::Real=sum(((i, j),) -> norm(x[j] - x[i]), edges) / length(edges),
-                          fixed=(), tolerance::Real=1e-10, max_iterations::Integer=100_000)
+                          natural_lengths=nothing, fixed=(), tolerance::Real=1e-10, max_iterations::Integer=100_000)
     free = trues(length(x))
     free[collect(fixed)] .= false
-    d0 = beta * mean_length
+    d0 = beta .* (natural_lengths === nothing ? fill(mean_length, length(edges)) : natural_lengths)
     force = similar(x)
     velocity = zero.(x)
     # time step and damping in units of the spring stiffness: about six springs per point
     dt, damping = 0.3, 0.05
     for iteration in 1:max_iterations
         fill!(force, zero(eltype(x)))
-        for (i, j) in edges
+        for (k, (i, j)) in enumerate(edges)
             r = x[j] - x[i]
-            f = (norm(r) - d0) / norm(r) * r
+            f = (norm(r) - d0[k]) / norm(r) * r
             force[i] += f
             force[j] -= f
         end
@@ -99,7 +102,7 @@ function spring_dynamics!(x::Vector{SVector{3, Float64}}, edges; beta::Real=1.2,
             velocity[i] -= dot(velocity[i], x[i]) * x[i]
             x[i] = normalize(x[i] + dt * velocity[i])
         end
-        residual < tolerance * d0 && return iteration
+        residual < tolerance * beta * mean_length && return iteration
     end
     @warn "spring dynamics did not converge in $max_iterations iterations"
     return max_iterations
@@ -210,4 +213,49 @@ function is_delaunay(x, triangles, after, (a, b, c))
         o = first(setdiff(triangles[after[(q, p)]], (p, q)))
         dot(x[o], center) <= dot(x[a], center) + 1e-14
     end
+end
+
+"""
+    relax_triangles(dm; beta=1.0, size_smoothing=4, tolerance=1e-3)
+
+Triangle mesh `dm` on the unit sphere (for example the Delaunay dual of a
+locally refined MPAS grid) with its vertices moved by spring dynamics
+([`spring_dynamics!`](@ref)) towards equilateral triangles, keeping the
+connectivity and the local resolution: the natural length of an edge is `β`
+times the mean of the local mesh sizes at its ends, the mean edge length at
+every vertex smoothed `size_smoothing` times over the neighbours. A cleanup,
+not a global optimization: the relaxation stops when the largest force is
+below `tolerance` times the mean size, which removes the local defects (nearly
+right triangles) long before the smooth modes converge. Throws if the result
+is not a Delaunay triangulation.
+"""
+function relax_triangles(dm::Plex; beta::Real=1.0, size_smoothing::Integer=4, tolerance::Real=1e-3)
+    triangles = [Tuple(vertex_index.(Ref(dm), get_cell_vertices(dm, c))) for c in cell_range(dm)]
+    all(t -> length(t) == 3, triangles) || throw(ArgumentError("relax_triangles needs a triangle mesh"))
+    x = copy(dm.coordinates)
+    edges = unique!([minmax(t[k], t[mod1(k + 1, 3)]) for t in triangles for k in 1:3])
+    size, valence = zeros(length(x)), zeros(Int, length(x))
+    for (i, j) in edges
+        l = norm(x[j] - x[i])
+        size[i] += l; size[j] += l
+        valence[i] += 1; valence[j] += 1
+    end
+    size ./= valence
+    for _ in 1:size_smoothing
+        neighbours = zeros(length(x))
+        for (i, j) in edges
+            neighbours[i] += size[j]; neighbours[j] += size[i]
+        end
+        size .= (size .+ neighbours ./ valence) ./ 2
+    end
+    spring_dynamics!(x, edges; beta, natural_lengths=[(size[i] + size[j]) / 2 for (i, j) in edges],
+                     mean_length=sum(size) / length(size), tolerance=tolerance / beta)
+    after = Dict{Tuple{Int, Int}, Int}()
+    for (t, (a, b, c)) in enumerate(triangles)
+        after[(a, b)], after[(b, c)], after[(c, a)] = t, t, t
+    end
+    all(((a, b, c),) -> dot(cross(x[b] - x[a], x[c] - x[a]), x[a]) > 0, triangles) &&
+        all(t -> is_delaunay(x, triangles, after, t), triangles) ||
+        throw(ArgumentError("spring dynamics left the triangulation non-Delaunay; try a smaller beta"))
+    return plex_from_polygons([collect(t) for t in triangles], x)
 end

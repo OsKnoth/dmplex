@@ -10,7 +10,7 @@ using ..Topology
 export create_spherical_mesh, create_cubed_sphere_mesh, create_hexagon_mesh, create_healpix_mesh,
     create_periodic_plane
 export read_grid, read_icon_grid, read_mpas_grid
-export create_kite_mesh, cell_centers, orthogonality_defect, spring_dynamics!, lloyd!
+export create_kite_mesh, cell_centers, orthogonality_defect, spring_dynamics!, lloyd!, relax_triangles
 
 include("Icosahedral.jl")
 include("CubedSphere.jl")

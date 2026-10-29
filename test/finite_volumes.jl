@@ -145,6 +145,37 @@ end
     @test errors[1] < 1e-4
     @test errors[2] < errors[1] / 3
     @test errors[4] < errors[3] / 3.5   # second order on spring-optimized meshes
+
+    # the centered kinetic-energy gradient: as accurate on the regular mesh
+    m = ICONShallowWater(create_spherical_mesh(4; spring_beta=1.2); kinetic_gradient=:centered)
+    y = initial_state(m, velocity, height)
+    y0 = copy(y)
+    dt = 0.2 * minimum(m.grid.dual_lengths)
+    cache = RK4Cache(y)
+    for _ in 1:ceil(Int, 1 / dt)
+        rk4_step!(y, dt, tendency!, cache, m)
+    end
+    dh = (y - y0)[height_dofs(m)]
+    @test sqrt(sum(m.grid.cell_areas .* dh .^ 2) / 4π) < 2 * errors[3]
+
+    # divergence damping: a uniform ν₄ and the same ν₄ per edge agree
+    dm = create_spherical_mesh(3)
+    damped(ν) = (m = ICONShallowWater(dm; divergence_damping=ν); y = initial_state(m, velocity, x -> 1 + 0.1x[1]);
+                 tendency!(similar(y), y, m))
+    @test damped(1e-4) == damped(fill(1e-4, num_edges(dm))) != damped(0.0)
+end
+
+@testset "Signed TRiSK geometry on obtuse triangles" begin
+    rng = Random.MersenneTwister(1)
+    dm = create_spherical_mesh(3)
+    h = 0.25 * sqrt(4π / num_cells(dm))
+    x = [normalize(p + h * normalize(cross(p, randn(rng, SVector{3, Float64})))) for p in dm.coordinates]
+    g = TRiSKGrid(plex_from_polygons([collect(vertex_index.(Ref(dm), get_cell_vertices(dm, c))) for c in cell_range(dm)], x))
+    exact = [dmplex.Geometry.spherical_triangle_area((g.vertices[g.cell_vertices[k, i]] for k in 1:3)...)
+             for i in 1:num_cells(g)]
+    @test any(<(0), g.cell_distances)                 # circumcenters beyond an edge
+    @test maximum(abs.(g.cell_areas .- exact) ./ exact) < 1e-10
+    @test sum(g.vertex_areas) ≈ 4π
 end
 
 @testset "TRiSK distribution (MPI)" begin

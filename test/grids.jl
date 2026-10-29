@@ -130,6 +130,27 @@ end
     @test tangential_error((; centroidal=true)) < 0.1 * tangential_error((;))
 end
 
+@testset "Relaxed triangle meshes" begin
+    # a perturbed icosahedral mesh (with obtuse triangles), cleaned up by spring dynamics
+    rng = Random.MersenneTwister(1)
+    dm = create_spherical_mesh(3)
+    h = 0.25 * sqrt(4π / num_cells(dm))
+    x = [normalize(p + h * normalize(cross(p, randn(rng, SVector{3, Float64})))) for p in dm.coordinates]
+    perturbed = plex_from_polygons([collect(vertex_index.(Ref(dm), get_cell_vertices(dm, c))) for c in cell_range(dm)], x)
+    function max_angle(m)
+        maximum(cell_range(m)) do c
+            v = [get_coordinates(m, p) for p in get_cell_vertices(m, c)]
+            maximum(1:3) do k
+                p, q, r = v[k], v[mod1(k + 1, 3)], v[mod1(k + 2, 3)]
+                acosd(clamp(dot(normalize(q - dot(q, p)p), normalize(r - dot(r, p)p)), -1, 1))
+            end
+        end
+    end
+    relaxed = relax_triangles(perturbed)
+    @test max_angle(perturbed) > 90 > 80 > max_angle(relaxed)
+    @test total_area(relaxed) ≈ 4π
+end
+
 @testset "HEALPix" begin
     for nside in (1, 2, 4)
         dm = create_healpix_mesh(nside)

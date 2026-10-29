@@ -65,7 +65,23 @@ Working notes for continuing development (on another machine or in a new session
   which is consistent only if `Σ l_e d_{e,i} n_e n_eᵀ = A_i I`; next to the pentagons it is off by 2 % (SCVT) /
   1.1 % (spring) at every resolution, so `∇K` has an O(1/h) error there (the momentum residual of the balanced
   TC2 state doubles per level and sits next to a pentagon). Galewsky with TRiSK on SCVT hexagon 6: stable,
-  more regular vortices than on the plain hexagon 6. Next: a consistent energy-conserving K (e.g. the
+  more regular vortices than on the plain hexagon 6.
+  ICON model on locally refined MPAS grids: `read_grid(file; dual=true)` gives the Delaunay triangles of
+  x4.163842 (92–25 km, refined around 0°N 0°E; 327680 triangles). Unlike ICON grids (max angle 72°) its
+  triangles reach 94.7° (60 above 80°, 3 obtuse), the dual edges go down to 1.2 km (Voronoi edges of nearly
+  four-cell vertices), and one edge has `d_l/d = 0.003`. `TRiSKGrid` now has signed `d_{e,i}` and kites
+  (circumcenters beyond an edge; areas exact). TC2 with ICON's `coeff_gradekin` blows up before t = 0.25 on
+  the raw and on the cleaned mesh; with `kinetic_gradient = :centered` (`(K_r - K_l)/d`, `--centered-k`) it is
+  stable (raw dual: L2 1.2e-6, but the max error grows to 5.9e-5 at t = 1). `relax_triangles(dm; beta=1)`
+  (`--spring` with `--icon` and a grid file) cleans the mesh up by spring dynamics with the local resolution
+  (natural length from the smoothed mean edge length at the vertices, stopped at force 1e-3 of the mean size,
+  4 s): max angle 84° (9 above 80°), no obtuse triangles, min dual edge 4.7 km (4× the time step), the
+  refinement kept (edges 15–127 km). TC2 there with the centered gradient: L2 1.2e-6, max 1.3e-5, energy
+  -1.5e-8 at t = 1. Galewsky (6 days, dt 5.8 s, 89201 steps, 36 min on the laptop): with ICON's uniform
+  `ν₄ = 0.0025 Ā²/Δt` NaN before day 0.5 (explicitly unstable on the small cells); `divergence_damping` now
+  takes one `ν₄` per edge, the example uses the local area `A_e`: stable, energy ≤ 1.5e-6, enstrophy -1.6e-4,
+  the expected roll-up without imprint of the refinement, close to R02B06.
+  Next: a consistent energy-conserving K (e.g. the
   cell/vertex mixture of Skamarock 2012 or Gassmann 2013).
   Levante A100 on the ICON grids: TC2 L2 height error 2.5e-7 / 6.3e-8 / 1.6e-8 for R02B06/07/08 (second
   order), 1 and 4 GPUs identical; per RK4 step R02B06 (328k cells) 1.5 ms (1 GPU) / 1.8 ms (4), R02B07

@@ -11,11 +11,14 @@
 #
 # mesh: hexagon (Voronoi dual of the icosahedral mesh), triangle (the
 # icosahedral mesh, --icon), or an MPAS grid file (Voronoi cells) or an ICON grid
-# file (its hexagonal dual, or its triangles with --icon). Units: a = Ω = g = 1.
+# file (its hexagonal dual, or its triangles with --icon); with --icon an MPAS file gives its
+# Delaunay triangles (e.g. the locally refined x4.163842). Units: a = Ω = g = 1.
 # --gassmann uses the PV flux of Gassmann (2013, 2018) instead of TRiSK's (as in
 # ICON-IAP), --gassmann-mean the same reconstruction with the mean edge PV.
 # --spring[=β] optimizes the icosahedral mesh by spring dynamics (β = 1.2), --scvt
-# makes it centroidal (Lloyd's algorithm: the hexagons are an SCVT, as MPAS grids).
+# makes it centroidal (Lloyd's algorithm: the hexagons are an SCVT, as MPAS grids); with --icon and a
+# grid file --spring[=β] cleans up its triangles (`relax_triangles`, β = 1), --centered-k takes the
+# centered kinetic-energy gradient instead of ICON's `coeff_gradekin`.
 using KernelAbstractions
 using MPI
 using StaticArrays
@@ -27,6 +30,7 @@ const PV_FLUX = "--gassmann-mean" in ARGS ? :gassmann_mean : "--gassmann" in ARG
 const SPRING = filter(a -> startswith(a, "--spring"), ARGS)
 const SPRING_BETA = isempty(SPRING) ? nothing : SPRING[1] == "--spring" ? 1.2 : parse(Float64, split(SPRING[1], "=")[2])
 const CENTROIDAL = "--scvt" in ARGS
+const KINETIC_GRADIENT = "--centered-k" in ARGS ? :centered : :icon
 if USE_GPU
     using CUDA
 end
@@ -44,7 +48,11 @@ function load_mesh(mesh, resolution)
     end
     isfile(mesh) || error("unknown mesh $mesh")
     icon_file = NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)
-    return read_grid(mesh; dual=icon_file && !USE_ICON), nothing   # TRiSK on ICON grids: the hexagonal dual
+    # TRiSK on ICON grids: the hexagonal dual; the ICON model on MPAS grids: the Delaunay triangles
+    dm = read_grid(mesh; dual=icon_file ? !USE_ICON : USE_ICON)
+    # --spring on triangles from a file: clean up by spring dynamics with the local resolution (β = 1 by default)
+    USE_ICON && !isempty(SPRING) && (dm = relax_triangles(dm; beta=SPRING[1] == "--spring" ? 1.0 : SPRING_BETA))
+    return dm, nothing
 end
 
 "Backend of the model: the node-local GPU of this rank, or the CPU."
@@ -65,7 +73,7 @@ function main(args)
     nranks, root = MPI.Comm_size(comm), MPI.Comm_rank(comm) == 0
     dm, centers = load_mesh(mesh, resolution)
     options = (; centers, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
-    model = USE_ICON ? ICONShallowWater(dm; options...) : TRiSKShallowWater(dm; pv_flux=PV_FLUX, options...)
+    model = USE_ICON ? ICONShallowWater(dm; kinetic_gradient=KINETIC_GRADIENT, options...) : TRiSKShallowWater(dm; pv_flux=PV_FLUX, options...)
     root && println("$(num_cells(dm)) cells, $(num_edges(dm)) edges, $(num_vertices(dm)) vertices, $nranks ranks on ",
                     nameof(typeof(model.backend)))
 
@@ -77,7 +85,7 @@ function main(args)
     areas = model.grid.cell_areas
 
     cache = RK4Cache(y)
-    dt = 0.2 * sqrt(4π / num_cells(dm))
+    dt = min(0.2 * sqrt(4π / num_cells(dm)), 0.4 * minimum(model.grid.dual_lengths))   # locally refined meshes
     nsteps = ceil(Int, 1.0 / dt)
     mass0, energy0, enstrophy0 = total_mass(model, y), total_energy(model, y), potential_enstrophy(model, y)
     tendency!(similar(y), y, model)   # compile the kernels before timing

@@ -9,13 +9,16 @@
 #
 # mesh: hexagon (Voronoi dual of the icosahedral mesh), triangle (the
 # icosahedral mesh, --icon), or an MPAS grid file (Voronoi cells) or an ICON
-# grid file (its hexagonal dual, or its triangles with --icon). Nondimensional
+# grid file (its hexagonal dual, or its triangles with --icon); with --icon an MPAS file gives
+# its Delaunay triangles (e.g. the locally refined x4.163842). Nondimensional
 # units: a = Ω = 1, heights in units of 10 km. The ICON model runs with ICON's
-# fourth-order divergence damping (divdamp_fac = 0.0025). --gassmann uses the PV flux of
-# Gassmann (2013, 2018) instead of TRiSK's (as in ICON-IAP), --gassmann-mean
+# fourth-order divergence damping (divdamp_fac = 0.0025, with the local cell
+# area). --gassmann uses the PV flux of Gassmann (2013, 2018) instead of TRiSK's (as in ICON-IAP), --gassmann-mean
 # the same reconstruction with the mean edge PV; --spring[=β] optimizes the
 # icosahedral mesh by spring dynamics (β = 1.2), --scvt makes it centroidal
-# (an SCVT, as MPAS grids); --gpu runs on CUDA GPUs (one
+# (an SCVT, as MPAS grids); with --icon and a grid file --spring[=β] cleans up its
+# triangles (`relax_triangles`, β = 1), --centered-k takes the centered kinetic-energy
+# gradient instead of ICON's `coeff_gradekin`; --gpu runs on CUDA GPUs (one
 # per rank, environment examples/gpu). No dissipation: the energy- and
 # mass-conserving schemes run inviscid (--gassmann then develops grid-scale
 # vorticity after day 3). Writes the relative vorticity (1/s) at the cells to
@@ -34,6 +37,7 @@ const SCHEME = USE_ICON ? :icon : PV_FLUX
 const SPRING = filter(a -> startswith(a, "--spring"), ARGS)
 const SPRING_BETA = isempty(SPRING) ? nothing : SPRING[1] == "--spring" ? 1.2 : parse(Float64, split(SPRING[1], "=")[2])
 const CENTROIDAL = "--scvt" in ARGS
+const KINETIC_GRADIENT = "--centered-k" in ARGS ? :centered : :icon
 if USE_GPU
     using CUDA
 end
@@ -92,7 +96,11 @@ function load_mesh(mesh, resolution)
     end
     isfile(mesh) || error("unknown mesh $mesh")
     icon_file = NCDataset(ds -> haskey(ds, "vertex_of_cell"), mesh)
-    return read_grid(mesh; dual=icon_file && !USE_ICON), nothing   # TRiSK on ICON grids: the hexagonal dual
+    # TRiSK on ICON grids: the hexagonal dual; the ICON model on MPAS grids: the Delaunay triangles
+    dm = read_grid(mesh; dual=icon_file ? !USE_ICON : USE_ICON)
+    # --spring on triangles from a file: clean up by spring dynamics with the local resolution (β = 1 by default)
+    USE_ICON && !isempty(SPRING) && (dm = relax_triangles(dm; beta=SPRING[1] == "--spring" ? 1.0 : SPRING_BETA))
+    return dm, nothing
 end
 
 "Backend of the model: the node-local GPU of this rank, or the CPU."
@@ -128,7 +136,10 @@ function main(args)
     dt = days * DAY / nsteps
     options = (; gravity=G, comm=nranks > 1 ? comm : nothing, backend=select_backend(comm))
     model = if USE_ICON   # ICON's fourth-order divergence damping, divdamp_fac = 0.0025 per time step
-        ICONShallowWater(grid; divergence_damping=0.0025 * (4π / num_cells(dm))^2 / dt, options...)
+        local_area = [(grid.cell_areas[grid.edge_cells[1, e]] + grid.cell_areas[grid.edge_cells[2, e]]) / 2
+                      for e in 1:num_edges(grid)]   # with the local cell area: locally refined meshes
+        ICONShallowWater(grid; divergence_damping=0.0025 .* local_area .^ 2 ./ dt,
+                         kinetic_gradient=KINETIC_GRADIENT, options...)
     else
         TRiSKShallowWater(grid; pv_flux=PV_FLUX, options...)
     end
@@ -168,6 +179,8 @@ function main(args)
         name = isfile(mesh) ? splitext(basename(mesh))[1] :
                "$(mesh)_$(resolution)" * (SPRING_BETA === nothing ? "" : "_spring$(SPRING_BETA)") *
                (CENTROIDAL ? "_scvt" : "")
+        name *= (isfile(mesh) && !isempty(SPRING) ? "_spring" : "") *
+                (KINETIC_GRADIENT == :centered ? "_centeredk" : "")
         filename = write_vtkhdf("trisk_galewsky_$(name)_$SCHEME.vtkhdf", dm; vorticity)
         println("wrote $filename")
     end

@@ -1,6 +1,9 @@
 "Great-circle distance of two points on the unit sphere."
 arc_length(a, b) = atan(norm(cross(a, b)), dot(a, b))
 
+"Area of the spherical triangle `(a, b, c)`, negative if it is clockwise."
+signed_triangle_area(a, b, c) = 2atan(dot(a, cross(b, c)), 1 + dot(a, b) + dot(b, c) + dot(c, a))
+
 """
     TRiSKGrid(dm; centers=cell_centers(dm))
 
@@ -14,7 +17,9 @@ the edges, at the crossing of the primal edge and the dual edge.
 
 Per edge `e` (cells `left → right`, normal `n_e` pointing from left to right):
 primal length `l_e` (between its vertices), dual length `d_e` (between the
-generators), the distances `d_{e,i}` of the two generators to the edge point.
+generators), the distances `d_{e,i}` of the two generators to the edge point
+(negative for a generator beyond the edge, as the circumcenter of an obtuse
+triangle; the kites are signed too, so the areas stay exact).
 Kites `K_{i,v}` (cell `i` ∩ dual cell of vertex `v`) are pairs of spherical
 triangles (generator, edge point, vertex); cell areas `A_i` and dual areas
 `A_v` are their sums, so the kite fractions `R_{i,v} = K_{i,v}/A_i` add up to
@@ -95,7 +100,9 @@ function TRiSKGrid(dm::Plex; centers=nothing, tolerance::Real=1e-8)
         points[j] = m
         normals[j] = normalize(cross(x[b], x[a]))     # from left to right (Plex convention)
         l[j], d[j] = arc_length(x[a], x[b]), arc_length(g[cl], g[cr])
-        distances[:, j] .= (arc_length(g[cl], m), arc_length(g[cr], m))
+        # signed: negative if the center lies beyond the edge (circumcenter of an obtuse triangle)
+        distances[:, j] .= (-sign(dot(g[cl], normals[j])) * arc_length(g[cl], m),
+                            sign(dot(g[cr], normals[j])) * arc_length(g[cr], m))
     end
 
     # cells: edges counter-clockwise with outward signs, vertices with their kites
@@ -115,8 +122,8 @@ function TRiSKGrid(dm::Plex; centers=nothing, tolerance::Real=1e-8)
         cell_vertices[i] = corners
         cell_kites[i] = map(1:n) do k
             v = corners[k]
-            spherical_triangle_area(g[i], points[edges[mod1(k - 1, n)]], x[v]) +
-                spherical_triangle_area(g[i], points[edges[k]], x[v])
+            signed_triangle_area(g[i], points[edges[mod1(k - 1, n)]], x[v]) +
+                signed_triangle_area(g[i], x[v], points[edges[k]])
         end
         for (v, kite) in zip(corners, cell_kites[i])
             push!(vertex_cells[v], i)

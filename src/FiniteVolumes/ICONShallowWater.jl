@@ -1,6 +1,6 @@
 """
-    ICONShallowWater(dm; gravity=1, coriolis=x -> 2x[3], rbf_scale=0.5, divergence_damping=0, centers=nothing,
-                     comm=nothing, part=nothing, backend=CPU())
+    ICONShallowWater(dm; gravity=1, coriolis=x -> 2x[3], rbf_scale=0.5, divergence_damping=0,
+                     kinetic_gradient=:icon, centers=nothing, comm=nothing, part=nothing, backend=CPU())
     ICONShallowWater(grid::TRiSKGrid; kwargs...)
 
 Nonlinear rotating shallow-water equations in vector-invariant form on the
@@ -19,6 +19,12 @@ with the kinetic-energy gradient of ICON (`coeff_gradekin`:
 `a_1 = d_{e,r}/(d_{e,l} d_e)`, `a_2 = d_{e,l}/(d_{e,r} d_e)`) and the linear
 interpolation of the height to the edge midpoint (`c_lin_e`; ICON's
 nonhydrostatic core uses an upwind reconstruction of the density there).
+`kinetic_gradient = :centered` takes `(K_r - K_l)/d_e` instead (`a_1 = a_2 =
+1/d_e`): ICON's form contains the edge's own `K_e` with the weight
+`a_1 - a_2 ∝ d_{e,r}/d_{e,l} - d_{e,l}/d_{e,r}`, a one-sided difference over
+`d_{e,l}` that blows up on irregular triangles (plain bisection meshes,
+nearly right triangles of the Delaunay dual of MPAS grids), while it vanishes
+on the symmetric ICON grids.
 Mass is conserved, energy is not exactly (the RBF tangential velocity is not
 part of an antisymmetric Coriolis operator).
 
@@ -27,7 +33,10 @@ part of an antisymmetric Coriolis operator).
 discrete divergence of the normal velocities at the cells and the gradient
 across the edges. ICON adds `-divdamp_fac Ā² ∇∇⋅∇∇⋅u` once per dynamics time
 step (`divdamp_fac = 0.0025`), which corresponds to `ν₄ = divdamp_fac Ā² / Δt`
-with the mean cell area `Ā`. Without it, or another dissipation, the
+with the mean cell area `Ā`. On locally refined meshes `divergence_damping`
+can be a vector with one `ν₄` per edge (global edge order), e.g.
+`divdamp_fac A_e² / Δt` with the local area `A_e`: a uniform `ν₄` from the mean
+area is explicitly unstable on the small cells. Without it, or another dissipation, the
 triangular C grid is unstable in flows with grid-scale structure (its
 divergence and checkerboard modes are not controlled): the Galewsky jet blows
 up within two days.
@@ -61,7 +70,7 @@ struct ICONShallowWater{I, M, V, D, BE} <: CGridShallowWater
     work::NamedTuple{(:v, :Ke, :K, :F, :ζv, :hv, :qv, :D, :G), NTuple{9, V}}
     distribution::D
     gravity::Float64
-    divergence_damping::Float64
+    divergence_damping::V      # ν₄ at the local edges, empty without damping
     backend::BE
 end
 
@@ -85,7 +94,7 @@ function bilinear_weights(g::TRiSKGrid)
 end
 
 function ICONShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[3], rbf_scale::Real=0.5,
-                          divergence_damping::Real=0.0, comm=nothing, part=nothing,
+                          divergence_damping::Union{Real, AbstractVector}=0.0, kinetic_gradient::Symbol=:icon, comm=nothing, part=nothing,
                           backend=KernelAbstractions.CPU())
     nc, ne, nv = num_cells(grid), num_edges(grid), num_vertices(grid)
     l, d, dc = grid.primal_lengths, grid.dual_lengths, grid.cell_distances
@@ -94,7 +103,9 @@ function ICONShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[3
         divergence[k, i] = grid.cell_signs[k, i] * l[grid.cell_edges[k, i]] / grid.cell_areas[i]
     end
     edge_height = [dc[2, :]'; dc[1, :]'] ./ d'
-    gradient = [(dc[2, :] ./ (dc[1, :] .* d))'; (dc[1, :] ./ (dc[2, :] .* d))']
+    kinetic_gradient in (:icon, :centered) || throw(ArgumentError("unknown kinetic_gradient $kinetic_gradient"))
+    gradient = kinetic_gradient == :icon ? [(dc[2, :] ./ (dc[1, :] .* d))'; (dc[1, :] ./ (dc[2, :] .* d))'] :
+               [1 ./ d'; 1 ./ d']
     curl = similar(grid.vertex_signs)
     for v in 1:nv, k in axes(curl, 1)
         curl[k, v] = grid.vertex_signs[k, v] * d[grid.vertex_edges[k, v]] / grid.vertex_areas[v]
@@ -125,7 +136,10 @@ function ICONShallowWater(grid::TRiSKGrid; gravity::Real=1.0, coriolis=x -> 2x[3
                             dev(rbf), dev(map(coriolis, grid.edge_points[edges])), dev(vertex_edges), dev(curl),
                             dev(vertex_cells), dev(vertex_height), dev(map(coriolis, grid.vertices[vertices])),
                             dev(grid.cell_areas[cells]), dev(grid.vertex_areas[vertices]), work,
-                            to_backend(backend, dist), Float64(gravity), Float64(divergence_damping), backend)
+                            to_backend(backend, dist), Float64(gravity),
+                            dev(divergence_damping isa Real ? (divergence_damping == 0 ? Float64[] :
+                                                               fill(Float64(divergence_damping), nle)) :
+                                Float64.(divergence_damping[edges])), backend)
 end
 
 ICONShallowWater(dm::Plex; centers=nothing, kwargs...) = ICONShallowWater(TRiSKGrid(dm; centers); kwargs...)
@@ -184,7 +198,7 @@ function tendency!(dy::AbstractVector, y::AbstractVector, m::ICONShallowWater)
     run!(m, icon_momentum_kernel!, d.edges.n_owned, du, w.v, w.Ke, w.K, h, w.ζv, m.edge_cells, m.edge_vertices,
          m.gradient, m.inverse_dual, m.edge_coriolis, m.gravity)
     run!(m, continuity_kernel!, d.cells.n_owned, dh, w.F, m.cell_edges, m.divergence)
-    m.divergence_damping > 0 && divergence_damping!(du, m, u)
+    isempty(m.divergence_damping) || divergence_damping!(du, m, u)
     if is_distributed(d)
         fill!(view(du, (d.edges.n_owned + 1):length(du)), 0.0)
         fill!(view(dh, (d.cells.n_owned + 1):length(dh)), 0.0)
@@ -198,8 +212,8 @@ function divergence_damping!(du, m::ICONShallowWater, u)
     run!(m, continuity_kernel!, length(w.D), w.D, u, m.cell_edges, m.divergence)                   # -∇⋅u
     run!(m, edge_gradient_kernel!, length(w.G), w.G, w.D, m.edge_cells, m.inverse_dual, 1.0)        # -∇∇⋅u
     run!(m, continuity_kernel!, length(w.D), w.D, w.G, m.cell_edges, m.divergence)                 # ∇⋅∇∇⋅u
-    run!(m, edge_gradient_kernel!, n, w.G, w.D, m.edge_cells, m.inverse_dual, -m.divergence_damping)
-    view(du, 1:n) .+= view(w.G, 1:n)
+    run!(m, edge_gradient_kernel!, n, w.G, w.D, m.edge_cells, m.inverse_dual, -1.0)
+    view(du, 1:n) .+= view(m.divergence_damping, 1:n) .* view(w.G, 1:n)
     return du
 end
 

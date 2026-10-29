@@ -62,6 +62,7 @@ dm = create_spherical_mesh(6; spring_beta=1.2)            # icosahedral, spring 
 dm = create_hexagon_mesh(6; centroidal=true)              # its Voronoi dual as an SCVT (Lloyd), as MPAS
 dm = read_grid("grid/icon_grid_0010_R02B04_G.nc")          # ICON triangles
 dm = read_grid("grid/x1.40962.grid.nc"; dual=true)         # MPAS Delaunay triangles
+dm = relax_triangles(read_grid("x4.163842.grid.nc"; dual=true))   # locally refined, cleaned up by springs
 ```
 
 ICON and MPAS files are read with NCDatasets; cells and vertices keep the
@@ -147,6 +148,7 @@ julia --project examples/nonlinear_shallow_water.jl 1 healpix 8   # Williamson T
 julia --project examples/trisk_shallow_water.jl hexagon 6         # TC2 with the TRiSK finite-volume scheme
 mpiexec -n 4 julia --project examples/trisk_galewsky.jl hexagon 7 6 --gassmann-mean   # Galewsky, finite volumes
 mpiexec -n 4 julia --project examples/trisk_galewsky.jl icon_grid_0021_R02B06_G.nc 0 6 --icon   # ICON triangles
+julia --project examples/trisk_galewsky.jl x4.163842.grid.nc 0 6 --icon --spring --centered-k   # refined MPAS dual
 mpiexec -n 4 julia --project examples/nonlinear_shallow_water.jl 1 cubed 16   # the same over MPI
 mpiexec -n 4 julia --project=examples/gpu examples/nonlinear_shallow_water.jl 1 cubed 64 --gpu   # GPUs, cuDSS
 julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days
