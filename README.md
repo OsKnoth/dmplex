@@ -38,6 +38,11 @@ rk4_step!(y, dt, tendency!, RK4Cache(y), model)
 
 The figures are generated with `julia --project docs/make_figures.jl`.
 
+The theory of all methods (meshes and their optimization, compatible finite elements, TRiSK,
+Gassmann's PV flux, the consistent kinetic energy, the ICON triangle model) is collected in
+[docs/notes/dmplex_methods.pdf](docs/notes/dmplex_methods.pdf); the kite elements have their own note,
+[docs/notes/kite_shallow_water.pdf](docs/notes/kite_shallow_water.pdf).
+
 ## Layout
 
 | Directory | Module | Contents |

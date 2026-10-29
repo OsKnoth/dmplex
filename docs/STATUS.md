@@ -98,7 +98,7 @@ Working notes for continuing development (on another machine or in a new session
   1.75e-4/7.2e-5/3.8e-5 (first order), L2 cell 1.4e-4/3.9e-5/1.2e-5, vertex 9.0e-5/2.2e-5/5.7e-6 (SCVT alike:
   max 3.5e-4 → 4.3e-5 on hexagon 6). Galewsky (6 days, hexagon 6 plain/spring with all three, SCVT and spring
   hexagon 7 with the vertex K): stable, energy ≤ 5e-10, |ζ| and roll-up unchanged; 25–35 % more time per step.
-  (ICON's triangle K `e_inn_c` is consistent for the same reason: circumcenters.)
+  (A cell K of this form on ICON triangles would be consistent for the same reason: circumcenters.)
   Levante A100 on the ICON grids: TC2 L2 height error 2.5e-7 / 6.3e-8 / 1.6e-8 for R02B06/07/08 (second
   order), 1 and 4 GPUs identical; per RK4 step R02B06 (328k cells) 1.5 ms (1 GPU) / 1.8 ms (4), R02B07
   (1.3M) 2.4 / 1.7 ms, R02B08 (5.2M) 7.8 ms on 1 GPU. Galewsky R02B07 (≈ 20 km), 6 days with divergence
@@ -121,7 +121,8 @@ Working notes for continuing development (on another machine or in a new session
   one block per rank, device arrays by pointer; checked in ParaView 6.1 (serial and 2 ranks, CPU).
 - cuDSS (extension `dmplexCUDSSExt`): `cudss_solver` (one GPU) and `distributed_cudss_solver` (MGMN,
   rows in the contiguous numbering of `DofDistribution(V, cells)`) for the classical element pairs.
-- Documentation: `README.md`, `docs/notes/kite_shallow_water.tex` (+ PDF), wiki pages (see below).
+- Documentation: `README.md`, `docs/notes/kite_shallow_water.tex` (+ PDF), `docs/notes/dmplex_methods.tex`
+  (+ PDF: theory of all methods), wiki pages (see below).
 
 ## Open items
 
@@ -153,5 +154,5 @@ Working notes for continuing development (on another machine or in a new session
 - MPI.jl uses `MPICH_jll`; start parallel runs with `mpiexec` from `MPI.mpiexec()` or the system `mpiexec`
   if it is MPICH-compatible.
 - Grid files are expected in `grid/` (not in git): ICON `icon_grid_*.nc`, MPAS `x1.*.grid.nc`, `QU240.nc`.
-- Notes: `cd docs/notes && latexmk -pdf kite_shallow_water.tex`.
+- Notes: `cd docs/notes && latexmk -pdf kite_shallow_water.tex dmplex_methods.tex`.
 - The personal website is the separate repository `OsKnoth/OsKnoth.github.io`.
