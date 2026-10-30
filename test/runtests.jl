@@ -15,6 +15,7 @@ const MESHES = [
 include("topology.jl")
 include("grids.jl")
 include("finite_volumes.jl")
+include("extruded.jl")
 include("section.jl")
 include("fem.jl")
 include("shallow_water.jl")

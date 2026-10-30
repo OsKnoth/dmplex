@@ -20,8 +20,10 @@ export Plex, plex_from_polygons,
 export FieldLayout, Section, num_nodes, num_fields, field_names, field_index, get_dof, get_offset,
     get_field_dof, get_field_offset, storage_size, dof_range, field_range,
     closure_dofs, create_vector
+export ExtrudedPlex, num_layers, num_levels, extruded_point, base_point, get_cone_signs
 
 include("Plex.jl")
 include("Section.jl")
+include("Extruded.jl")
 
 end # module

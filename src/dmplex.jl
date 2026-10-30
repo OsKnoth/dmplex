@@ -10,6 +10,7 @@ include("Parallel/Parallel.jl")
 include("TimeSteppers/TimeSteppers.jl")
 include("ShallowWater/ShallowWater.jl")
 include("FiniteVolumes/FiniteVolumes.jl")
+include("Nonhydrostatic/Nonhydrostatic.jl")
 include("Outputs/Outputs.jl")
 
 @reexport using .Topology
@@ -20,6 +21,7 @@ include("Outputs/Outputs.jl")
 @reexport using .TimeSteppers
 @reexport using .ShallowWater
 @reexport using .FiniteVolumes
+@reexport using .Nonhydrostatic
 @reexport using .Outputs
 
 end # module dmplex
