@@ -32,6 +32,16 @@ linearized equation of state, one tridiagonal system for `w` per column (as
 in ICON, Zängl et al. 2015). `r(z)` is a Rayleigh damping of `w` above
 `damping_height` (rate `damping_rate sin²`).
 
+`vertical_advection = :vector_invariant` (default) writes the momentum
+advection in the 3D vector-invariant form as in CGSEM (CGDycore.jl):
+`(ω × u)` with the horizontal vorticity `η = ∂vn/∂z - ∂w/∂n` at the edges
+of the interfaces, `-η w̄` in the `vn` equation, `+η v̄n` in the `w` equation,
+and the gradient of the full kinetic energy `K = K_h + w²/2`. The averages
+are adjoint to each other (`v̄n` the mean of the two layers, `w̄` of the two
+cells, the cell weights `l_e d_e / 4A_i` of the edge areas `l_e d_e / 2`), so
+the exchange between horizontal and vertical kinetic energy cancels exactly.
+`:advective` uses `-w ∂vn/∂z` and `-u ⋅ ∇w - w ∂w/∂z` instead.
+
 `hyperdiffusion` is the coefficient `ν₄` (m⁴/s) of `-ν₄ L(L(vn))` with the
 C-grid vector Laplacian `L(vn)_e = (δ_r - δ_l)/d_e - (ζ_{v2} - ζ_{v1})/l_e`
 (`∇δ + k × ∇ζ`), evaluated once per step in the old state.
@@ -51,6 +61,7 @@ struct TRiSKNonhydrostatic{M, V, I, VK, BE}
     cell_edges::I
     divergence::M        # n_{e,i} l_e / (a A_i)
     kinetic::M           # α l_e d_{e,i} / (2 A_i)
+    edge_area_weight::M  # l_e d_e / (4 A_i): cell average of edge quantities, adjoint to the edge mean
     vertex_kinetic::VK   # nothing, or the vertex kinetic energy tables of TRiSKShallowWater
     edge_cells::I
     edge_vertices::I
@@ -73,6 +84,7 @@ struct TRiSKNonhydrostatic{M, V, I, VK, BE}
     radius::Float64
     beta::Float64
     hyperdiffusion::Float64
+    vector_invariant::Bool
     backend::BE
 end
 
@@ -85,7 +97,10 @@ const GRAV = 9.80616
 function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6.37122e6,
                              omega::Real=7.292e-5, beta::Real=0.65, damping_height::Real=Inf,
                              damping_rate::Real=0.0, kinetic_energy::Union{Symbol, Real}=:cell,
-                             hyperdiffusion::Real=0.0, backend=KernelAbstractions.CPU())
+                             hyperdiffusion::Real=0.0, vertical_advection::Symbol=:vector_invariant,
+                             backend=KernelAbstractions.CPU())
+    vertical_advection in (:vector_invariant, :advective) ||
+        throw(ArgumentError("vertical_advection must be :vector_invariant or :advective"))
     a = Float64(radius)
     sw = TRiSKShallowWater(grid; coriolis=x -> 2omega * x[3], kinetic_energy, backend)
     nc, ne, nv, nlev = num_cells(grid), num_edges(grid), num_vertices(grid), num_layers(vgrid)
@@ -96,18 +111,26 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
     dev(x) = to_backend(backend, x)
     zeros2(n, m) = KernelAbstractions.zeros(backend, Float64, n, m)
     work = (θ=zeros2(nc, nlev), π=zeros2(nc, nlev), K=zeros2(nc, nlev), qv=zeros2(nv, nlev), Kv=zeros2(nv, nlev),
+            η=zeros2(ne, nlev + 1),
             F=zeros2(ne, nlev), Fθ=zeros2(ne, nlev), tvn=zeros2(ne, nlev), tw=zeros2(nc, nlev + 1),
             ρexpl=zeros2(nc, nlev), ρθexpl=zeros2(nc, nlev), cprime=zeros2(nc, nlev + 1),
             dprime=zeros2(nc, nlev + 1), δ=zeros2(nc, nlev), ζ=zeros2(nv, nlev), Lvn=zeros2(ne, nlev),
             hd=zeros2(ne, nlev))
     edge_weight = dev(grid.cell_distances ./ grid.dual_lengths')
+    edge_area_weight = zeros(size(grid.cell_edges))
+    for i in 1:nc, j in axes(grid.cell_edges, 1)
+        e = grid.cell_edges[j, i]
+        grid.cell_signs[j, i] != 0 &&
+            (edge_area_weight[j, i] = grid.primal_lengths[e] * grid.dual_lengths[e] / (4 * grid.cell_areas[i]))
+    end
     return TRiSKNonhydrostatic(grid, vgrid, sw.cell_edges, dev(Array(sw.divergence) ./ a), sw.kinetic,
+                               dev(edge_area_weight),
                                sw.vertex_kinetic, sw.edge_cells, sw.edge_vertices, edge_weight, dev(Array(sw.inverse_dual) ./ a),
                                dev(1 ./ (a .* grid.primal_lengths)), sw.vertex_edges,
                                dev(Array(sw.curl) ./ a), sw.vertex_cells, sw.vertex_height, sw.coriolis,
                                sw.trisk_edges, sw.trisk, dev(a^2 .* grid.cell_areas), dev(vgrid.dz), dev(vgrid.dzh),
                                dev(vgrid.wlow), dev(rayleigh), work, a, Float64(beta), Float64(hyperdiffusion),
-                               backend)
+                               vertical_advection == :vector_invariant, backend)
 end
 
 "State `(vn, w, ρ, ρθ)` of the model, zero."
@@ -157,6 +180,40 @@ end
     @inbounds K[i, k] += s
 end
 
+"Add the vertical kinetic energy `(w_k² + w_{k+1}²)/4` of the layer to `K`."
+@kernel function w_kinetic_kernel!(K, @Const(w))
+    i, k = @index(Global, NTuple)
+    @inbounds K[i, k] += (w[i, k]^2 + w[i, k + 1]^2) / 4
+end
+
+"Horizontal vorticity `η = ∂vn/∂z - ∂w/∂n` at the edges of the interior interfaces (zero at ground and top)."
+@kernel function eta_kernel!(η, @Const(vn), @Const(w), @Const(edge_cells), @Const(inverse_dual), @Const(dzh))
+    e, j = @index(Global, NTuple)
+    nlev = size(vn, 2)
+    @inbounds if 2 <= j <= nlev
+        η[e, j] = (vn[e, j] - vn[e, j - 1]) / dzh[j] - (w[edge_cells[2, e], j] - w[edge_cells[1, e], j]) * inverse_dual[e]
+    else
+        η[e, j] = 0.0
+    end
+end
+
+"Explicit tendency of `w` in vector-invariant form: `η v̄n - ∂K/∂z` at the interior interfaces."
+@kernel function w_tendency_vi_kernel!(tw, @Const(η), @Const(vn), @Const(K), @Const(cell_edges),
+                                       @Const(edge_area_weight), @Const(dzh))
+    i, j = @index(Global, NTuple)
+    nlev = size(vn, 2)
+    @inbounds if 2 <= j <= nlev
+        s = 0.0
+        for n in axes(cell_edges, 1)
+            e = cell_edges[n, i]
+            s += edge_area_weight[n, i] * η[e, j] * (vn[e, j - 1] + vn[e, j]) / 2
+        end
+        tw[i, j] = s - (K[i, j] - K[i, j - 1]) / dzh[j]
+    else
+        tw[i, j] = 0.0
+    end
+end
+
 "Potential vorticity `(ζ + f)/ρ` at the vertices of every layer."
 @kernel function vertex_pv_kernel!(qv, @Const(vn), @Const(ρ), @Const(vertex_edges), @Const(curl),
                                    @Const(vertex_cells), @Const(vertex_weight), @Const(coriolis))
@@ -173,8 +230,9 @@ end
 
 "Explicit tendency of `vn` (PV flux, kinetic energy and pressure gradient, vertical advection)."
 @kernel function vn_tendency_kernel!(tvn, @Const(vn), @Const(w), @Const(ρ), @Const(θ), @Const(πe), @Const(K),
-                                     @Const(qv), @Const(edge_cells), @Const(edge_vertices), @Const(edge_weight),
-                                     @Const(inverse_dual), @Const(trisk_edges), @Const(trisk), @Const(dz), nlev)
+                                     @Const(qv), @Const(η), @Const(edge_cells), @Const(edge_vertices),
+                                     @Const(edge_weight), @Const(inverse_dual), @Const(trisk_edges), @Const(trisk),
+                                     @Const(dz), @Const(dzh), nlev, vector_invariant)
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
@@ -188,11 +246,17 @@ end
         end
         θe = edge_weight[1, e] * θ[l, k] + edge_weight[2, e] * θ[r, k]
         t = s / 2 - inverse_dual[e] * (K[r, k] - K[l, k] + Cpd * θe * (πe[r, k] - πe[l, k]))
-        # vertical advection -w ∂vn/∂z with vn at the interfaces by the mean (one-sided at the boundaries)
-        we = (w[l, k] + w[r, k] + w[l, k + 1] + w[r, k + 1]) / 4
-        vlow = k > 1 ? (vn[e, k - 1] + vn[e, k]) / 2 : vn[e, k]
-        vup = k < nlev ? (vn[e, k] + vn[e, k + 1]) / 2 : vn[e, k]
-        tvn[e, k] = t - we * (vup - vlow) / dz[k]
+        if vector_invariant
+            # -η w̄ at the two interfaces of the layer, adjoint to the layer mean of vn in the w equation
+            Wl, Wu = (w[l, k] + w[r, k]) / 2, (w[l, k + 1] + w[r, k + 1]) / 2
+            tvn[e, k] = t - (dzh[k] * η[e, k] * Wl + dzh[k + 1] * η[e, k + 1] * Wu) / (2 * dz[k])
+        else
+            # vertical advection -w ∂vn/∂z with vn at the interfaces by the mean (one-sided at the boundaries)
+            we = (w[l, k] + w[r, k] + w[l, k + 1] + w[r, k + 1]) / 4
+            vlow = k > 1 ? (vn[e, k - 1] + vn[e, k]) / 2 : vn[e, k]
+            vup = k < nlev ? (vn[e, k] + vn[e, k + 1]) / 2 : vn[e, k]
+            tvn[e, k] = t - we * (vup - vlow) / dz[k]
+        end
     end
 end
 
@@ -349,10 +413,18 @@ function stage!(m::TRiSKNonhydrostatic, y, y0, ys, τ)
     end
     launch!(m, vertex_pv_kernel!, (nv, nlev), w.qv, ys.vn, ys.ρ, m.vertex_edges, m.curl, m.vertex_cells,
             m.vertex_weight, m.coriolis)
-    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, ys.w, ys.ρ, w.θ, w.π, w.K, w.qv, m.edge_cells,
-            m.edge_vertices, m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk, m.dz, nlev)
-    launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
-            m.inverse_dual, m.dz)
+    if m.vector_invariant
+        launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w)
+        launch!(m, eta_kernel!, (ne, nlev + 1), w.η, ys.vn, ys.w, m.edge_cells, m.inverse_dual, m.dzh)
+        launch!(m, w_tendency_vi_kernel!, (nc, nlev + 1), w.tw, w.η, ys.vn, w.K, m.cell_edges, m.edge_area_weight,
+                m.dzh)
+    else
+        launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
+                m.inverse_dual, m.dz)
+    end
+    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, ys.w, ys.ρ, w.θ, w.π, w.K, w.qv, w.η, m.edge_cells,
+            m.edge_vertices, m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk, m.dz, m.dzh, nlev,
+            m.vector_invariant)
     launch!(m, vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn, w.hd, τ)
     launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight)
     launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, m.cell_edges,
