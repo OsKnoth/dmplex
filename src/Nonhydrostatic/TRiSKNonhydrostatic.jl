@@ -32,7 +32,7 @@ linearized equation of state, one tridiagonal system for `w` per column (as
 in ICON, Zängl et al. 2015). `r(z)` is a Rayleigh damping of `w` above
 `damping_height` (rate `damping_rate sin²`).
 
-`vertical_advection = :vector_invariant` (default) writes the momentum
+`vertical_advection = :vector_invariant` writes the momentum
 advection in the 3D vector-invariant form as in CGSEM (CGDycore.jl):
 `(ω × u)` with the horizontal vorticity `η = ∂vn/∂z - ∂w/∂n` at the edges
 of the interfaces, `-η w̄` in the `vn` equation, `+η v̄n` in the `w` equation,
@@ -40,7 +40,9 @@ and the gradient of the full kinetic energy `K = K_h + w²/2`. The averages
 are adjoint to each other (`v̄n` the mean of the two layers, `w̄` of the two
 cells, the cell weights `l_e d_e / 4A_i` of the edge areas `l_e d_e / 2`), so
 the exchange between horizontal and vertical kinetic energy cancels exactly.
-`:advective` uses `-w ∂vn/∂z` and `-u ⋅ ∇w - w ∂w/∂z` instead.
+`:advective` (default) uses `-w ∂vn/∂z` and `-u ⋅ ∇w - w ∂w/∂z` instead;
+it is more robust without diffusion (hexagon 6: unstable from day 5.5
+instead of day 3.5).
 
 `hyperdiffusion` is the coefficient `ν₄` (m⁴/s) of `-ν₄ L(L(vn))` with the
 C-grid vector Laplacian `L(vn)_e = (δ_r - δ_l)/d_e - (ζ_{v2} - ζ_{v1})/l_e`
@@ -97,7 +99,7 @@ const GRAV = 9.80616
 function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6.37122e6,
                              omega::Real=7.292e-5, beta::Real=0.65, damping_height::Real=Inf,
                              damping_rate::Real=0.0, kinetic_energy::Union{Symbol, Real}=:cell,
-                             hyperdiffusion::Real=0.0, vertical_advection::Symbol=:vector_invariant,
+                             hyperdiffusion::Real=0.0, vertical_advection::Symbol=:advective,
                              backend=KernelAbstractions.CPU())
     vertical_advection in (:vector_invariant, :advective) ||
         throw(ArgumentError("vertical_advection must be :vector_invariant or :advective"))

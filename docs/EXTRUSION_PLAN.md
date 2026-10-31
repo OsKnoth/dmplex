@@ -152,6 +152,13 @@ Equations (shallow, no orography; `Δz_k` layer thickness, `Δz_{k+1/2}` between
   920.3 hPa on day 6–10, smooth fields (60 min for 10 days on 8 threads). The version-1 scheme is not
   energy consistent (advective vertical advection of `vn`, centred `θ`); the energy-consistent
   form of ICON-IAP is the next step.
+- Vertical advection in the 3D vector-invariant form as in CGSEM (`vertical_advection =
+  :vector_invariant`, `η = ∂vn/∂z - ∂w/∂n`, adjoint averages, the `vn`–`w` exchange cancels to
+  8e-16). Hexagon 6 without dissipation: unstable from day 3.5 (p_s min 989.8 hPa on day 3), with
+  the mixed kinetic energy from day 4.5; with `hyperdiffusion = 1e15` stable, p_s min 994.2 /
+  987.3 / 979.4 / 962.6 / 942.1 / 910.8 hPa on day 5–10 (advective: 996.7 / 992.7 / 982.6 /
+  963.2 / 938.5 / 920.3). The default stays `:advective`, until the kinetic energy and the
+  averages follow ICON-IAP (Gassmann's treatment of the Hollingsworth instability).
 
 ## 5. Steps
 
