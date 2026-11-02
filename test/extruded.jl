@@ -47,3 +47,111 @@ end
     @test maximum(abs, y.w) < 0.05
     @test mass(y) ≈ M0 rtol = 1e-13
 end
+
+@testset "ICON-IAP momentum advection" begin
+    NH = dmplex.Nonhydrostatic
+    rng = Random.MersenneTwister(1)
+    g = TRiSKGrid(create_hexagon_mesh(2))
+    v = VerticalGrid(6, 10000.0; stretch=3)
+    ne, nc, nv, nl = num_edges(g), num_cells(g), num_vertices(g), 6
+    # the PV usage of i_cori_method = 4 is symmetric in (e, e')
+    P = trisk_pv_edges(g)
+    @test all(1:ne) do e
+        all(k -> g.trisk_weights[k, e] == 0 ||
+                     P[k, e] in P[findall(==(e), g.trisk_edges[:, g.trisk_edges[k, e]]), g.trisk_edges[k, e]],
+            axes(P, 1))
+    end
+    Ae = g.primal_lengths .* g.dual_lengths     # weight of vn²/2 in the energy
+    vn, w = randn(rng, ne, nl), randn(rng, nc, nl + 1)
+    w[:, 1] .= 0
+    w[:, end] .= 0
+    ρ = 1 .+ 0.3 .* rand(rng, nc, nl)
+    ρe = (g.cell_distances[1, :] .* ρ[g.edge_cells[1, :], :] .+ g.cell_distances[2, :] .* ρ[g.edge_cells[2, :], :]) ./
+         g.dual_lengths
+    ρh = zeros(nc, nl + 1)
+    for j in 2:nl
+        ρh[:, j] .= v.wlow[j] .* ρ[:, j - 1] .+ (1 - v.wlow[j]) .* ρ[:, j]
+    end
+    for (pv_flux, vertical_advection) in ((:iap, :iap), (:trisk, :vector_invariant))
+        m = TRiSKNonhydrostatic(g, v; radius=1.0, pv_flux, vertical_advection, trisk_weights=:exact)
+        W, mw = m.work, vertical_advection == :iap
+        fill!(W.K, 0)
+        fill!(W.π, 0)
+        fill!(W.θ, 1)
+        NH.launch!(m, NH.vertex_pv_kernel!, (nv, nl), W.qv, W.ζv, W.ρv, vn, ρ, m.vertex_edges, m.curl,
+                   m.vertex_cells, m.vertex_weight, m.coriolis)
+        NH.launch!(m, NH.edge_pv_kernel!, (ne, nl), W.qe, W.qv, W.ζv, W.ρv, m.edge_vertices, m.rhombus,
+                   m.edge_coriolis, m.iap_pv)
+        tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, (ne, nl), W.tvn, vn, w, ρ, W.θ, W.π, W.K, qe, η,
+                                         m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk,
+                                         m.pv_edges, m.dz, m.dzh, m.wlow, nl, m.vertical); copy(W.tvn))
+        # the PV flux does no work
+        F = ρe .* vn
+        t = tendency(W.qe, zero(w), zero(W.η))
+        @test abs(sum(Ae .* (F .* t) * v.dz)) < 1e-12 * sum(Ae .* abs.(F .* t) * v.dz)
+        # the vorticity term exchanges horizontal and vertical kinetic energy without loss
+        NH.launch!(m, NH.eta_kernel!, (ne, nl + 1), W.η, vn, w, m.edge_cells, m.inverse_dual, m.dzh)
+        NH.launch!(m, NH.w_tendency_vi_kernel!, (nc, nl + 1), W.tw, W.η, vn, ρ, W.K, m.cell_edges, m.inner,
+                   m.edge_cells, m.edge_weight, m.dzh, m.wlow, mw)
+        t = tendency(zero(W.qe), w, W.η)
+        a = sum(Ae .* ((mw ? ρe : 1) .* vn .* t) * v.dz)
+        b = sum(g.cell_areas .* ((mw ? ρh : 1) .* w .* W.tw) * v.dzh)
+        @test abs(a + b) < 1e-12 * abs(a)
+    end
+end
+
+@testset "Smagorinsky diffusion" begin
+    NH = dmplex.Nonhydrostatic
+    rng = Random.MersenneTwister(2)
+    g = TRiSKGrid(create_hexagon_mesh(3))
+    v = VerticalGrid(4, 10000.0)
+    a = 6.37122e6
+    m = TRiSKNonhydrostatic(g, v)
+    ne, nc, nl = num_edges(g), num_cells(g), 4
+    y = zero_state(m)
+    y.vn .= randn(rng, ne, nl)
+    y.ρ .= 1 .+ 0.2 .* rand(rng, nc, nl)
+    y.ρθ .= 300 .* y.ρ
+    hd, hρθ = zeros(ne, nl), zeros(nc, nl)
+    NH.smagorinsky!(hd, hρθ, m, y)
+    ρe = (g.cell_distances[1, :] .* y.ρ[g.edge_cells[1, :], :] .+ g.cell_distances[2, :] .* y.ρ[g.edge_cells[2, :], :]) ./
+         g.dual_lengths
+    # the loss of kinetic energy heats the cells
+    dE = sum((a^2 .* g.primal_lengths .* g.dual_lengths) .* (ρe .* y.vn .* hd) * v.dz)
+    Q = sum((a^2 .* g.cell_areas) .* (NH.Cpd .* (NH.Rd .* y.ρθ ./ NH.P0) .^ (NH.Rd / NH.Cvd) .* hρθ) * v.dz)
+    @test dE < 0
+    @test abs(dE + Q) < 1e-12 * abs(dE)
+    # a solid-body rotation is no deformation: small coefficient
+    y.vn .= [20 * dot(cross([0, 0, 1.0], g.edge_points[e]), g.edge_normals[e]) for e in 1:ne, _ in 1:nl]
+    NH.smagorinsky!(hd, hρθ, m, y)
+    @test maximum(m.work.Ke) < 0.05 * 0.15 * 8π * a^2 / ne * 20 / a
+end
+
+@testset "upwind θ at the interfaces" begin
+    NH = dmplex.Nonhydrostatic
+    Random.seed!(3)
+    g = TRiSKGrid(create_hexagon_mesh(1))
+    v = VerticalGrid(12, 30000.0; stretch=3)
+    m = TRiSKNonhydrostatic(g, v)
+    nc, nl = length(g.centers), 12
+    ρ = 1 .+ rand(nc, nl)
+    w = randn(nc, nl + 1)
+    θi, A, θm = zeros(nc, nl + 1), zeros(nc, nl, 5), zeros(nc, nl)
+    run(θ, τ) = NH.launch!(m, NH.theta_interface_kernel!, nc, θi, A, θm, θ, ρ, ρ .* θ, ρ, w, m.dz, m.dzh, m.wlow,
+                           τ, nl, true)
+    # without advection the upwind values are exact for θ linear in z, either sign of w
+    θ = repeat((300 .+ 0.004 .* v.z_full)', nc)
+    run(θ, 0.0)
+    θlin = [v.wlow[j] * θ[i, j - 1] + (1 - v.wlow[j]) * θ[i, j] for i in 1:nc, j in 2:nl]
+    @test maximum(abs, θi[:, 2:nl] .- θlin) < 1e-10
+    # the implicit advection keeps a constant
+    run(fill(300.0, nc, nl), 600.0)
+    @test maximum(abs, θi[:, 2:nl] .- 300) < 1e-10
+    # and solves θm + τ/(2ρ dz) [M_{k+1}(θ_{k+1} - θm_k) - M_k(θ_k - θm_k)] = θ0
+    θ0 = 300 .+ randn(nc, nl)
+    run(θ0, 600.0)
+    M = [2 <= j <= nl ? (v.wlow[j] * ρ[i, j - 1] + (1 - v.wlow[j]) * ρ[i, j]) * w[i, j] : 0.0 for i in 1:nc, j in 1:nl + 1]
+    r = [θm[i, k] + 300 / (ρ[i, k] * v.dz[k]) * (M[i, k + 1] * (θi[i, k + 1] - θm[i, k]) - M[i, k] * (θi[i, k] - θm[i, k])) -
+         θ0[i, k] for i in 1:nc, k in 1:nl]
+    @test maximum(abs, r) < 1e-9
+end

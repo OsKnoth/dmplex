@@ -59,9 +59,10 @@ end
 State `(vn, w, ρ, ρθ)` from `profile(lon, lat, z) -> (T, p, u, v)`. Every
 column is in discrete hydrostatic balance with the vertical operators of the
 model: `π` of the lowest layer from `p`, above from
-`c_p θ_j (π_j - π_{j-1}) / dzh_j = -g` with `θ = T/π` at the layer centres
-(fixed-point iteration per level), so a state without horizontal motion stays
-at rest. `w = 0`.
+`c_p θ_j (π_j - π_{j-1}) / dzh_j = -g` with `θ = T/π` at the layer centres and
+`θ_j` at the interfaces as the model has it at rest (fixed-point iteration per
+level, sweeps over the column for the upwind `θ`), so a state without
+horizontal motion stays at rest. `w = 0`.
 """
 function initial_state(m::TRiSKNonhydrostatic, profile)
     g, v = m.grid, m.vgrid
@@ -71,12 +72,14 @@ function initial_state(m::TRiSKNonhydrostatic, profile)
     for i in 1:nc
         λ, φ = lonlat(g.centers[i])
         T = [profile(λ, φ, z)[1] for z in v.z_full]
-        πk = zeros(nlev)
-        πk[1] = (profile(λ, φ, v.z_full[1])[2] / P0)^κ
-        for j in 2:nlev
-            πj = (profile(λ, φ, v.z_full[j])[2] / P0)^κ
+        πk = [(profile(λ, φ, z)[2] / P0)^κ for z in v.z_full]
+        # the interface θ of the model at rest couples to the layers above: sweep the column
+        for _ in 1:(m.vertical_theta == 2 ? 30 : 1), j in 2:nlev
+            c = m.vertical_theta == 2 ? theta_stencil(j, 0.0, v.dz, v.dzh, v.wlow, nlev) : (0.0, v.wlow[j], 1 - v.wlow[j], 0.0)
+            πj = πk[j]
             for _ in 1:50
-                θh = v.wlow[j] * T[j - 1] / πk[j - 1] + (1 - v.wlow[j]) * T[j] / πj
+                θh = sum(c[n] * T[j - 3 + n] / (j - 3 + n == j ? πj : πk[j - 3 + n])
+                         for n in 1:4 if 1 <= j - 3 + n <= nlev)
                 πj = πk[j - 1] - GRAV * v.dzh[j] / (Cpd * θh)
             end
             πk[j] = πj

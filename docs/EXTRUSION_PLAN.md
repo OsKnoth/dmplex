@@ -159,6 +159,74 @@ Equations (shallow, no orography; `Δz_k` layer thickness, `Δz_{k+1/2}` between
   987.3 / 979.4 / 962.6 / 942.1 / 910.8 hPa on day 5–10 (advective: 996.7 / 992.7 / 982.6 /
   963.2 / 938.5 / 920.3). The default stays `:advective`, until the kinetic energy and the
   averages follow ICON-IAP (Gassmann's treatment of the Hollingsworth instability).
+- Correction (2 November 2026): the `η v̄n` term of the `w` equation had half its weight
+  (`l_e d_e / 4A_i` instead of the cell inner product `l_e d_{e,i}/A_i`, ICON `e_inn_c`); the
+  energy check used the edge area `l_e d_e/2`, but `½vn²` carries `l_e d_e`. The vector-invariant
+  results above are those of the wrong scheme.
+- ICON-IAP form (`pv_flux = :iap`, `vertical_advection = :iap`, now the defaults): PV usage of
+  `i_cori_method = 4` (`trisk_pv_edges`, rhombus PV, symmetric, no work), the vorticity term with
+  the mass fluxes `M_e/ρ_e` and `ρ_e vn` as in `vorticity_tendencies`, `K_w` with the `dzh`
+  weights as in `kinetic_energy`; PV flux work and the `vn`–`w` exchange vanish to round-off
+  (`test/extruded.jl`). Not (yet): the implicit vertical advection of `vn` (`impl_vert_adv_vn`),
+  the vertical diffusion (the Smagorinsky diffusion and the upwind vertical `θ` follow below).
+  Without dissipation, p_s min on day 6 / 7 / 8 / 9 / 10 (hPa):
+
+  | mesh | `pv_flux` | vertical | p_s min | roughness p_s / T day 6 |
+  |---|---|---|---|---|
+  | hex 5 | `:iap` | `:iap` | 991.6 / 982.6 / 967.4 / 954.6 / 938.8 | |
+  | hex 6 | `:iap` | `:iap` | 989.3 / 976.0 / 955.3 / 956.4 / 944.1 | 0.23 hPa / 0.50 K |
+  | hex 6 | `:trisk` | `:vector_invariant` | 992.5 / 982.4 / 963.8 / 950.2 / 935.9 | 0.05 hPa / 0.16 K |
+  | hex 6 | `:iap` | `:advective` | NaN on day 4 | |
+
+  With the corrected weight the vector-invariant form is stable on hexagon 6 without
+  dissipation. The ICON-IAP PV usage is noisier at the grid scale (as `:gassmann` in the
+  shallow-water model); ICON-IAP itself runs with Smagorinsky diffusion.
+- ICON-IAP standard (2 November 2026, defaults `trisk_weights = :iap`, `smagorinsky = 0.15`,
+  `ν4 = 0`):
+  - TRiSK weights of `compute_cori_coeff_idx` (`iap_trisk_weights`): planar kite fractions
+    `R_{i,v} = Σ d_{e,i} l_{e,v} / 2A_i`; on hexagon 6 they differ from the exact weights by 1e-5
+    and are antisymmetric to 1e-5 (second order). `trisk_weights = :exact` keeps the old ones.
+  - Smagorinsky diffusion with the ICON-IAP coefficient `K_e = c · 8πa²/n_e · |D|`, `c = 0.15`,
+    tapered to zero in the sponge as `kmh_bg`, and the deformation
+    `|D|² = (n·∂_n u − t·∂_t u)² + (n·∂_t u + t·∂_n u)²` from Perot vectors at the cells and
+    barycentric vectors at the vertices (zero to 2e-5 for linear fields, 0.005 Ω for solid-body
+    rotation on hexagon 5). The operator is the δ–ζ form `(1/ρ_e)[∇(ρKδ) − k×∇(ρKζ)]·n`, not
+    Gassmann's least-squares strain projections; it dissipates kinetic energy and returns it as
+    heat `(ρK_c δ² + Σ_v K_iv/A_i ρK_v ζ_v²)/(c_p π)` (`ldiss_heat`), exactly in the discrete
+    energy balance (`test/extruded.jl`). Evaluated once per step on the old state.
+
+  | mesh | `pv_flux` | weights | p_s min day 6 / 7 / 8 / 9 / 10 | roughness p_s / T day 6 / 8 / 10 |
+  |---|---|---|---|---|
+  | hex 5 | `:iap` | `:iap` | 992.7 / 983.7 / 968.2 / 947.6 / 922.4 | |
+  | hex 6 | `:iap` | `:iap` | 991.9 / 982.6 / 963.1 / 941.4 / 924.8 | 0.04/0.10, 0.14/0.31, 0.25/0.61 |
+  | hex 6 | `:trisk` | `:exact` | 992.8 / 983.4 / 965.0 / 940.4 / 925.7 | 0.04/0.10, 0.16/0.47, 0.27/0.77 |
+
+  Without dissipation (runs above) hexagon 6 with `:iap` has the roughness 0.23/0.50, 0.32/0.79,
+  0.59/1.50, with `:trisk` 0.05/0.16, 0.25/0.68, 0.51/1.28. The Smagorinsky diffusion halves the
+  grid-scale noise and removes the difference between the PV usages; hexagon 5 and 6 differ by
+  at most 6 hPa (day 9) and by 2.4 hPa on day 10.
+- Upwind vertical `θ` (2 November 2026, default `vertical_theta = :upwind`): ICON-IAP's
+  `ltheta_up_vert` (`impl_vert_adv_scalar_5diag`). `θ` of the old state is advected vertically
+  with the mass flux of the stage state over half the stage, Crank–Nicolson, one pentadiagonal
+  system per column (`theta_interface_kernel!`); the interface values of the result are linear
+  plus 1/6 of the curvature at the upwind cell (third order, `theta_stencil`). On stretched
+  grids the weight of the upwind cell is set so that linear profiles are exact (ICON-IAP's `2`
+  keeps constants only on uniform grids). ICON-IAP uses these values in the `ρθ` flux and in the
+  vertical pressure gradient (`:iap`); there the stencil switches with the sign of round-off `w`
+  and a column at rest gets `w` of 0.16 m/s after five steps. `:upwind` therefore uses them in
+  the flux only and keeps the linear interpolation in `∂π/∂z` (rest to round-off, the exchange
+  with `K_w` then not exact). p_s min day 6 / 7 / 8 / 9 / 10 (hPa), Smagorinsky 0.15:
+
+  | mesh | `vertical_theta` | p_s min | roughness p_s / T day 6 / 8 / 10 |
+  |---|---|---|---|
+  | hex 5 | `:centred` | 992.7 / 983.7 / 968.2 / 947.6 / 922.4 | |
+  | hex 5 | `:upwind` | 992.6 / 983.5 / 968.4 / 946.9 / 921.8 | |
+  | hex 5 | `:iap` | 993.1 / 984.8 / 970.8 / 945.5 / 925.6 | |
+  | hex 6 | `:centred` | 991.9 / 982.6 / 963.1 / 941.4 / 924.8 | 0.04/0.10, 0.14/0.31, 0.25/0.61 |
+  | hex 6 | `:upwind` | 991.7 / 982.3 / 963.1 / 940.4 / 925.1 | 0.04/0.10, 0.14/0.28, 0.23/0.48 |
+
+- Next: GPU runs with KernelAbstractions (`examples/baroclinic_wave.jl --gpu`,
+  `examples/gpu/baroclinic_wave.sbatch`, one A100 on Levante), then the distribution over ranks.
 
 ## 5. Steps
 

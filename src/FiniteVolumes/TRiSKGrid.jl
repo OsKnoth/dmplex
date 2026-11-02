@@ -280,3 +280,90 @@ function rbf_coefficients(g::TRiSKGrid; scale::Real=0.5)
     end
     return padded(first.(columns), 1), padded(last.(columns), 0.0)
 end
+
+"""
+    trisk_pv_edges(g::TRiSKGrid) -> pv_edges
+
+PV usage of ICON-IAP `i_cori_method = 4` (the default of ICON-IAP, "TRSK but
+with other vorticities close to method 1"): the TRiSK weights `trisk_weights`
+with the rhombus PV of one edge `pv_edges[k, e]` instead of the mean
+`(q_e + q_{e'})/2` for the TRiSK edge `e' = trisk_edges[k, e]`. Walking around
+the common cell from `e` to `e'` the shorter way, a neighbour (one step) takes
+the third edge of the shared vertex, a second neighbour (two steps) the edge
+in between; `pv_edges[k, e] = 0` (the mean) for the opposite edge of a hexagon
+and wherever no such edge exists. Both rules are symmetric in `e` and `e'`, so
+the PV flux term stays antisymmetric and does no work.
+"""
+function trisk_pv_edges(g::TRiSKGrid)
+    pv_edges = zeros(Int, size(g.trisk_edges))
+    count = zeros(Int, num_edges(g))
+    function third_edge(v, e, e′)
+        others = [g.vertex_edges[j, v] for j in axes(g.vertex_edges, 1)
+                  if g.vertex_signs[j, v] != 0 && g.vertex_edges[j, v] ∉ (e, e′)]
+        return length(others) == 1 ? only(others) : 0
+    end
+    # the same walk as the TRiSK weights in `TRiSKGrid`
+    for i in 1:num_cells(g)
+        n = Base.count(!=(0), view(g.cell_signs, :, i))
+        edges, corners = g.cell_edges[1:n, i], g.cell_vertices[1:n, i]
+        for k in 1:n
+            e = edges[k]
+            for s in 1:(n - 1)
+                count[e] += 1
+                e′ = edges[mod1(k + s, n)]
+                g.trisk_edges[count[e], e] == e′ || error("TRiSK edge table out of order")
+                pv_edges[count[e], e] = if 2s == n
+                    0
+                elseif s == 1                    # corner k + 1 between edges k and k + 1
+                    third_edge(corners[mod1(k + 1, n)], e, e′)
+                elseif s == n - 1                # corner k between edges k - 1 and k
+                    third_edge(corners[k], e, e′)
+                elseif s == 2
+                    edges[mod1(k + 1, n)]
+                elseif s == n - 2
+                    edges[mod1(k - 1, n)]
+                else
+                    0
+                end
+            end
+        end
+    end
+    return pv_edges
+end
+
+"""
+    iap_trisk_weights(g::TRiSKGrid) -> weights
+
+TRiSK weights `w_{e,e'}` of the edges `trisk_edges` as computed by ICON-IAP
+(`compute_cori_coeff_idx`, `i_cori_method = 4`): the same walk around the
+cells as for `trisk_weights`, but with the kite fractions of the planar right
+triangles, `R_{i,v} = Σ_e d_{e,i} l_{e,v} / 2A_i` over the two edges of cell
+`i` at `v` (`l_{e,v}` the distance of the edge point to `v`, ICON
+`edge_vert_length`), instead of the exact spherical kites. The `R_{i,v}` do not
+add up to one exactly, so `w_{e,e'} = -w_{e',e}` holds only to the
+discretization error.
+"""
+function iap_trisk_weights(g::TRiSKGrid)
+    weights = zeros(size(g.trisk_weights))
+    count = zeros(Int, num_edges(g))
+    for i in 1:num_cells(g)
+        n = Base.count(!=(0), view(g.cell_signs, :, i))
+        edges, signs, corners = g.cell_edges[1:n, i], g.cell_signs[1:n, i], g.cell_vertices[1:n, i]
+        side(e) = g.edge_cells[1, e] == i ? 1 : 2
+        triangle(e, v) = g.cell_distances[side(e), e] * arc_length(g.edge_points[e], g.vertices[v]) / 2
+        # corner k lies between cell edges k - 1 and k
+        R = [(triangle(edges[mod1(k - 1, n)], corners[k]) + triangle(edges[k], corners[k])) / g.cell_areas[i]
+             for k in 1:n]
+        for k in 1:n
+            e, S = edges[k], 0.0
+            for s in 1:(n - 1)
+                k′ = mod1(k + s, n)
+                S += R[k′]
+                count[e] += 1
+                g.trisk_edges[count[e], e] == edges[k′] || error("TRiSK edge table out of order")
+                weights[count[e], e] = signs[k] * signs[k′] * (0.5 - S)
+            end
+        end
+    end
+    return weights
+end

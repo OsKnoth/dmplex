@@ -11,7 +11,7 @@ using StaticArrays
 using KernelAbstractions
 using ..Topology
 import ..Topology: num_layers
-using ..FiniteVolumes: TRiSKGrid, TRiSKShallowWater, num_cells, num_edges, num_vertices
+using ..FiniteVolumes: TRiSKGrid, TRiSKShallowWater, trisk_pv_edges, iap_trisk_weights, num_cells, num_edges, num_vertices
 using ..FEM: to_backend
 import ..ShallowWater: initial_state, total_mass
 
