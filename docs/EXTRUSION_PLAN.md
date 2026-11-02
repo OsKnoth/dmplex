@@ -225,8 +225,16 @@ Equations (shallow, no orography; `Δz_k` layer thickness, `Δz_{k+1/2}` between
   | hex 6 | `:centred` | 991.9 / 982.6 / 963.1 / 941.4 / 924.8 | 0.04/0.10, 0.14/0.31, 0.25/0.61 |
   | hex 6 | `:upwind` | 991.7 / 982.3 / 963.1 / 940.4 / 925.1 | 0.04/0.10, 0.14/0.28, 0.23/0.48 |
 
-- Next: GPU runs with KernelAbstractions (`examples/baroclinic_wave.jl --gpu`,
-  `examples/gpu/baroclinic_wave.sbatch`, one A100 on Levante), then the distribution over ranks.
+- GPU (2 November 2026, `examples/baroclinic_wave.jl --gpu`, `examples/gpu/baroclinic_wave.sbatch`,
+  one A100 on Levante, defaults, 30 layers, 10 days): hexagon 6 (40962 cells, dt = 300 s)
+  gives the CPU p_s min to all printed digits (991.66 / 982.25 / 963.13 / 940.43 / 925.06 hPa on
+  days 6–10), 18.8 ms per step (54 s for 10 days). Hexagon 7 (163842 cells, dt = 150 s):
+  990.2 / 975.8 / 957.5 / 949.5 / 931.4 hPa, 98.9 ms per step (570 s); 5.3 times the time for
+  4 times the cells, so some kernels scale badly (to be profiled: the column kernels with one
+  work item per column, the band array `(nc, nlev, 5)`). The first runs ran out of device
+  memory: `step!` copied the base state every step, now it is kept in the work arrays.
+- Next: profile the kernels (CUDA.@profile), then the distribution over ranks (halo of the
+  TRiSK tables as in `TRiSKShallowWater`).
 
 ## 5. Steps
 
