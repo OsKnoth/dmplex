@@ -177,7 +177,8 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
             hd=zeros2(ne, nlev), hρθ=zeros2(nc, nlev), uc=ntuple(_ -> zeros2(nc, nlev), 3),
             uv=ntuple(_ -> zeros2(nv, nlev), 3), Ke=zeros2(ne, nlev), ρKc=zeros2(nc, nlev), ρKv=zeros2(nv, nlev),
             θi=zeros2(nc, nlev + 1), θm=zeros2(nc, nlev),
-            band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 5))
+            band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 5),
+            y0=(vn=zeros2(ne, nlev), w=zeros2(nc, nlev + 1), ρ=zeros2(nc, nlev), ρθ=zeros2(nc, nlev)))
     edge_weight = dev(grid.cell_distances ./ grid.dual_lengths')
     inner = zeros(size(grid.cell_edges))
     for i in 1:nc, j in axes(grid.cell_edges, 1)
@@ -785,10 +786,12 @@ end
     step!(m, y, dt, ys=zero_state(m))
 
 One Wicker–Skamarock RK3 step of length `dt` (stages `dt/3`, `dt/2`, `dt`),
-in place; `ys` is work space for the stage state.
+in place; `ys` is work space for the stage state, the base state is kept in
+the work arrays (no allocation on the device).
 """
 function step!(m::TRiSKNonhydrostatic, y, dt, ys=zero_state(m))
-    y0 = map(copy, y)
+    y0 = m.work.y0
+    foreach(copyto!, y0, y)
     hyperdiffusion!(m.work.hd, m, y0.vn)
     smagorinsky!(m.work.hd, m.work.hρθ, m, y0)
     stage!(m, ys, y0, y0, dt / 3)
