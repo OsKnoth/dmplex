@@ -83,9 +83,9 @@ end
         NH.launch!(m, NH.edge_pv_kernel!, (ne, nl), W.qe, W.qv, W.ζv, W.ρv, m.edge_vertices, m.rhombus,
                    m.edge_coriolis, m.iap_pv)
         NH.launch!(m, NH.edge_density_kernel!, (ne, nl), W.ρe, W.Fs, vn, ρ, m.edge_cells, m.edge_weight)
-        tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, (ne, nl), W.tvn, vn, W.Fs, w, ρ, W.θ, W.π, W.K, qe, η,
-                                         m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk,
-                                         m.pv_edges, m.dz, m.dzh, m.wlow, nl, m.vertical); copy(W.tvn))
+        tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, ne, W.tvn, vn, W.Fs, w, ρ, W.θ, W.π, W.K, qe, η,
+                                         m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk,
+                                         m.dz, m.dzh, m.wlow, Val(size(m.trisk, 2)), m.vertical); copy(W.tvn))
         # the PV flux does no work
         F = ρe .* vn
         t = tendency(W.qe, zero(w), zero(W.η))

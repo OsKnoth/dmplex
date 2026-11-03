@@ -95,7 +95,7 @@ energy lets a strong jet become unstable on fine meshes (Hollingsworth et al.
 Arrays are `(n, nlev)` with the horizontal index fastest; every kernel runs
 over `(n, nlev)` or, for the vertical solver, one work item per column.
 """
-struct TRiSKNonhydrostatic{M, V, I, VK, BE}
+struct TRiSKNonhydrostatic{M, V, I, J, VK, BE}
     grid::TRiSKGrid
     vgrid::VerticalGrid
     cell_edges::I
@@ -113,9 +113,8 @@ struct TRiSKNonhydrostatic{M, V, I, VK, BE}
     vertex_cells::I
     vertex_weight::M     # K_{i,v} / A_v
     coriolis::V          # f at the vertices
-    trisk_edges::I
-    trisk::M             # w_{e,e'} l_{e'} / d_e
-    pv_edges::I          # ICON-IAP PV usage of the TRiSK edges, 0 for the mean
+    trisk_index::J       # (ne, nt, 3) Int32: TRiSK edge e' and the edges a, b of its PV (q_a + q_b)/2
+    trisk::M             # (ne, nt): w_{e,e'} l_{e'} / 2d_e
     rhombus::M           # A_v / (A_v1 + A_v2) at the edge vertices
     edge_coriolis::V     # f at the edge points
     perot::NTuple{3, M}  # n_{e,i} l_e (x_e - x_i) / A_i, x_e the edge midpoint: velocity vector at the cells
@@ -177,6 +176,7 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
             hd=zeros2(ne, nlev), hρθ=zeros2(nc, nlev), uc=ntuple(_ -> zeros2(nc, nlev), 3),
             uv=ntuple(_ -> zeros2(nv, nlev), 3), Ke=zeros2(ne, nlev), ρKc=zeros2(nc, nlev), ρKv=zeros2(nv, nlev),
             θi=zeros2(nc, nlev + 1), ρe=zeros2(ne, nlev), Fs=zeros2(ne, nlev), θm=zeros2(nc, nlev),
+            π0=zeros2(nc, nlev), γ0=zeros2(nc, nlev),
             band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 5),
             y0=(vn=zeros2(ne, nlev), w=zeros2(nc, nlev + 1), ρ=zeros2(nc, nlev), ρθ=zeros2(nc, nlev)))
     edge_weight = dev(grid.cell_distances ./ grid.dual_lengths')
@@ -192,7 +192,16 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
     pv_edges = pv_flux == :iap ? trisk_pv_edges(grid) : zeros(Int, size(grid.trisk_edges))
     trisk_weights in (:iap, :exact) || throw(ArgumentError("trisk_weights must be :iap or :exact"))
     W = trisk_weights == :iap ? iap_trisk_weights(grid) : grid.trisk_weights
-    trisk = [W[k, e] * grid.primal_lengths[grid.trisk_edges[k, e]] / grid.dual_lengths[e] for k in axes(W, 1), e in 1:ne]
+    # TRiSK tables as in ICON with the edge index first (coalesced on GPUs), the PV of each neighbour
+    # by two edges, (q_e + q_e')/2 or q_p twice, the 1/2 in the weight; padding points to e itself
+    nt = size(grid.trisk_edges, 1)
+    trisk_index = zeros(Int32, ne, nt, 3)
+    trisk = zeros(ne, nt)
+    for e in 1:ne, k in 1:nt
+        e′, p = grid.trisk_edges[k, e], pv_edges[k, e]
+        trisk[e, k] = W[k, e] * grid.primal_lengths[e′] / (2 * grid.dual_lengths[e])
+        trisk_index[e, k, :] .= trisk[e, k] == 0 ? (e, e, e) : p == 0 ? (e′, e, e′) : (e′, p, p)
+    end
     # Smagorinsky diffusion: Perot reconstruction, edge frames, coefficient per layer
     perot = ntuple(_ -> zeros(size(grid.cell_edges)), 3)
     cell_edge_area = zeros(size(grid.cell_edges))
@@ -236,7 +245,7 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
                                sw.vertex_kinetic, sw.edge_cells, sw.edge_vertices, edge_weight, dev(Array(sw.inverse_dual) ./ a),
                                dev(1 ./ (a .* grid.primal_lengths)), sw.vertex_edges,
                                dev(Array(sw.curl) ./ a), sw.vertex_cells, sw.vertex_height, sw.coriolis,
-                               sw.trisk_edges, dev(trisk), dev(pv_edges), dev(rhombus),
+                               dev(trisk_index), dev(trisk), dev(rhombus),
                                dev([2omega * x[3] for x in grid.edge_points]), map(dev, perot), dev(barycentric),
                                dev(frame),
                                dev(grid.cell_vertices), dev(grid.cell_kites ./ grid.cell_areas'), dev(cell_edge_area),
@@ -381,35 +390,40 @@ end
     end
 end
 
-"Explicit tendency of `vn` (PV flux, kinetic energy and pressure gradient, vertical advection)."
+"""
+Explicit tendency of `vn` (PV flux, kinetic energy and pressure gradient,
+vertical advection), one work item per edge over all layers: the TRiSK
+neighbours (`nt = Val(n)` of them) are read once into registers.
+"""
 @kernel function vn_tendency_kernel!(tvn, @Const(vn), @Const(Fs), @Const(w), @Const(ρ), @Const(θ), @Const(πe), @Const(K),
                                      @Const(qe), @Const(η), @Const(edge_cells), @Const(edge_weight),
-                                     @Const(inverse_dual), @Const(trisk_edges), @Const(trisk), @Const(pv_edges),
-                                     @Const(dz), @Const(dzh), @Const(wlow), nlev, vertical)
-    e, k = @index(Global, NTuple)
+                                     @Const(inverse_dual), @Const(trisk_index), @Const(trisk), @Const(dz), @Const(dzh),
+                                     @Const(wlow), nt, vertical)
+    e = @index(Global)
+    nlev = size(vn, 2)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
-        s = 0.0
-        for j in axes(trisk_edges, 1)
-            e′ = trisk_edges[j, e]
-            p = pv_edges[j, e]
-            s += trisk[j, e] * Fs[e′, k] * (p == 0 ? (qe[e, k] + qe[e′, k]) / 2 : qe[p, k])
-        end
-        θe = edge_weight[1, e] * θ[l, k] + edge_weight[2, e] * θ[r, k]
-        t = s - inverse_dual[e] * (K[r, k] - K[l, k] + Cpd * θe * (πe[r, k] - πe[l, k]))
-        if vertical > 0
-            # -η w̃ at the two interfaces of the layer, w̃ = M_e/ρ_e (ρ = 1 for the plain vector-invariant form),
-            # adjoint to ṽn in the w equation
-            mw = vertical == 2
-            Wl = k > 1 ? edge_w(w, ρ, e, l, r, k, edge_weight, wlow, mw) : 0.0
-            Wu = k < nlev ? edge_w(w, ρ, e, l, r, k + 1, edge_weight, wlow, mw) : 0.0
-            tvn[e, k] = t - (dzh[k] * η[e, k] * Wl + dzh[k + 1] * η[e, k + 1] * Wu) / (2 * dz[k])
-        else
-            # vertical advection -w ∂vn/∂z with vn at the interfaces by the mean (one-sided at the boundaries)
-            we = (w[l, k] + w[r, k] + w[l, k + 1] + w[r, k + 1]) / 4
-            vlow = k > 1 ? (vn[e, k - 1] + vn[e, k]) / 2 : vn[e, k]
-            vup = k < nlev ? (vn[e, k] + vn[e, k + 1]) / 2 : vn[e, k]
-            tvn[e, k] = t - we * (vup - vlow) / dz[k]
+        wl, wr, d = edge_weight[1, e], edge_weight[2, e], inverse_dual[e]
+        nb = ntuple(j -> (trisk_index[e, j, 1], trisk_index[e, j, 2], trisk_index[e, j, 3], trisk[e, j]), nt)
+        mw = vertical == 2
+        Wl = 0.0
+        for k in 1:nlev
+            s = sum(map(x -> x[4] * Fs[x[1], k] * (qe[x[2], k] + qe[x[3], k]), nb))
+            θe = wl * θ[l, k] + wr * θ[r, k]
+            t = s - d * (K[r, k] - K[l, k] + Cpd * θe * (πe[r, k] - πe[l, k]))
+            if vertical > 0
+                # -η w̃ at the two interfaces of the layer, w̃ = M_e/ρ_e (ρ = 1 for the plain vector-invariant form),
+                # adjoint to ṽn in the w equation
+                Wu = k < nlev ? edge_w(w, ρ, e, l, r, k + 1, edge_weight, wlow, mw) : 0.0
+                tvn[e, k] = t - (dzh[k] * η[e, k] * Wl + dzh[k + 1] * η[e, k + 1] * Wu) / (2 * dz[k])
+                Wl = Wu
+            else
+                # vertical advection -w ∂vn/∂z with vn at the interfaces by the mean (one-sided at the boundaries)
+                we = (w[l, k] + w[r, k] + w[l, k + 1] + w[r, k + 1]) / 4
+                vlow = k > 1 ? (vn[e, k - 1] + vn[e, k]) / 2 : vn[e, k]
+                vup = k < nlev ? (vn[e, k] + vn[e, k + 1]) / 2 : vn[e, k]
+                tvn[e, k] = t - we * (vup - vlow) / dz[k]
+            end
         end
     end
 end
@@ -680,44 +694,64 @@ third-order upwind interface values of the result, as ICON-IAP
     end
 end
 
+"Exner pressure `π0` of the base state and `γ0 = κ π0 / ρθ0`, its derivative by `ρθ`, once per step."
+@kernel function base_exner_kernel!(π0, γ0, @Const(ρθ0))
+    i, k = @index(Global, NTuple)
+    @inbounds begin
+        x = ρθ0[i, k]
+        π = (Rd * x / P0)^(Rd / Cvd)
+        π0[i, k] = π
+        γ0[i, k] = Rd / Cvd * π / x
+    end
+end
+
 """
 Vertically implicit step of one column: `w`, `ρ`, `ρθ` at `t + τ` from the
 explicit parts, with `θ` at the interfaces from `theta_interface_kernel!` in
 the `ρθ` flux (and with `iap_theta` in the pressure gradient, else `θ` of the
 stage state linearly interpolated), `ρ` there from the stage state and the
-linearization of `π` around the base state.
+linearization of `π` around the base state (`π0`, `γ0` of
+`base_exner_kernel!`). The coefficients of the cells and interfaces next to
+interface `j` are carried along the sweep.
 """
-@kernel function vertical_solve_kernel!(w, ρ, ρθ, cp_, dp_, @Const(w0), @Const(ρ0), @Const(ρθ0), @Const(θs),
-                                        @Const(θi), @Const(ρs), @Const(tw), @Const(ρexpl), @Const(ρθexpl), @Const(dz),
-                                        @Const(dzh), @Const(wlow), @Const(rayleigh), τ, β, nlev, iap_theta)
+@kernel function vertical_solve_kernel!(w, ρ, ρθ, cp_, dp_, @Const(w0), @Const(ρθ0), @Const(π0), @Const(γ0),
+                                        @Const(θs), @Const(θi), @Const(ρs), @Const(tw), @Const(ρexpl),
+                                        @Const(ρθexpl), @Const(dz), @Const(dzh), @Const(wlow), @Const(rayleigh), τ, β,
+                                        nlev, iap_theta)
     i = @index(Global)
     @inbounds begin
-        κ = Rd / Cvd
-        exner(x) = (Rd * x / P0)^κ
         θh(j) = iap_theta ? θi[i, j] : wlow[j] * θs[i, j - 1] + (1 - wlow[j]) * θs[i, j]
         ρh(j) = wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]
-        γ(k) = κ * exner(ρθ0[i, k]) / ρθ0[i, k] * τ / dz[k]
-        πexpl(k) = exner(ρθ0[i, k]) * (1 + κ * (ρθexpl[i, k] - ρθ0[i, k]) / ρθ0[i, k])
-        # interface j couples to j - 1 and j + 1 through M = b w + c (zero at the boundaries)
-        b(j) = 2 <= j <= nlev ? ρh(j) * β : 0.0
-        c(j) = 2 <= j <= nlev ? ρh(j) * (1 - β) * w0[i, j] : 0.0
-        θb(j) = 2 <= j <= nlev ? θi[i, j] : 0.0
+        # interface j couples to j - 1 and j + 1 through M = b w + c (zero at the boundaries), in the ρθ flux
+        # with θ_j: B = θ_j b, C = θ_j c
+        B(j) = 2 <= j <= nlev ? θi[i, j] * ρh(j) * β : 0.0
+        C(j) = 2 <= j <= nlev ? θi[i, j] * ρh(j) * (1 - β) * w0[i, j] : 0.0
+        # cell k: γ = κ π0/ρθ0 τ/dz and the explicit π linearized around π0
+        γl = γ0[i, 1] * τ / dz[1]
+        π0l = π0[i, 1]
+        πl = π0l + γ0[i, 1] * (ρθexpl[i, 1] - ρθ0[i, 1])
+        Bl, Cl, Bc, Cc = 0.0, 0.0, B(2), C(2)
         # Thomas algorithm, forward sweep over j = 2:nlev
         cp_[i, 1] = 0.0
         dp_[i, 1] = 0.0
         for j in 2:nlev
-            aj = τ * Cpd * θh(j) * β / dzh[j]
-            γu, γl = γ(j), γ(j - 1)
-            lower = -aj * γl * θb(j - 1) * b(j - 1)
-            diag = 1 + τ * rayleigh[j] + aj * (γu + γl) * θb(j) * b(j)
-            upper = -aj * γu * θb(j + 1) * b(j + 1)
-            rhs = w0[i, j] + τ * (tw[i, j] - GRAV) -
-                  τ * Cpd * θh(j) * (1 - β) * (exner(ρθ0[i, j]) - exner(ρθ0[i, j - 1])) / dzh[j] -
-                  aj * (πexpl(j) - πexpl(j - 1)) -
-                  aj * (-γu * θb(j + 1) * c(j + 1) + (γu + γl) * θb(j) * c(j) - γl * θb(j - 1) * c(j - 1))
+            g = γ0[i, j]
+            γu = g * τ / dz[j]
+            π0u = π0[i, j]
+            πu = π0u + g * (ρθexpl[i, j] - ρθ0[i, j])
+            Bu, Cu = B(j + 1), C(j + 1)
+            θj = θh(j)
+            aj = τ * Cpd * θj * β / dzh[j]
+            lower = -aj * γl * Bl
+            diag = 1 + τ * rayleigh[j] + aj * (γu + γl) * Bc
+            upper = -aj * γu * Bu
+            rhs = w0[i, j] + τ * (tw[i, j] - GRAV) - τ * Cpd * θj * (1 - β) * (π0u - π0l) / dzh[j] -
+                  aj * (πu - πl) - aj * (-γu * Cu + (γu + γl) * Cc - γl * Cl)
             denom = diag - lower * cp_[i, j - 1]
             cp_[i, j] = upper / denom
             dp_[i, j] = (rhs - lower * dp_[i, j - 1]) / denom
+            γl, π0l, πl = γu, π0u, πu
+            Bl, Cl, Bc, Cc = Bc, Cc, Bu, Cu
         end
         w[i, nlev + 1] = 0.0
         for j in nlev:-1:2
@@ -728,8 +762,9 @@ linearization of `π` around the base state.
         Mlow = θMlow = 0.0
         for k in 1:nlev
             if k < nlev
-                M = b(k + 1) * w[i, k + 1] + c(k + 1)
-                θM = θb(k + 1) * M
+                ρj = ρh(k + 1)
+                M = ρj * (β * w[i, k + 1] + (1 - β) * w0[i, k + 1])
+                θM = θi[i, k + 1] * M
             else
                 M = θM = 0.0
             end
@@ -746,7 +781,8 @@ end
     stage!(m, y, y0, ys, τ)
 
 One HEVI stage: `y = y0 + τ T(ys)` with the horizontal terms explicit in the
-stage state `ys` and the vertical acoustic and buoyancy terms implicit.
+stage state `ys` and the vertical acoustic and buoyancy terms implicit,
+linearized around the Exner pressure of `y0` in the work arrays (`base_exner!`).
 """
 function stage!(m::TRiSKNonhydrostatic, y, y0, ys, τ)
     w, nlev = m.work, num_layers(m.vgrid)
@@ -771,16 +807,17 @@ function stage!(m::TRiSKNonhydrostatic, y, y0, ys, τ)
         launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
                 m.inverse_dual, m.dz)
     end
-    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η, m.edge_cells,
-            m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk, m.pv_edges, m.dz, m.dzh, m.wlow, nlev, m.vertical)
+    launch!(m, vn_tendency_kernel!, ne, w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η, m.edge_cells,
+            m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, m.dz, m.dzh, m.wlow, Val(size(m.trisk, 2)),
+            m.vertical)
     launch!(m, vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn, w.hd, τ)
     launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight)
     launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
             m.divergence, τ)
     launch!(m, theta_interface_kernel!, nc, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ys.w, m.dz, m.dzh, m.wlow,
             τ, nlev, m.vertical_theta > 0)
-    launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρ, y0.ρθ, w.θ, w.θi, ys.ρ,
-            w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, τ, m.beta, nlev, m.vertical_theta == 2)
+    launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
+            ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, τ, m.beta, nlev, m.vertical_theta == 2)
     return y
 end
 
@@ -796,11 +833,18 @@ function step!(m::TRiSKNonhydrostatic, y, dt, ys=zero_state(m))
     foreach(copyto!, y0, y)
     hyperdiffusion!(m.work.hd, m, y0.vn)
     smagorinsky!(m.work.hd, m.work.hρθ, m, y0)
+    base_exner!(m, y0)
     stage!(m, ys, y0, y0, dt / 3)
     stage!(m, y, y0, ys, dt / 2)
     foreach(copyto!, ys, y)
     stage!(m, y, y0, ys, dt)
     return y
+end
+
+"Exner pressure of the base state `y0` and its derivative by `ρθ` into the work arrays, for `stage!`."
+function base_exner!(m::TRiSKNonhydrostatic, y0)
+    launch!(m, base_exner_kernel!, size(y0.ρθ), m.work.π0, m.work.γ0, y0.ρθ)
+    return nothing
 end
 
 "Vector Laplacian of `vn` times `scale` into `L`."
