@@ -261,8 +261,13 @@ function zero_state(m::TRiSKNonhydrostatic)
     return (vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev))
 end
 
+# Work items over (points, levels) run in blocks of 32 points × 8 levels: the neighbour tables and the
+# lines of the gathered neighbours are shared by eight levels in the cache (ICON's nproma blocks).
+const BLOCK = (32, 8)
+
 function launch!(m::TRiSKNonhydrostatic, kernel, ndrange, args...)
-    kernel(m.backend)(args...; ndrange)
+    k = ndrange isa Tuple{Integer, Integer} ? kernel(m.backend, BLOCK) : kernel(m.backend)
+    k(args...; ndrange)
     KernelAbstractions.synchronize(m.backend)
     return nothing
 end
@@ -390,40 +395,33 @@ end
     end
 end
 
-"""
-Explicit tendency of `vn` (PV flux, kinetic energy and pressure gradient,
-vertical advection), one work item per edge over all layers: the TRiSK
-neighbours (`nt = Val(n)` of them) are read once into registers.
-"""
+"Explicit tendency of `vn` (PV flux, kinetic energy and pressure gradient, vertical advection)."
 @kernel function vn_tendency_kernel!(tvn, @Const(vn), @Const(Fs), @Const(w), @Const(ρ), @Const(θ), @Const(πe), @Const(K),
                                      @Const(qe), @Const(η), @Const(edge_cells), @Const(edge_weight),
                                      @Const(inverse_dual), @Const(trisk_index), @Const(trisk), @Const(dz), @Const(dzh),
-                                     @Const(wlow), nt, vertical)
-    e = @index(Global)
-    nlev = size(vn, 2)
+                                     @Const(wlow), nlev, vertical)
+    e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
-        wl, wr, d = edge_weight[1, e], edge_weight[2, e], inverse_dual[e]
-        nb = ntuple(j -> (trisk_index[e, j, 1], trisk_index[e, j, 2], trisk_index[e, j, 3], trisk[e, j]), nt)
-        mw = vertical == 2
-        Wl = 0.0
-        for k in 1:nlev
-            s = sum(map(x -> x[4] * Fs[x[1], k] * (qe[x[2], k] + qe[x[3], k]), nb))
-            θe = wl * θ[l, k] + wr * θ[r, k]
-            t = s - d * (K[r, k] - K[l, k] + Cpd * θe * (πe[r, k] - πe[l, k]))
-            if vertical > 0
-                # -η w̃ at the two interfaces of the layer, w̃ = M_e/ρ_e (ρ = 1 for the plain vector-invariant form),
-                # adjoint to ṽn in the w equation
-                Wu = k < nlev ? edge_w(w, ρ, e, l, r, k + 1, edge_weight, wlow, mw) : 0.0
-                tvn[e, k] = t - (dzh[k] * η[e, k] * Wl + dzh[k + 1] * η[e, k + 1] * Wu) / (2 * dz[k])
-                Wl = Wu
-            else
-                # vertical advection -w ∂vn/∂z with vn at the interfaces by the mean (one-sided at the boundaries)
-                we = (w[l, k] + w[r, k] + w[l, k + 1] + w[r, k + 1]) / 4
-                vlow = k > 1 ? (vn[e, k - 1] + vn[e, k]) / 2 : vn[e, k]
-                vup = k < nlev ? (vn[e, k] + vn[e, k + 1]) / 2 : vn[e, k]
-                tvn[e, k] = t - we * (vup - vlow) / dz[k]
-            end
+        s = 0.0
+        for j in axes(trisk, 2)
+            s += trisk[e, j] * Fs[trisk_index[e, j, 1], k] * (qe[trisk_index[e, j, 2], k] + qe[trisk_index[e, j, 3], k])
+        end
+        θe = edge_weight[1, e] * θ[l, k] + edge_weight[2, e] * θ[r, k]
+        t = s - inverse_dual[e] * (K[r, k] - K[l, k] + Cpd * θe * (πe[r, k] - πe[l, k]))
+        if vertical > 0
+            # -η w̃ at the two interfaces of the layer, w̃ = M_e/ρ_e (ρ = 1 for the plain vector-invariant form),
+            # adjoint to ṽn in the w equation
+            mw = vertical == 2
+            Wl = k > 1 ? edge_w(w, ρ, e, l, r, k, edge_weight, wlow, mw) : 0.0
+            Wu = k < nlev ? edge_w(w, ρ, e, l, r, k + 1, edge_weight, wlow, mw) : 0.0
+            tvn[e, k] = t - (dzh[k] * η[e, k] * Wl + dzh[k + 1] * η[e, k + 1] * Wu) / (2 * dz[k])
+        else
+            # vertical advection -w ∂vn/∂z with vn at the interfaces by the mean (one-sided at the boundaries)
+            we = (w[l, k] + w[r, k] + w[l, k + 1] + w[r, k + 1]) / 4
+            vlow = k > 1 ? (vn[e, k - 1] + vn[e, k]) / 2 : vn[e, k]
+            vup = k < nlev ? (vn[e, k] + vn[e, k + 1]) / 2 : vn[e, k]
+            tvn[e, k] = t - we * (vup - vlow) / dz[k]
         end
     end
 end
@@ -807,8 +805,8 @@ function stage!(m::TRiSKNonhydrostatic, y, y0, ys, τ)
         launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
                 m.inverse_dual, m.dz)
     end
-    launch!(m, vn_tendency_kernel!, ne, w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η, m.edge_cells,
-            m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, m.dz, m.dzh, m.wlow, Val(size(m.trisk, 2)),
+    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η,
+            m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, m.dz, m.dzh, m.wlow, nlev,
             m.vertical)
     launch!(m, vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn, w.hd, τ)
     launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight)
