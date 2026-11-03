@@ -156,3 +156,32 @@ end
          θ0[i, k] for i in 1:nc, k in 1:nl]
     @test maximum(abs, r) < 1e-9
 end
+
+@testset "kite nonhydrostatic: spaces and mass divergence" begin
+    for level in (2, 3)
+        m = KiteNonhydrostatic(create_hexagon_mesh(level), VerticalGrid(6, 12000.0; stretch=2))
+        y, v = zero_state(m), m.vgrid
+        nh, nu, nl = num_columns(m), size(y.u, 1), num_layers(v)
+        @test size(y.w) == (nh, nl + 1) && size(y.ρ) == (nh, nl) && size(y.ρθ) == (nh, nl)
+        @test nh == num_dofs(m.horizontal.H) && nu == num_dofs(m.horizontal.U)
+        # the total mass is conserved with W = 0 at the ground and the top
+        rng = MersenneTwister(level)
+        F, W = randn(rng, nu, nl), randn(rng, nh, nl + 1)
+        W[:, 1] .= 0
+        W[:, end] .= 0
+        dρ = similar(y.ρ)
+        mass_divergence!(dρ, m, F, W)
+        M = column_weights(m)
+        @test abs(sum((M' * dρ) .* v.dz')) < 1e-14 * sum(abs, M .* dρ .* v.dz')
+        # a vertical flux changes every column by its boundary fluxes
+        W .= randn(rng, nh, nl + 1)
+        mass_divergence!(dρ, m, zero(F), W)
+        @test dρ * v.dz ≈ W[:, 1] .- W[:, end]
+        # fields linear in z are exact at the layer centres; a solid-body rotation has a small divergence
+        @test project_layers(m, (x, z) -> 1.2 - 1e-4z) ≈ repeat((1.2 .- 1e-4 .* v.z_full)', nh)
+        @test size(project_layers(m, (x, z) -> z; levels=:half)) == (nh, nl + 1)
+        U = project_velocity(m, (x, z) -> 20.0 * SVector(-x[2], x[1], 0.0))
+        mass_divergence!(dρ, m, U, zero(W))
+        @test maximum(abs, dρ) < 0.1 * 20.0 / m.radius
+    end
+end

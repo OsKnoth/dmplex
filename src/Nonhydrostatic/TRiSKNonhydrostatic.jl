@@ -177,7 +177,7 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
             uv=ntuple(_ -> zeros2(nv, nlev), 3), Ke=zeros2(ne, nlev), ρKc=zeros2(nc, nlev), ρKv=zeros2(nv, nlev),
             θi=zeros2(nc, nlev + 1), ρe=zeros2(ne, nlev), Fs=zeros2(ne, nlev), θm=zeros2(nc, nlev),
             π0=zeros2(nc, nlev), γ0=zeros2(nc, nlev),
-            band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 5),
+            band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 2),
             y0=(vn=zeros2(ne, nlev), w=zeros2(nc, nlev + 1), ρ=zeros2(nc, nlev), ρθ=zeros2(nc, nlev)))
     edge_weight = dev(grid.cell_distances ./ grid.dual_lengths')
     inner = zeros(size(grid.cell_edges))
@@ -642,42 +642,40 @@ third-order upwind interface values of the result, as ICON-IAP
             end
         else
             M(j) = (wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]) * ws[i, j]
-            # band A[i, k, 3 + c - k] of row k, rhs θ of the base state
+            # row k: θm_k + τ/(2ρ dz) [M_{k+1} (θ_{k+1} - θm_k) - M_k (θ_k - θm_k)] = θ0_k with the interface
+            # values θ_j of the upwind stencil, over the cells k-2..k+2; built when it is eliminated, from
+            # the stencils of the interfaces k and k + 1 (carried along). Gaussian elimination without
+            # pivoting keeps the normalized upper entries A[i, k, 1:2] and the right-hand side θm[i, k]
+            # for the back substitution
+            Ml, cl = 0.0, (0.0, 0.0, 0.0, 0.0)
+            u1l = u2l = yl = u1ll = u2ll = yll = 0.0
             for k in 1:nlev
-                for d in 1:5
-                    A[i, k, d] = 0.0
-                end
-                A[i, k, 3] = 1.0
-                θm[i, k] = ρθ0[i, k] / ρ0[i, k]
-            end
-            # θm + τ/(2ρ dz) [M_{k+1} (θ_{k+1} - θm_k) - M_k (θ_k - θm_k)] = θ0
-            for k in 1:nlev
+                Mu = k < nlev ? M(k + 1) : 0.0
+                cu = k < nlev ? theta_stencil(k + 1, Mu, dz, dzh, wlow, nlev) : (0.0, 0.0, 0.0, 0.0)
                 f = τ / (2 * ρs[i, k] * dz[k])
-                for (j, s) in ((k + 1, 1), (k, -1))
-                    2 <= j <= nlev || continue
-                    Mj = M(j)
-                    c = theta_stencil(j, Mj, dz, dzh, wlow, nlev)
-                    for n in 1:4
-                        cell = j - 3 + n
-                        1 <= cell <= nlev && (A[i, k, cell - k + 3] += s * f * Mj * c[n])
-                    end
-                    A[i, k, 3] -= s * f * Mj
-                end
+                u, l = f * Mu, f * Ml
+                r1 = -l * cl[1]
+                r2 = u * cu[1] - l * cl[2]
+                r3 = 1 + u * (cu[2] - 1) - l * (cl[3] - 1)
+                r4 = u * cu[3] - l * cl[4]
+                r5 = u * cu[4]
+                y = ρθ0[i, k] / ρ0[i, k]
+                r2 -= r1 * u1ll
+                r3 -= r1 * u2ll
+                y -= r1 * yll
+                r3 -= r2 * u1l
+                r4 -= r2 * u2l
+                y -= r2 * yl
+                u1, u2, y = r4 / r3, r5 / r3, y / r3
+                A[i, k, 1], A[i, k, 2], θm[i, k] = u1, u2, y
+                u1ll, u2ll, yll, u1l, u2l, yl = u1l, u2l, yl, u1, u2, y
+                Ml, cl = Mu, cu
             end
-            # banded elimination without pivoting, back substitution
-            for k in 1:nlev - 1, r in k + 1:min(k + 2, nlev)
-                l = A[i, r, k - r + 3] / A[i, k, 3]
-                for c in k + 1:min(k + 2, nlev)
-                    A[i, r, c - r + 3] -= l * A[i, k, c - k + 3]
-                end
-                θm[i, r] -= l * θm[i, k]
-            end
+            θ1 = θ2 = 0.0
             for k in nlev:-1:1
-                s = θm[i, k]
-                for c in k + 1:min(k + 2, nlev)
-                    s -= A[i, k, c - k + 3] * θm[i, c]
-                end
-                θm[i, k] = s / A[i, k, 3]
+                θk = θm[i, k] - A[i, k, 1] * θ1 - A[i, k, 2] * θ2
+                θm[i, k] = θk
+                θ1, θ2 = θk, θ1
             end
             for j in 2:nlev
                 c = theta_stencil(j, M(j), dz, dzh, wlow, nlev)

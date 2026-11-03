@@ -173,9 +173,10 @@ The GPU and CPU runs of hexagon 6 agree, and mass is conserved to 4e-16.
 | ρ_e and ρ_e·vn once per stage | 13.6 ms | 59.8 ms |
 | plus Hilbert ordering | 12.5 ms | 49.2 ms |
 | plus Exner pressure of the base state once per step, edge-first Int32 TRiSK tables, blocks of 32 points × 8 levels | 9.1 ms | 27.3 ms |
+| plus the pentadiagonal θ solve with rows built on the fly | 7.7 ms | 25.1 ms |
 
-In the last version, the two column kernels (`theta_interface`, `vertical_solve`) take 10 of the
-27 ms on hexagon 7, and `vn_tendency` 4.4 ms.
+In the last version, on hexagon 7, `vertical_solve` takes 5.1 ms, `vn_tendency` 4.5 ms and
+`theta_interface` 2.3 ms.
 
 ## Mass solves with cuDSS: `gpu/cudss_mass.jl`
 
