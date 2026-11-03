@@ -160,7 +160,10 @@ mpiexec -n 4 julia --project=examples/gpu examples/nonlinear_shallow_water.jl 1 
 julia --project docs/galewsky_figure.jl hexagon 4 6   # Galewsky jet with the kite model, 6 days
 julia --project docs/bickley_figure.jl quadrilateral 32 40   # Bickley jet on a periodic plane
 mpiexec -n 4 julia --project=examples/gpu examples/galewsky.jl hexagon 6 6 --gpu --adios   # GPUs, ADIOS2 output
+julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu   # nonhydrostatic TRiSK, one GPU
 ```
+
+What each example tests, its options and reference results: [docs/EXAMPLES.md](docs/EXAMPLES.md).
 
 GPU runs (kite model on CUDA, ADIOS2 output straight from the device, cuDSS
 mass solvers over MPI) are described in [docs/levante.md](docs/levante.md).
