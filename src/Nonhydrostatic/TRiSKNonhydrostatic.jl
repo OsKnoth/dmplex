@@ -176,7 +176,7 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
             dprime=zeros2(nc, nlev + 1), δ=zeros2(nc, nlev), ζ=zeros2(nv, nlev), Lvn=zeros2(ne, nlev),
             hd=zeros2(ne, nlev), hρθ=zeros2(nc, nlev), uc=ntuple(_ -> zeros2(nc, nlev), 3),
             uv=ntuple(_ -> zeros2(nv, nlev), 3), Ke=zeros2(ne, nlev), ρKc=zeros2(nc, nlev), ρKv=zeros2(nv, nlev),
-            θi=zeros2(nc, nlev + 1), θm=zeros2(nc, nlev),
+            θi=zeros2(nc, nlev + 1), ρe=zeros2(ne, nlev), Fs=zeros2(ne, nlev), θm=zeros2(nc, nlev),
             band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 5),
             y0=(vn=zeros2(ne, nlev), w=zeros2(nc, nlev + 1), ρ=zeros2(nc, nlev), ρθ=zeros2(nc, nlev)))
     edge_weight = dev(grid.cell_distances ./ grid.dual_lengths')
@@ -309,10 +309,14 @@ end
     end
 end
 
-"Density `ρ_e` at the edge of every layer (`ρ = 1` without `massweighted`)."
-@inline function edge_density(ρ, e, k, edge_cells, edge_weight, massweighted)
-    @inbounds massweighted ? edge_weight[1, e] * ρ[edge_cells[1, e], k] + edge_weight[2, e] * ρ[edge_cells[2, e], k] :
-                             1.0
+"Density `ρ_e` at the edges of the stage state and the mass flux `ρ_e vn`, once per stage for the gathers."
+@kernel function edge_density_kernel!(ρe, Fs, @Const(vn), @Const(ρ), @Const(edge_cells), @Const(edge_weight))
+    e, k = @index(Global, NTuple)
+    @inbounds begin
+        r = edge_weight[1, e] * ρ[edge_cells[1, e], k] + edge_weight[2, e] * ρ[edge_cells[2, e], k]
+        ρe[e, k] = r
+        Fs[e, k] = r * vn[e, k]
+    end
 end
 
 """
@@ -320,17 +324,15 @@ Explicit tendency of `w` in vector-invariant form, `η ṽn - ∂K/∂z` at the 
 interfaces, `ṽn = (ρ_{e,j-1} vn_{j-1} + ρ_{e,j} vn_j) / 2ρ_e` (`ρ = 1` without
 `massweighted`) with the cell inner product.
 """
-@kernel function w_tendency_vi_kernel!(tw, @Const(η), @Const(vn), @Const(ρ), @Const(K), @Const(cell_edges),
-                                       @Const(inner), @Const(edge_cells), @Const(edge_weight), @Const(dzh),
-                                       @Const(wlow), massweighted)
+@kernel function w_tendency_vi_kernel!(tw, @Const(η), @Const(vn), @Const(ρe), @Const(K), @Const(cell_edges),
+                                       @Const(inner), @Const(dzh), @Const(wlow), massweighted)
     i, j = @index(Global, NTuple)
     nlev = size(vn, 2)
     @inbounds if 2 <= j <= nlev
         s = 0.0
         for n in axes(cell_edges, 1)
             e = cell_edges[n, i]
-            ρl = edge_density(ρ, e, j - 1, edge_cells, edge_weight, massweighted)
-            ρu = edge_density(ρ, e, j, edge_cells, edge_weight, massweighted)
+            ρl, ρu = massweighted ? (ρe[e, j - 1], ρe[e, j]) : (1.0, 1.0)
             s += inner[n, i] * η[e, j] * (ρl * vn[e, j - 1] + ρu * vn[e, j]) / (2 * (wlow[j] * ρl + (1 - wlow[j]) * ρu))
         end
         tw[i, j] = s - (K[i, j] - K[i, j - 1]) / dzh[j]
@@ -380,7 +382,7 @@ end
 end
 
 "Explicit tendency of `vn` (PV flux, kinetic energy and pressure gradient, vertical advection)."
-@kernel function vn_tendency_kernel!(tvn, @Const(vn), @Const(w), @Const(ρ), @Const(θ), @Const(πe), @Const(K),
+@kernel function vn_tendency_kernel!(tvn, @Const(vn), @Const(Fs), @Const(w), @Const(ρ), @Const(θ), @Const(πe), @Const(K),
                                      @Const(qe), @Const(η), @Const(edge_cells), @Const(edge_weight),
                                      @Const(inverse_dual), @Const(trisk_edges), @Const(trisk), @Const(pv_edges),
                                      @Const(dz), @Const(dzh), @Const(wlow), nlev, vertical)
@@ -390,9 +392,8 @@ end
         s = 0.0
         for j in axes(trisk_edges, 1)
             e′ = trisk_edges[j, e]
-            F′ = (edge_weight[1, e′] * ρ[edge_cells[1, e′], k] + edge_weight[2, e′] * ρ[edge_cells[2, e′], k]) * vn[e′, k]
             p = pv_edges[j, e]
-            s += trisk[j, e] * F′ * (p == 0 ? (qe[e, k] + qe[e′, k]) / 2 : qe[p, k])
+            s += trisk[j, e] * Fs[e′, k] * (p == 0 ? (qe[e, k] + qe[e′, k]) / 2 : qe[p, k])
         end
         θe = edge_weight[1, e] * θ[l, k] + edge_weight[2, e] * θ[r, k]
         t = s - inverse_dual[e] * (K[r, k] - K[l, k] + Cpd * θe * (πe[r, k] - πe[l, k]))
@@ -760,16 +761,17 @@ function stage!(m::TRiSKNonhydrostatic, y, y0, ys, τ)
             m.vertex_weight, m.coriolis)
     launch!(m, edge_pv_kernel!, (ne, nlev), w.qe, w.qv, w.ζv, w.ρv, m.edge_vertices, m.rhombus, m.edge_coriolis,
             m.iap_pv)
+    launch!(m, edge_density_kernel!, (ne, nlev), w.ρe, w.Fs, ys.vn, ys.ρ, m.edge_cells, m.edge_weight)
     if m.vertical > 0
         launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w, m.dz, m.dzh)
         launch!(m, eta_kernel!, (ne, nlev + 1), w.η, ys.vn, ys.w, m.edge_cells, m.inverse_dual, m.dzh)
-        launch!(m, w_tendency_vi_kernel!, (nc, nlev + 1), w.tw, w.η, ys.vn, ys.ρ, w.K, m.cell_edges, m.inner,
-                m.edge_cells, m.edge_weight, m.dzh, m.wlow, m.vertical == 2)
+        launch!(m, w_tendency_vi_kernel!, (nc, nlev + 1), w.tw, w.η, ys.vn, w.ρe, w.K, m.cell_edges, m.inner, m.dzh,
+                m.wlow, m.vertical == 2)
     else
         launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
                 m.inverse_dual, m.dz)
     end
-    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η, m.edge_cells,
+    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η, m.edge_cells,
             m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk, m.pv_edges, m.dz, m.dzh, m.wlow, nlev, m.vertical)
     launch!(m, vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn, w.hd, τ)
     launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight)

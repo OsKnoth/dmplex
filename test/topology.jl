@@ -38,3 +38,24 @@ end
     clear_label!(dm, "boundary")
     @test get_label_names(dm) == ["region"]
 end
+
+@testset "Hilbert order" begin
+    for dm in (create_hexagon_mesh(2), create_cubed_sphere_mesh(3))
+        set_label!(dm, "mark", first(cell_range(dm)) + 5, 7)
+        set_label!(dm, "mark", first(edge_range(dm)) + 3, 8)
+        set_label!(dm, "mark", first(vertex_range(dm)) + 9, 9)
+        new = hilbert_order(dm)
+        @test check_plex(new)
+        @test (num_cells(new), num_edges(new), num_vertices(new)) == (num_cells(dm), num_edges(dm), num_vertices(dm))
+        perm = hilbert_permutation(dm)
+        @test all(sum(cell_coordinates(new, first(cell_range(new)) + c - 1)) ≈
+                  sum(cell_coordinates(dm, first(cell_range(dm)) + perm[c] - 1)) for c in eachindex(perm))
+        # labels follow their points
+        corners(d, p) = get_depth(d, p) == 0 ? [p] : get_depth(d, p) == 1 ? get_cone(d, p) : get_cell_vertices(d, p)
+        point(d, p) = sum(get_coordinates.(Ref(d), corners(d, p)))
+        for value in 7:9
+            p, q = only(get_label_stratum(dm, "mark", value)), only(get_label_stratum(new, "mark", value))
+            @test point(dm, p) ≈ point(new, q)
+        end
+    end
+end

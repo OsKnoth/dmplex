@@ -38,7 +38,7 @@ function main(args)
     levels = length(args) >= 4 ? parse(Int, args[4]) : 30
 
     backend = USE_GPU ? CUDA.CUDABackend() : KernelAbstractions.CPU()
-    dm = create_hexagon_mesh(resolution)
+    dm = hilbert_order(create_hexagon_mesh(resolution))   # neighbours close in memory
     m = TRiSKNonhydrostatic(TRiSKGrid(dm), VerticalGrid(levels, 30000.0); damping_height=22000.0,
                             damping_rate=0.05, backend)
     @printf("%d cells (≈ %.0f km) × %d layers on %s, dt = %.0f s\n", num_cells(dm),

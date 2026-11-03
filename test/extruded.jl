@@ -82,7 +82,8 @@ end
                    m.vertex_cells, m.vertex_weight, m.coriolis)
         NH.launch!(m, NH.edge_pv_kernel!, (ne, nl), W.qe, W.qv, W.ζv, W.ρv, m.edge_vertices, m.rhombus,
                    m.edge_coriolis, m.iap_pv)
-        tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, (ne, nl), W.tvn, vn, w, ρ, W.θ, W.π, W.K, qe, η,
+        NH.launch!(m, NH.edge_density_kernel!, (ne, nl), W.ρe, W.Fs, vn, ρ, m.edge_cells, m.edge_weight)
+        tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, (ne, nl), W.tvn, vn, W.Fs, w, ρ, W.θ, W.π, W.K, qe, η,
                                          m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_edges, m.trisk,
                                          m.pv_edges, m.dz, m.dzh, m.wlow, nl, m.vertical); copy(W.tvn))
         # the PV flux does no work
@@ -91,8 +92,8 @@ end
         @test abs(sum(Ae .* (F .* t) * v.dz)) < 1e-12 * sum(Ae .* abs.(F .* t) * v.dz)
         # the vorticity term exchanges horizontal and vertical kinetic energy without loss
         NH.launch!(m, NH.eta_kernel!, (ne, nl + 1), W.η, vn, w, m.edge_cells, m.inverse_dual, m.dzh)
-        NH.launch!(m, NH.w_tendency_vi_kernel!, (nc, nl + 1), W.tw, W.η, vn, ρ, W.K, m.cell_edges, m.inner,
-                   m.edge_cells, m.edge_weight, m.dzh, m.wlow, mw)
+        NH.launch!(m, NH.w_tendency_vi_kernel!, (nc, nl + 1), W.tw, W.η, vn, W.ρe, W.K, m.cell_edges, m.inner,
+                   m.dzh, m.wlow, mw)
         t = tendency(zero(W.qe), w, W.η)
         a = sum(Ae .* ((mw ? ρe : 1) .* vn .* t) * v.dz)
         b = sum(g.cell_areas .* ((mw ? ρh : 1) .* w .* W.tw) * v.dzh)
