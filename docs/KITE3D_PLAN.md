@@ -115,5 +115,28 @@ unperturbed baroclinic wave blows up within 16 h. What is known:
   conserved energy is not a sufficient stability bound for these sub-cell modes. `TRiSKNonhydrostatic`
   on the same vertical grid and noise stays bounded without any diffusion.
 
-Next: the linearized operator on a small mesh (hexagon 1, a few layers) to find the unstable
-eigenmodes and the term that makes the pseudo-energy indefinite.
+Further tests (same noise test, hexagon 3, 10 layers, unless noted):
+
+- **Resolution:** hexagon 0 and 1 (also with a/8 and a/16, so with cells of the size of hexagons
+  3–4) stay bounded; hexagon 2 grows ×1.3 per hour, hexagon 3 ×2.4, hexagon 4 ×6. The rate roughly
+  doubles per refinement (∝ 1/Δx), and the mode needs the irregular hexagons of the finer meshes,
+  not only pentagons (hexagon 0 has only pentagons). A dense eigen-analysis on a small mesh
+  therefore finds nothing.
+- **Frequency:** low. At the strongest column w changes sign once in 2 h (e-folding 1.3 h);
+  the horizontal kinetic energy is 200 times the vertical one.
+- **Stratification restrains it:** isentropic (N = 0) ×2.5 per 30 min, the baroclinic-wave profile
+  ×170 in 6 h, isothermal (T = 250 K) ×2.6 in 6 h. One layer stays stable in all cases.
+- **Linear in θ:** θ replaced by its layer mean in Π_U(θ·) of the pressure gradient and the ρθ flux
+  gives the same growth, as the linearization at rest says.
+- **Not the Lorenz computational mode:** θ′ of the mode is smooth in the vertical (neighbouring
+  layers correlate +0.25, interface values as large as for noise). Structure at the strongest
+  column: warm lowest layer (θ′ > 0, ρ′ < 0) under downward motion in levels 2–4, the opposite at the
+  neighbouring nodes of the cell, so the motion is driven by the sub-cell pressure gradient.
+- **Not the lumped height mass:** the exact mass of the height space (37 × 37 per primal cell) in
+  the horizontal divergence grows slightly faster. On these meshes the Radau lumping equals row-sum
+  lumping (diag(exact)/lumped 0.88–0.98).
+- **No ghosts:** owned and local dofs agree in serial.
+
+Next: Arnoldi on the linearized step map of hexagon 3 (matrix-free, finite differences of the step,
+about 50 products) for the unstable eigenvalues and eigenvectors, then the energy conversion terms of
+the leading mode.
