@@ -237,6 +237,22 @@ end
     Πu = similar(u)
     NH.weighted_projection!(Πu, m, u, fill(300.0, num_columns(m)))
     @test Πu ≈ 300 .* u rtol = 1e-13
+    # the two vertical coupling terms are adjoint: Σ_k dz_k u_kᵀ M_u (η w)_k = Σ_j dzh_j w_jᵀ M_h (η ⋅ ṽ)_j
+    y.w .= randn(MersenneTwister(4), size(y.w))
+    y.w[:, 1] .= 0
+    y.w[:, end] .= 0
+    horizontal_tendency!(dy, m, y)
+    W, nl = m.work, num_layers(v)
+    lhs = rhs = 0.0
+    p, d = similar(y.u[:, 1]), zeros(num_columns(m))
+    for j in 2:nl
+        NH.weighted_projection!(p, m, W.η[:, j], y.w[:, j])
+        lhs += v.dzh[j] / 2 * dot(y.u[:, j - 1] .+ y.u[:, j], m.horizontal.Mu * p)
+        ṽ = (y.u[:, j - 1] .+ y.u[:, j]) ./ 2
+        NH.dot_product!(d, m, W.η[:, j] .+ ṽ, W.η[:, j] .- ṽ)
+        rhs += v.dzh[j] * dot(y.w[:, j], Mh .* d)
+    end
+    @test lhs ≈ rhs rtol = 1e-10
     @test abs(sum((Mh' * dy.ρ) .* v.dz')) < 1e-14 * sum(abs, Mh .* dy.ρ .* v.dz')
     # a horizontally homogeneous column in balance stays at rest
     rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)

@@ -26,7 +26,10 @@ solved by the kernels of `TRiSKNonhydrostatic` (`theta_interface_kernel!`,
 `vertical_solve_kernel!`, off-centring `beta`, Rayleigh damping of `w` above
 `damping_height`, `vertical_theta` as there) with the consistent CG1 mass of `w`
 in the vertical (`vertical_mass=:consistent`, tridiagonal) or the lumped one
-(`:lumped`, pointwise at the interfaces as in `TRiSKNonhydrostatic`). Horizontal operators act layer by
+(`:lumped`, pointwise at the interfaces as in `TRiSKNonhydrostatic`).
+`vertical_advection=:vector_invariant` adds the vertical coupling of the
+vector-invariant form, `-η w` in the `u` equation and `η ⋅ ṽ - ∂K/∂z` in the
+`w` equation (`horizontal_tendency!`); `:none` leaves it out. Horizontal operators act layer by
 layer with the 2D kite operators (scaled from the unit sphere by `radius`).
 """
 struct KiteNonhydrostatic{SW, V, W, BE}
@@ -41,16 +44,20 @@ struct KiteNonhydrostatic{SW, V, W, BE}
     omega::Float64
     beta::Float64
     vertical_theta::Int  # 0 centred, 1 upwind in the flux, 2 upwind also in ∂π/∂z
+    vertical_advection::Bool
     backend::BE
 end
 
 function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; height_order::Integer=k + 1,
                             radius::Real=6.37122e6, omega::Real=7.292e-5, beta::Real=0.65,
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
-                            vertical_mass::Symbol=:consistent, backend=KernelAbstractions.CPU())
+                            vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
+                            backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
+    vertical_advection in (:vector_invariant, :none) ||
+        throw(ArgumentError("vertical_advection must be :vector_invariant or :none"))
     # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
     # so the horizontal fluxes of ρ and ρθ do not create θ′
     sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], backend)
@@ -67,10 +74,13 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
             F=KernelAbstractions.zeros(backend, Float64, nu), Fθ=KernelAbstractions.zeros(backend, Float64, nu),
             g=KernelAbstractions.zeros(backend, Float64, nu), gθ=KernelAbstractions.zeros(backend, Float64, nu),
             dy=(u=z(nu, nlev), ρ=z(nh, nlev), ρθ=z(nh, nlev)),
+            K=z(nh, nlev), Fs=z(nu, nlev), η=z(nu, nlev + 1), a=KernelAbstractions.zeros(backend, Float64, nu),
+            b=KernelAbstractions.zeros(backend, Float64, nu),
             y0=(u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev)))
     dev(x) = to_backend(backend, x)
     return KiteNonhydrostatic(sw, vgrid, dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work,
-                              Float64(radius), Float64(omega), Float64(beta), vtheta, backend)
+                              Float64(radius), Float64(omega), Float64(beta), vtheta, vertical_advection == :vector_invariant,
+                              backend)
 end
 
 num_layers(m::KiteNonhydrostatic) = num_layers(m.vgrid)
@@ -249,48 +259,106 @@ end
 """
     horizontal_tendency!(dy, m, y)
 
-Horizontal terms of `(u, ρ, ρθ)` in every layer, with the 2D kite operators
-and `ρ` in place of the height (`a` the radius, `B` the kite divergence):
+Explicit tendencies in every layer, with the 2D kite operators and `ρ` in place
+of the height (`a` the radius, `B` the kite divergence):
 
     F = Π_U(ρ u),  Fθ = Π_U(θ F),  θ = ρθ/ρ and π = (R ρθ/p0)^(R/cv) at the nodes,
-    u̇ = M_u⁻¹ (-Bᵀ K / a - ∫ (ζ/a + f)/ρ (r̂ × F) ⋅ v) - c_p Π_U(θ ∇π),  ∇π = M_u⁻¹ Bᵀ π / a,
-    ρ̇ = M_h⁻¹ B F / a,  ρθ̇ = M_h⁻¹ B Fθ / a.
+    u̇ = M_u⁻¹ (-Bᵀ K / a - ∫ (ζ/a + f)/ρ (r̂ × F) ⋅ v) - c_p Π_U(θ ∇π) - (η w)_k,  ∇π = M_u⁻¹ Bᵀ π / a,
+    ρ̇ = M_h⁻¹ B F / a,  ρθ̇ = M_h⁻¹ B Fθ / a,
 
-The kinetic energy, PV and pressure terms exchange energy without loss:
-`Σ_k dz_k (Fᵀ M_u u̇ + (K + g z)ᵀ M_h ρ̇ + c_p πᵀ M_h ρθ̇) = 0`. Vertical
-advection is not included.
+and with `vertical_advection` the explicit `w` tendency `m.work.tw`:
+
+    η_j = (u_j - u_{j-1}) / dzh_j - M_u⁻¹ Bᵀ w_j / a   (horizontal vorticity at interface j),
+    (η w)_k = (dzh_k Π_U(w_k η_k) + dzh_{k+1} Π_U(w_{k+1} η_{k+1})) / 2dz_k,
+    tw_j = M_h⁻¹ ∫ η_j ⋅ (u_{j-1} + u_j)/2 ψ - (K_j - K_{j-1}) / dzh_j,
+
+where `K` includes `(dzh_k w_k² + dzh_{k+1} w_{k+1}²)/4dz_k`. The kinetic energy,
+PV and pressure terms exchange energy without loss:
+`Σ_k dz_k (Fᵀ M_u u̇ + (K + g z)ᵀ M_h ρ̇ + c_p πᵀ M_h ρθ̇) = 0`, and the two
+η terms are adjoint, `Σ_k dz_k u_kᵀ M_u (η w)_k = Σ_j dzh_j w_jᵀ M_h (η ⋅ ṽ)_j`.
 """
 function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
-    sw, w, a = m.horizontal, m.work, m.radius
+    sw, w, a, v = m.horizontal, m.work, m.radius, m.vgrid
     Q, s = sw.quadrature, sw.work
     tz, tu, th = sw.row_buffers
-    nk = num_local_kites(sw.distribution)
+    nk, nlev = num_local_kites(sw.distribution), num_layers(m)
     w.θ .= y.ρθ ./ y.ρ
     @. w.π = (Rd * y.ρθ / P0)^(Rd / Cvd)
-    for k in 1:num_layers(m)
+    # mass flux and kinetic energy of every layer (with the w² part)
+    for k in 1:nlev
+        fill!(s.rhs_K, 0.0)
+        weighted_projection!(view(w.Fs, :, k), m, view(y.u, :, k), view(y.ρ, :, k); kinetic=s.rhs_K)
+        ldiv!(view(w.K, :, k), sw.Mh_local_solver, s.rhs_K)
+    end
+    if m.vertical_advection
+        @views @. w.K += (m.dzh[1:nlev]' * y.w[:, 1:nlev]^2 + m.dzh[2:nlev + 1]' * y.w[:, 2:nlev + 1]^2) / (4 * m.dz')
+        # horizontal vorticity η = ∂u/∂z - ∇w at the interior interfaces
+        fill!(w.η, 0.0)
+        for j in 2:nlev
+            row_mul!(tu, sw.Bt_owned, view(y.w, :, j), 1 / a)
+            ldiv!(w.a, sw.Mu_solver, tu)
+            @views @. w.η[:, j] = (y.u[:, j] - y.u[:, j - 1]) / v.dzh[j] - w.a
+        end
+    end
+    for k in 1:nlev
         u, ρ, θ, π = view(y.u, :, k), view(y.ρ, :, k), view(w.θ, :, k), view(w.π, :, k)
-        du = view(dy.u, :, k)
-        # relative vorticity, mass flux and kinetic energy of the layer
+        F, du = view(w.Fs, :, k), view(dy.u, :, k)
+        # relative vorticity of the layer
         row_mul!(tz, sw.R_owned, u, -1 / a)
         copyto!(s.rhs_ζ, 1, tz, 1, length(tz))
         ldiv!(s.ζ, sw.Mz_solver, s.rhs_ζ)
-        fill!(s.rhs_K, 0.0)
-        weighted_projection!(w.F, m, u, ρ; kinetic=s.rhs_K)
-        ldiv!(s.K, sw.Mh_local_solver, s.rhs_K)
         # momentum: kinetic energy gradient and PV term, then the pressure gradient c_p θ ∇π
-        row_mul!(tu, sw.Bt_owned, s.K, -1 / a)
+        row_mul!(tu, sw.Bt_owned, view(w.K, :, k), -1 / a)
         copyto!(s.rhs_u, 1, tu, 1, length(tu))
-        ShallowWater.launch!(ShallowWater.vorticity_kernel!, s.rhs_u, nk, s.rhs_u, w.F, ρ, s.ζ, Q.piola, Q.dA,
+        ShallowWater.launch!(ShallowWater.vorticity_kernel!, s.rhs_u, nk, s.rhs_u, F, ρ, s.ζ, Q.piola, Q.dA,
                              Q.normal, Q.coriolis, sw.φu, sw.iu, sw.su, sw.φh, sw.ih, sw.φz, sw.iz, true)
         ldiv!(du, sw.Mu_solver, s.rhs_u)
         row_mul!(tu, sw.Bt_owned, π, 1 / a)
         ldiv!(w.g, sw.Mu_solver, tu)
         weighted_projection!(w.gθ, m, w.g, θ)
         du .-= Cpd .* w.gθ
+        # vertical coupling -η w at the two interfaces of the layer
+        if m.vertical_advection
+            for (j, c) in ((k, v.dzh[k]), (k + 1, v.dzh[k + 1]))
+                2 <= j <= nlev || continue
+                weighted_projection!(w.gθ, m, view(w.η, :, j), view(y.w, :, j))
+                du .-= (c / (2 * v.dz[k])) .* w.gθ
+            end
+        end
         # mass and ρθ
+        copyto!(w.F, F)
         horizontal_divergence!(view(dy.ρ, :, k), view(dy.ρθ, :, k), m, θ)
     end
+    fill!(w.tw, 0.0)
+    if m.vertical_advection
+        for j in 2:nlev
+            @views @. w.a = w.η[:, j] + (y.u[:, j - 1] + y.u[:, j]) / 2
+            @views @. w.b = w.η[:, j] - (y.u[:, j - 1] + y.u[:, j]) / 2
+            dot_product!(view(w.tw, :, j), m, w.a, w.b)
+            @views @. w.tw[:, j] -= (w.K[:, j] - w.K[:, j - 1]) / v.dzh[j]
+        end
+    end
     return dy
+end
+
+"""
+    dot_product!(out, m, p, q)
+
+`M_h⁻¹ ∫ a ⋅ b ψ` into the height space for `p = a + b`, `q = a - b` (velocity
+space): polarization of the kinetic energy, `a ⋅ b = (|p|² - |q|²)/4`.
+"""
+function dot_product!(out, m::KiteNonhydrostatic, p, q)
+    sw = m.horizontal
+    Q, s = sw.quadrature, sw.work
+    nk = num_local_kites(sw.distribution)
+    for (x, rhs) in ((p, s.rhs_K), (q, s.rhs_h))
+        fill!(rhs, 0.0)
+        ShallowWater.launch!(ShallowWater.kinetic_and_flux_kernel!, rhs, nk, rhs, s.rhs_F, x, s.K, Q.piola, Q.dA,
+                             sw.φu, sw.iu, sw.su, sw.φh, sw.ih, false)
+    end
+    s.rhs_K .= (s.rhs_K .- s.rhs_h) ./ 2
+    ldiv!(out, sw.Mh_local_solver, s.rhs_K)
+    return out
 end
 
 "`dρ = M_h⁻¹ B F / a` and `dρθ = M_h⁻¹ B Π_U(θ F) / a` for the flux `F` in `m.work.F`."
@@ -311,8 +379,7 @@ end
 One HEVI stage `y = y0 + τ T(ys)`: the horizontal momentum terms of the stage
 state, then (forward–backward) the mass and ρθ fluxes of the new velocity with
 `ρ` and `θ` of the stage state, then the implicit vertical terms in every
-column (`vertical_stage!`). Not yet included: vertical advection of `u` and the
-horizontal terms of `w` (`tw = 0`).
+column (`vertical_stage!`) with the explicit `w` tendency of the stage state.
 """
 function stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
     w = m.work
@@ -324,7 +391,6 @@ function stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
     end
     @. w.ρexpl = y0.ρ + τ * w.ρexpl
     @. w.ρθexpl = y0.ρθ + τ * w.ρθexpl
-    fill!(w.tw, 0.0)
     return vertical_stage!(m, y, y0, ys, τ)
 end
 

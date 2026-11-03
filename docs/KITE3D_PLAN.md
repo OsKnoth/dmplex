@@ -105,8 +105,10 @@ decays on hexagons 3 and 4.
 
 **Still open:** the unperturbed baroclinic wave on hexagon 3 grows from day 1 in the jet (33–39°,
 levels 6–7; w 1.8 m/s and Δu 2 m/s at 48 h), while `TRiSKNonhydrostatic` (hexagon 4) stays bounded
-for 48 h also without Smagorinsky diffusion (w ≈ 1e-2 m/s). Next: the vertical advection of `u` and
-the horizontal advection of `w` (step 3b), which the kite model does not have yet.
+for 48 h also without Smagorinsky diffusion (w ≈ 1e-2 m/s). Step 3b, the vertical coupling of the
+vector-invariant form (`vertical_advection=:vector_invariant`, default: `-η w` in the `u` equation,
+`η ⋅ ṽ - ∂K/∂z` in the `w` equation, exactly adjoint), slows it (w 0.9 m/s at 48 h) but does not
+remove it.
 
 Record of the search:
 
