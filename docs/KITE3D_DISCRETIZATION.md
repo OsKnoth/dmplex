@@ -61,8 +61,10 @@ and $w$.
 
 - $M_H$: **diagonal**. It uses the Radau nodes as quadrature (`lumped=true`),
   $M_{H,ii} = \sum_{K\ni x_i} \omega_i\,|J_K(x_i)|$. This is exact only for affine kites.
-- $M_U$: exact quadrature, **block diagonal** with one block per dual cell (the kites around a
-  primal vertex), inverted exactly.
+- $M_U$: **block diagonal** with one block per dual cell (the kites around a primal vertex),
+  inverted exactly. It uses the same 3×3 Gauss rule as the projections (`mass_degree`), so that
+  $\Pi_U(c\,v) = c\,v$ holds exactly for constants also on non-affine kites. With a different rule
+  the $\rho\theta$ flux of a layer at rest creates $\theta'$, which caused the sub-cell instability.
 - $M_Z$: GLL lumped, diagonal.
 - Vertical, $\rho$ and $\rho\theta$ ($DG_0$): $\mathrm{diag}(\Delta z_k)$, exact.
 - Vertical, $w$ ($CG_1$): **consistent** by default (`vertical_mass=:consistent`), tridiagonal, with
@@ -181,9 +183,8 @@ The explicit horizontal time-step limit on hexagon 3 is between 250 and 300 s.
 
 ## Points to check
 
-- The diagonal $M_H$ (Radau quadrature) is inexact on non-affine kites, while $B$ and the
-  projections use exact Gauss quadrature. This differs between the cubed sphere (affine kites,
-  stable) and the hexagon and triangle meshes (non-affine, unstable).
+- Solved: the velocity mass and the projections must use the same rule (see $M_U$). $B$ and $R$
+  have no metric (contravariant Piola) and are exact.
 - The vertical $w$ mass: the consistent and the lumped $CG_1$ mass give the same growth.
 - $\theta$ at the quadrature points is the $Q_2$ interpolation of the nodal $\theta$, used in
   $F_\theta$ and in the pressure gradient. Horizontally, $\theta$ is never upwinded.

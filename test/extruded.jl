@@ -231,6 +231,12 @@ end
         scale += v.dz[k] * sum(abs, p)
     end
     @test abs(rate) < 1e-14 * scale
+    # the velocity mass uses the rule of the projections: Π_U(c v) = c v on the non-affine kites,
+    # so the ρθ flux Π_U(θ̄ F) of a layer with constant θ̄ is θ̄ F and creates no θ′
+    u = randn(MersenneTwister(3), size(y.u, 1))
+    Πu = similar(u)
+    NH.weighted_projection!(Πu, m, u, fill(300.0, num_columns(m)))
+    @test Πu ≈ 300 .* u rtol = 1e-13
     @test abs(sum((Mh' * dy.ρ) .* v.dz')) < 1e-14 * sum(abs, Mh .* dy.ρ .* v.dz')
     # a horizontally homogeneous column in balance stays at rest
     rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)

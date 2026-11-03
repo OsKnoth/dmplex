@@ -78,7 +78,8 @@ lowest vertical order, serial. The state is `(u, w, ρ, ρθ)` as arrays (dofs �
 3. **Horizontal terms per layer** (done without vertical advection: `horizontal_tendency!`, `stage!`,
    `step!`; F = Π_U(ρu), Fθ = Π_U(θF), pressure gradient −c_p Π_U(θ∇π) with ∇π = M_u⁻¹Bᵀπ/a, which
    makes the energy exchange exact (residual 1e-16 of the summed products); rest state at rest.
-   **Open: a sub-cell instability**, see below) from the kite shallow-water operators. Tests: mass conservation
+   The sub-cell instability of the rest state, see below, came from the quadrature of the velocity
+   mass and is fixed) from the kite shallow-water operators. Tests: mass conservation
    to round-off, energy exchange between the horizontal and vertical terms.
 4. **Test cases:**
    - inertia-gravity wave (Skamarock–Klemp on the plane with `create_periodic_plane`, the
@@ -87,7 +88,27 @@ lowest vertical order, serial. The state is `(u, w, ρ, ρθ)` as arrays (dofs �
 5. **GPU** with KernelAbstractions, as the 2D kite model.
 6. **Higher vertical order** (v = 1) and the θ reconstruction in the layers.
 
-## Open: sub-cell instability on non-affine kites (2026-11-03)
+## Sub-cell instability on non-affine kites (2026-11-03, solved)
+
+**Cause:** the velocity mass `M_U` was assembled with the default rule of the space (degree 6), the
+projections `Π_U(h v)` with the 3×3 rule of `KiteQuadrature` (degree 4). On non-affine kites the
+metric `JᵀJ/det J` is rational, so the two differ and `Π_U(c v) = c M_U⁻¹ R v ≠ c v` for a constant
+`c` (1.4e-2 on hexagon 3, 1e-4 on the cubed sphere from the curvature). Then the ρθ flux
+`Π_U(θ̄ F) = θ̄ P F` is not `θ̄` times the mass flux `F`: the horizontal fluxes create sub-cell `θ′`
+(entropy) at rest. The energy stays conserved, but the Casimir `∫ ρ f(θ)` that makes the stratified
+rest state stable does not, and the mode lives on the released potential energy. On affine kites
+(cubed sphere) the integrand is a polynomial, both rules are exact and `P = I`.
+
+**Fix:** `NonlinearKiteShallowWater(...; mass_degree)`, and `KiteNonhydrostatic` passes the degree
+of the projections, so `Π_U(c v) = c v` to round-off (tested). The noise on the rest state now
+decays on hexagons 3 and 4.
+
+**Still open:** the unperturbed baroclinic wave on hexagon 3 grows from day 1 in the jet (33–39°,
+levels 6–7; w 1.8 m/s and Δu 2 m/s at 48 h), while `TRiSKNonhydrostatic` (hexagon 4) stays bounded
+for 48 h also without Smagorinsky diffusion (w ≈ 1e-2 m/s). Next: the vertical advection of `u` and
+the horizontal advection of `w` (step 3b), which the kite model does not have yet.
+
+Record of the search:
 
 The full step (horizontal explicit, columns implicit) is unstable on the hexagon and triangle meshes:
 small noise on a stratified rest state grows by about ×6 every 2 h (hexagon 3, 10 layers), the
