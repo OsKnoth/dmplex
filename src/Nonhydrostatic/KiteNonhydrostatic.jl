@@ -6,7 +6,7 @@
 """
     KiteNonhydrostatic(primal, vgrid, k=1; height_order=k + 1, radius=6.37122e6, omega=7.292e-5,
                        beta=0.65, damping_height=Inf, damping_rate=0, vertical_theta=:upwind,
-                       backend=CPU())
+                       vertical_mass=:consistent, backend=CPU())
 
 Dry compressible Euler equations on the extruded kite mesh of `primal` with
 the spaces of `NonlinearKiteShallowWater(primal, k)` (its `horizontal` part, on
@@ -24,7 +24,9 @@ mass matrix is diagonal and every height dof carries an independent column for
 the vertically implicit terms (`num_columns`) at `column_points`. They are
 solved by the kernels of `TRiSKNonhydrostatic` (`theta_interface_kernel!`,
 `vertical_solve_kernel!`, off-centring `beta`, Rayleigh damping of `w` above
-`damping_height`, `vertical_theta` as there). Horizontal operators act layer by
+`damping_height`, `vertical_theta` as there) with the consistent CG1 mass of `w`
+in the vertical (`vertical_mass=:consistent`, tridiagonal) or the lumped one
+(`:lumped`, pointwise at the interfaces as in `TRiSKNonhydrostatic`). Horizontal operators act layer by
 layer with the 2D kite operators (scaled from the unit sphere by `radius`).
 """
 struct KiteNonhydrostatic{SW, V, W, BE}
@@ -45,7 +47,7 @@ end
 function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; height_order::Integer=k + 1,
                             radius::Real=6.37122e6, omega::Real=7.292e-5, beta::Real=0.65,
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
-                            backend=KernelAbstractions.CPU())
+                            vertical_mass::Symbol=:consistent, backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
@@ -57,7 +59,8 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
     end
     z(n, l) = KernelAbstractions.zeros(backend, Float64, n, l)
     work = (θ=z(nh, nlev), θi=z(nh, nlev + 1), θm=z(nh, nlev), band=KernelAbstractions.zeros(backend, Float64, nh, nlev, 2),
-            cprime=z(nh, nlev + 1), dprime=z(nh, nlev + 1), π0=z(nh, nlev), γ0=z(nh, nlev),
+            cprime=z(nh, nlev + 1), dprime=z(nh, nlev + 1),
+            wmass=to_backend(backend, Nonhydrostatic.vertical_mass(vgrid, vertical_mass)), π0=z(nh, nlev), γ0=z(nh, nlev),
             tw=z(nh, nlev + 1), ρexpl=z(nh, nlev), ρθexpl=z(nh, nlev), π=z(nh, nlev),
             F=KernelAbstractions.zeros(backend, Float64, nu), Fθ=KernelAbstractions.zeros(backend, Float64, nu),
             g=KernelAbstractions.zeros(backend, Float64, nu), gθ=KernelAbstractions.zeros(backend, Float64, nu),
@@ -189,7 +192,8 @@ function vertical_stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
     launch!(m, theta_interface_kernel!, nh, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ys.w, m.dz, m.dzh, m.wlow,
             τ, nlev, m.vertical_theta > 0)
     launch!(m, vertical_solve_kernel!, nh, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
-            ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, τ, m.beta, nlev, m.vertical_theta == 2)
+            ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, τ, m.beta, nlev,
+            m.vertical_theta == 2)
     return y
 end
 

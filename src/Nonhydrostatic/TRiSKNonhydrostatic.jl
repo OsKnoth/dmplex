@@ -172,7 +172,7 @@ function TRiSKNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=
             η=zeros2(ne, nlev + 1),
             F=zeros2(ne, nlev), Fθ=zeros2(ne, nlev), tvn=zeros2(ne, nlev), tw=zeros2(nc, nlev + 1),
             ρexpl=zeros2(nc, nlev), ρθexpl=zeros2(nc, nlev), cprime=zeros2(nc, nlev + 1),
-            dprime=zeros2(nc, nlev + 1), δ=zeros2(nc, nlev), ζ=zeros2(nv, nlev), Lvn=zeros2(ne, nlev),
+            dprime=zeros2(nc, nlev + 1), wmass=to_backend(backend, vertical_mass(vgrid, :lumped)), δ=zeros2(nc, nlev), ζ=zeros2(nv, nlev), Lvn=zeros2(ne, nlev),
             hd=zeros2(ne, nlev), hρθ=zeros2(nc, nlev), uc=ntuple(_ -> zeros2(nc, nlev), 3),
             uv=ntuple(_ -> zeros2(nv, nlev), 3), Ke=zeros2(ne, nlev), ρKc=zeros2(nc, nlev), ρKv=zeros2(nv, nlev),
             θi=zeros2(nc, nlev + 1), ρe=zeros2(ne, nlev), Fs=zeros2(ne, nlev), θm=zeros2(nc, nlev),
@@ -690,6 +690,25 @@ third-order upwind interface values of the result, as ICON-IAP
     end
 end
 
+"""
+    vertical_mass(v, kind) -> 3 × (nlev + 1)
+
+Rows of the vertical mass matrix of `w` divided by `dzh` for
+`vertical_solve_kernel!`: `:lumped` (identity) or `:consistent` (CG1 hat
+functions, tridiagonal, rows summing to one).
+"""
+function vertical_mass(v::VerticalGrid, kind::Symbol)
+    n = num_layers(v)
+    M = zeros(3, n + 1)
+    M[2, :] .= 1
+    kind == :lumped && return M
+    kind == :consistent || throw(ArgumentError("vertical_mass must be :consistent or :lumped"))
+    for j in 2:n
+        M[:, j] .= (v.dz[j - 1], 2 * (v.dz[j - 1] + v.dz[j]), v.dz[j]) ./ (6 * v.dzh[j])
+    end
+    return M
+end
+
 "Exner pressure `π0` of the base state and `γ0 = κ π0 / ρθ0`, its derivative by `ρθ`, once per step."
 @kernel function base_exner_kernel!(π0, γ0, @Const(ρθ0))
     i, k = @index(Global, NTuple)
@@ -707,13 +726,16 @@ explicit parts, with `θ` at the interfaces from `theta_interface_kernel!` in
 the `ρθ` flux (and with `iap_theta` in the pressure gradient, else `θ` of the
 stage state linearly interpolated), `ρ` there from the stage state and the
 linearization of `π` around the base state (`π0`, `γ0` of
-`base_exner_kernel!`). The coefficients of the cells and interfaces next to
-interface `j` are carried along the sweep.
+`base_exner_kernel!`). `wmass[:, j]` is row `j` of the vertical mass matrix of
+`w` divided by `dzh[j]` (lower, diagonal, upper): `(0, 1, 0)` lumped, pointwise
+at the interfaces; `(dz[j-1], 2(dz[j-1] + dz[j]), dz[j]) / 6dzh[j]` for the
+consistent CG1 mass, which keeps the system tridiagonal. The coefficients of
+the cells and interfaces next to interface `j` are carried along the sweep.
 """
 @kernel function vertical_solve_kernel!(w, ρ, ρθ, cp_, dp_, @Const(w0), @Const(ρθ0), @Const(π0), @Const(γ0),
                                         @Const(θs), @Const(θi), @Const(ρs), @Const(tw), @Const(ρexpl),
-                                        @Const(ρθexpl), @Const(dz), @Const(dzh), @Const(wlow), @Const(rayleigh), τ, β,
-                                        nlev, iap_theta)
+                                        @Const(ρθexpl), @Const(dz), @Const(dzh), @Const(wlow), @Const(rayleigh),
+                                        @Const(wmass), τ, β, nlev, iap_theta)
     i = @index(Global)
     @inbounds begin
         θh(j) = iap_theta ? θi[i, j] : wlow[j] * θs[i, j - 1] + (1 - wlow[j]) * θs[i, j]
@@ -738,10 +760,11 @@ interface `j` are carried along the sweep.
             Bu, Cu = B(j + 1), C(j + 1)
             θj = θh(j)
             aj = τ * Cpd * θj * β / dzh[j]
-            lower = -aj * γl * Bl
-            diag = 1 + τ * rayleigh[j] + aj * (γu + γl) * Bc
-            upper = -aj * γu * Bu
-            rhs = w0[i, j] + τ * (tw[i, j] - GRAV) - τ * Cpd * θj * (1 - β) * (π0u - π0l) / dzh[j] -
+            ml, md, mu = wmass[1, j], wmass[2, j], wmass[3, j]
+            lower = ml - aj * γl * Bl
+            diag = md + τ * rayleigh[j] + aj * (γu + γl) * Bc
+            upper = mu - aj * γu * Bu
+            rhs = ml * w0[i, j - 1] + md * w0[i, j] + mu * w0[i, j + 1] + τ * (tw[i, j] - GRAV) - τ * Cpd * θj * (1 - β) * (π0u - π0l) / dzh[j] -
                   aj * (πu - πl) - aj * (-γu * Cu + (γu + γl) * Cc - γl * Cl)
             denom = diag - lower * cp_[i, j - 1]
             cp_[i, j] = upper / denom
@@ -813,7 +836,8 @@ function stage!(m::TRiSKNonhydrostatic, y, y0, ys, τ)
     launch!(m, theta_interface_kernel!, nc, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ys.w, m.dz, m.dzh, m.wlow,
             τ, nlev, m.vertical_theta > 0)
     launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
-            ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, τ, m.beta, nlev, m.vertical_theta == 2)
+            ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, τ, m.beta, nlev,
+            m.vertical_theta == 2)
     return y
 end
 

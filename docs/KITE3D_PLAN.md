@@ -99,6 +99,10 @@ unperturbed baroclinic wave blows up within 16 h. What is known:
   `:centred`, `:upwind` θ and β = 0.5, 0.65, 1 all grow.
 - **Not the horizontal terms alone:** one layer (no vertical motion) decays, two layers stay bounded.
 - **Not rotation:** the same growth with Ω = 0.
+- **Not the vertical mass of w:** the consistent CG1 mass (tridiagonal, now the default) and the
+  lumped one grow alike.
+- **The 2D kite shallow-water model** runs on planes of all three grid types (quadrilaterals,
+  triangles, hexagons), and the one-layer 3D model is stable, so the horizontal pair alone is fine.
 - **Mesh:** grows on hexagons (plain and spring-optimized) and faster on triangles, largest near
   the pentagons; bounded on the cubed sphere, whose kites are affine (squares). The kites of
   hexagons and triangles are not affine.
