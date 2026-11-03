@@ -27,7 +27,10 @@ solved by the kernels of `TRiSKNonhydrostatic` (`theta_interface_kernel!`,
 `damping_height`, `vertical_theta` as there) with the consistent CG1 mass of `w`
 in the vertical (`vertical_mass=:consistent`, tridiagonal) or the lumped one
 (`:lumped`, pointwise at the interfaces as in `TRiSKNonhydrostatic`).
-`vertical_advection=:vector_invariant` adds the vertical coupling of the
+`velocity` is the velocity space as in `NonlinearKiteShallowWater`: `:rt`
+(`KiteBrokenRT(k)`, default) or `:dual_radau` (`KiteDualRadau(k)`, the equal
+order pair of Wess et al. with `height_order = k`), always with the exact mass in
+the rule of the projections. `vertical_advection=:vector_invariant` adds the vertical coupling of the
 vector-invariant form, `-η w` in the `u` equation and `η ⋅ ṽ - ∂K/∂z` in the
 `w` equation (`horizontal_tendency!`); `:none` leaves it out. Horizontal operators act layer by
 layer with the 2D kite operators (scaled from the unit sphere by `radius`).
@@ -52,7 +55,7 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                             radius::Real=6.37122e6, omega::Real=7.292e-5, beta::Real=0.65,
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
                             vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
-                            backend=KernelAbstractions.CPU())
+                            velocity::Symbol=:rt, backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
@@ -60,7 +63,9 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
         throw(ArgumentError("vertical_advection must be :vector_invariant or :none"))
     # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
     # so the horizontal fluxes of ρ and ρθ do not create θ′
-    sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], backend)
+    # (also for the dual Radau velocity of Wess et al.: its exact mass, not the nodal one)
+    sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], velocity,
+                                   velocity_lumped=false, backend)
     nh, nu, nlev = length(height_dofs(sw)), length(velocity_dofs(sw)), num_layers(vgrid)
     z_top = vgrid.z_half[end]
     rayleigh = map(vgrid.z_half) do z

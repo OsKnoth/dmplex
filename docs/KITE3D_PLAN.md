@@ -110,6 +110,27 @@ vector-invariant form (`vertical_advection=:vector_invariant`, default: `-η w` 
 `η ⋅ ṽ - ∂K/∂z` in the `w` equation, exactly adjoint), slows it (w 0.9 m/s at 48 h) but does not
 remove it.
 
+The growing jet mode (2026-11-03, open), unperturbed baroclinic wave, dt 150 s, 10 layers:
+
+- **Spatial:** the same growth at dt 50 and 150 s; faster on finer meshes (max|w| at 36 h:
+  hexagon 2 0.03, hexagon 3 0.17, hexagon 4 5 m/s).
+- **Pictures** (hexagon 3 and cubed sphere 10, 42 h): node-scale noise in w and θ′ (up to ±20 K in
+  the upper levels) in the jet at 30–55°, also inside the primal cells; somewhat stronger next to
+  primal edges that the flow crosses (40 % more w than next to edges along the flow); on the cubed
+  sphere strongest at the cube corners and edges. Not specific to the icosahedral grid.
+- **Pairs** (hexagon 3, max|w| at 42 h): RT1 × Q2 (default) 0.55 m/s, RT1 × Q1 1.7, RT1 × Q0
+  0.6 (unbalanced from the start, bounded); Wess et al., Q2 × dual Radau 2: 1.6 m/s,
+  **Q1 × dual Radau 1: 0.024 m/s, bounded** (TRiSK hexagon 4: 0.01). Velocity choice
+  `KiteNonhydrostatic(...; velocity=:dual_radau)` with the exact velocity mass in the rule of the
+  projections (`velocity_lumped=false`), so `Π_U(c v) = c v` also holds there.
+- **Consistency at t = 0:** ρθ̇ converges at first order and is not concentrated at primal edges;
+  the w tendency of the balanced state is 3e-14; u̇ converges in the lower layers, in the upper
+  layers it is set by the vertical resolution (second order in Δz, from the discrete hydrostatic
+  integration of the initial state, as for TRiSK).
+- **Open question:** the central trace of the broken θ on the primal faces in the ρθ flux (B pairs
+  the traces from both sides with the single-valued normal component of Π_U(θF)); an upwind trace
+  would be the DG-type stabilization.
+
 Record of the search:
 
 The full step (horizontal explicit, columns implicit) is unstable on the hexagon and triangle meshes:
