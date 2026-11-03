@@ -211,3 +211,33 @@ end
     @test maximum(y.w) > 0.01
     @test y.ρ * m.vgrid.dz ≈ column rtol = 1e-14
 end
+
+@testset "kite nonhydrostatic: horizontal terms" begin
+    NH = dmplex.Nonhydrostatic
+    m = KiteNonhydrostatic(create_hexagon_mesh(2), VerticalGrid(6, 30000.0; stretch=3))
+    v, Mh = m.vgrid, column_weights(m)
+    y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z))
+    dy = map(similar, (u=y.u, ρ=y.ρ, ρθ=y.ρθ))
+    horizontal_tendency!(dy, m, y)
+    # kinetic energy, PV and pressure terms exchange energy without loss, mass is conserved
+    rate = scale = 0.0
+    for k in 1:num_layers(v)
+        F, rhs_K = similar(y.u[:, k]), zeros(length(Mh))
+        NH.weighted_projection!(F, m, y.u[:, k], y.ρ[:, k]; kinetic=rhs_K)
+        π = (NH.Rd .* y.ρθ[:, k] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
+        p = [F .* (m.horizontal.Mu * dy.u[:, k]); (rhs_K .+ NH.GRAV * v.z_full[k] .* Mh) .* dy.ρ[:, k];
+             NH.Cpd .* π .* Mh .* dy.ρθ[:, k]]
+        rate += v.dz[k] * sum(p)
+        scale += v.dz[k] * sum(abs, p)
+    end
+    @test abs(rate) < 1e-14 * scale
+    @test abs(sum((Mh' * dy.ρ) .* v.dz')) < 1e-14 * sum(abs, Mh .* dy.ρ .* v.dz')
+    # a horizontally homogeneous column in balance stays at rest
+    rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
+    y = initial_state(m, rest)
+    ys = zero_state(m)
+    for _ in 1:3
+        step!(m, y, 150.0, ys)
+    end
+    @test maximum(abs, y.u) < 1e-10 && maximum(abs, y.w) < 1e-10
+end

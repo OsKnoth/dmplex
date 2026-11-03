@@ -1,6 +1,7 @@
 # Nonhydrostatic model on the extruded kite mesh: the spaces of the 2D kite model times the
 # layers of a vertical grid (docs/KITE3D_PLAN.md). Step 1: spaces, state, projections and the
-# mass divergence; step 2: the vertically implicit column solve.
+# mass divergence; step 2: the vertically implicit column solve; step 3: the horizontal terms
+# per layer and the HEVI step.
 
 """
     KiteNonhydrostatic(primal, vgrid, k=1; height_order=k + 1, radius=6.37122e6, omega=7.292e-5,
@@ -49,7 +50,7 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
     sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], backend)
-    nh, nlev = length(height_dofs(sw)), num_layers(vgrid)
+    nh, nu, nlev = length(height_dofs(sw)), length(velocity_dofs(sw)), num_layers(vgrid)
     z_top = vgrid.z_half[end]
     rayleigh = map(vgrid.z_half) do z
         z > damping_height ? damping_rate * sin(π / 2 * (z - damping_height) / (z_top - damping_height))^2 : 0.0
@@ -57,7 +58,11 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
     z(n, l) = KernelAbstractions.zeros(backend, Float64, n, l)
     work = (θ=z(nh, nlev), θi=z(nh, nlev + 1), θm=z(nh, nlev), band=KernelAbstractions.zeros(backend, Float64, nh, nlev, 2),
             cprime=z(nh, nlev + 1), dprime=z(nh, nlev + 1), π0=z(nh, nlev), γ0=z(nh, nlev),
-            tw=z(nh, nlev + 1), ρexpl=z(nh, nlev), ρθexpl=z(nh, nlev))
+            tw=z(nh, nlev + 1), ρexpl=z(nh, nlev), ρθexpl=z(nh, nlev), π=z(nh, nlev),
+            F=KernelAbstractions.zeros(backend, Float64, nu), Fθ=KernelAbstractions.zeros(backend, Float64, nu),
+            g=KernelAbstractions.zeros(backend, Float64, nu), gθ=KernelAbstractions.zeros(backend, Float64, nu),
+            dy=(u=z(nu, nlev), ρ=z(nh, nlev), ρθ=z(nh, nlev)),
+            y0=(u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev)))
     dev(x) = to_backend(backend, x)
     return KiteNonhydrostatic(sw, vgrid, dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work,
                               Float64(radius), Float64(omega), Float64(beta), vtheta, backend)
@@ -212,5 +217,124 @@ function vertical_step!(m::KiteNonhydrostatic, y, dt, ys=zero_state(m))
     vertical_stage!(m, y, y0, s, dt / 2)
     foreach(copyto!, s, (w=y.w, ρ=y.ρ, ρθ=y.ρθ))
     vertical_stage!(m, y, y0, s, dt)
+    return y
+end
+
+# --- horizontal terms (step 3) -----------------------------------------------------
+
+"""
+    weighted_projection!(out, m, v, h; kinetic=nothing)
+
+`Π_U(h v)`: the velocity-space field `v` times the height-space field `h` at
+the quadrature points, projected into the velocity space (one solve with the
+block-diagonal velocity mass). With `kinetic`, `∫ |v|²/2 η` is added to it.
+"""
+function weighted_projection!(out, m::KiteNonhydrostatic, v, h; kinetic=nothing)
+    sw = m.horizontal
+    Q, w = sw.quadrature, sw.work
+    rhs_K = kinetic === nothing ? w.rhs_h : kinetic   # rhs_h: scratch for the unused kinetic energy
+    kinetic === nothing && fill!(rhs_K, 0.0)
+    fill!(w.rhs_F, 0.0)
+    ShallowWater.launch!(ShallowWater.kinetic_and_flux_kernel!, w.rhs_F, num_local_kites(sw.distribution), rhs_K,
+                         w.rhs_F, v, h, Q.piola, Q.dA, sw.φu, sw.iu, sw.su, sw.φh, sw.ih, true)
+    return ldiv!(out, sw.Mu_solver, w.rhs_F)
+end
+
+"""
+    horizontal_tendency!(dy, m, y)
+
+Horizontal terms of `(u, ρ, ρθ)` in every layer, with the 2D kite operators
+and `ρ` in place of the height (`a` the radius, `B` the kite divergence):
+
+    F = Π_U(ρ u),  Fθ = Π_U(θ F),  θ = ρθ/ρ and π = (R ρθ/p0)^(R/cv) at the nodes,
+    u̇ = M_u⁻¹ (-Bᵀ K / a - ∫ (ζ/a + f)/ρ (r̂ × F) ⋅ v) - c_p Π_U(θ ∇π),  ∇π = M_u⁻¹ Bᵀ π / a,
+    ρ̇ = M_h⁻¹ B F / a,  ρθ̇ = M_h⁻¹ B Fθ / a.
+
+The kinetic energy, PV and pressure terms exchange energy without loss:
+`Σ_k dz_k (Fᵀ M_u u̇ + (K + g z)ᵀ M_h ρ̇ + c_p πᵀ M_h ρθ̇) = 0`. Vertical
+advection is not included.
+"""
+function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
+    sw, w, a = m.horizontal, m.work, m.radius
+    Q, s = sw.quadrature, sw.work
+    tz, tu, th = sw.row_buffers
+    nk = num_local_kites(sw.distribution)
+    w.θ .= y.ρθ ./ y.ρ
+    @. w.π = (Rd * y.ρθ / P0)^(Rd / Cvd)
+    for k in 1:num_layers(m)
+        u, ρ, θ, π = view(y.u, :, k), view(y.ρ, :, k), view(w.θ, :, k), view(w.π, :, k)
+        du = view(dy.u, :, k)
+        # relative vorticity, mass flux and kinetic energy of the layer
+        row_mul!(tz, sw.R_owned, u, -1 / a)
+        copyto!(s.rhs_ζ, 1, tz, 1, length(tz))
+        ldiv!(s.ζ, sw.Mz_solver, s.rhs_ζ)
+        fill!(s.rhs_K, 0.0)
+        weighted_projection!(w.F, m, u, ρ; kinetic=s.rhs_K)
+        ldiv!(s.K, sw.Mh_local_solver, s.rhs_K)
+        # momentum: kinetic energy gradient and PV term, then the pressure gradient c_p θ ∇π
+        row_mul!(tu, sw.Bt_owned, s.K, -1 / a)
+        copyto!(s.rhs_u, 1, tu, 1, length(tu))
+        ShallowWater.launch!(ShallowWater.vorticity_kernel!, s.rhs_u, nk, s.rhs_u, w.F, ρ, s.ζ, Q.piola, Q.dA,
+                             Q.normal, Q.coriolis, sw.φu, sw.iu, sw.su, sw.φh, sw.ih, sw.φz, sw.iz, true)
+        ldiv!(du, sw.Mu_solver, s.rhs_u)
+        row_mul!(tu, sw.Bt_owned, π, 1 / a)
+        ldiv!(w.g, sw.Mu_solver, tu)
+        weighted_projection!(w.gθ, m, w.g, θ)
+        du .-= Cpd .* w.gθ
+        # mass and ρθ
+        horizontal_divergence!(view(dy.ρ, :, k), view(dy.ρθ, :, k), m, θ)
+    end
+    return dy
+end
+
+"`dρ = M_h⁻¹ B F / a` and `dρθ = M_h⁻¹ B Π_U(θ F) / a` for the flux `F` in `m.work.F`."
+function horizontal_divergence!(dρ, dρθ, m::KiteNonhydrostatic, θ)
+    sw, w = m.horizontal, m.work
+    th = sw.row_buffers[3]
+    row_mul!(th, sw.B_owned, w.F, 1 / m.radius)
+    ldiv!(dρ, sw.Mh_solver, th)
+    weighted_projection!(w.Fθ, m, w.F, θ)
+    row_mul!(th, sw.B_owned, w.Fθ, 1 / m.radius)
+    ldiv!(dρθ, sw.Mh_solver, th)
+    return nothing
+end
+
+"""
+    stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
+
+One HEVI stage `y = y0 + τ T(ys)`: the horizontal momentum terms of the stage
+state, then (forward–backward) the mass and ρθ fluxes of the new velocity with
+`ρ` and `θ` of the stage state, then the implicit vertical terms in every
+column (`vertical_stage!`). Not yet included: vertical advection of `u` and the
+horizontal terms of `w` (`tw = 0`).
+"""
+function stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
+    w = m.work
+    horizontal_tendency!(w.dy, m, ys)
+    @. y.u = y0.u + τ * w.dy.u
+    for k in 1:num_layers(m)
+        weighted_projection!(w.F, m, view(y.u, :, k), view(ys.ρ, :, k))
+        horizontal_divergence!(view(w.ρexpl, :, k), view(w.ρθexpl, :, k), m, view(w.θ, :, k))
+    end
+    @. w.ρexpl = y0.ρ + τ * w.ρexpl
+    @. w.ρθexpl = y0.ρθ + τ * w.ρθexpl
+    fill!(w.tw, 0.0)
+    return vertical_stage!(m, y, y0, ys, τ)
+end
+
+"""
+    step!(m::KiteNonhydrostatic, y, dt, ys=zero_state(m))
+
+One Wicker–Skamarock RK3 step (stages `dt/3`, `dt/2`, `dt`) in place; the base
+state is kept in the work arrays.
+"""
+function step!(m::KiteNonhydrostatic, y, dt, ys=zero_state(m))
+    y0 = m.work.y0
+    foreach(copyto!, y0, y)
+    base_exner!(m, y0)
+    stage!(m, ys, y0, y0, dt / 3)
+    stage!(m, y, y0, ys, dt / 2)
+    foreach(copyto!, ys, y)
+    stage!(m, y, y0, ys, dt)
     return y
 end

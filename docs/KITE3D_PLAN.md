@@ -75,7 +75,10 @@ lowest vertical order, serial. The state is `(u, w, ρ, ρθ)` as arrays (dofs �
    mass to round-off; `:iap` leaves rest as in `TRiSKNonhydrostatic`): reuse `vertical_solve_kernel!` and `theta_interface_kernel!` with
    one column per Radau node. Tests: hydrostatic rest state at rest, and a column at rest staying
    at rest with upwind θ.
-3. **Horizontal terms per layer** from the kite shallow-water operators. Tests: mass conservation
+3. **Horizontal terms per layer** (done without vertical advection: `horizontal_tendency!`, `stage!`,
+   `step!`; F = Π_U(ρu), Fθ = Π_U(θF), pressure gradient −c_p Π_U(θ∇π) with ∇π = M_u⁻¹Bᵀπ/a, which
+   makes the energy exchange exact (residual 1e-16 of the summed products); rest state at rest.
+   **Open: a sub-cell instability**, see below) from the kite shallow-water operators. Tests: mass conservation
    to round-off, energy exchange between the horizontal and vertical terms.
 4. **Test cases:**
    - inertia-gravity wave (Skamarock–Klemp on the plane with `create_periodic_plane`, the
@@ -83,3 +86,30 @@ lowest vertical order, serial. The state is `(u, w, ρ, ρθ)` as arrays (dofs �
    - the baroclinic wave, compared with `TRiSKNonhydrostatic` on the same hexagon mesh.
 5. **GPU** with KernelAbstractions, as the 2D kite model.
 6. **Higher vertical order** (v = 1) and the θ reconstruction in the layers.
+
+## Open: sub-cell instability on non-affine kites (2026-11-03)
+
+The full step (horizontal explicit, columns implicit) is unstable on the hexagon and triangle meshes:
+small noise on a stratified rest state grows by about ×6 every 2 h (hexagon 3, 10 layers), the
+unperturbed baroclinic wave blows up within 16 h. What is known:
+
+- **Semi-discrete:** the same growth at dt = 15, 50, 75, 150 s; the explicit acoustic limit is
+  between 250 and 300 s on hexagon 3.
+- **Not the vertical solver alone:** `vertical_step!` with the same noise stays at |w| ~ 1e-13;
+  `:centred`, `:upwind` θ and β = 0.5, 0.65, 1 all grow.
+- **Not the horizontal terms alone:** one layer (no vertical motion) decays, two layers stay bounded.
+- **Not rotation:** the same growth with Ω = 0.
+- **Mesh:** grows on hexagons (plain and spring-optimized) and faster on triangles, largest near
+  the pentagons; bounded on the cubed sphere, whose kites are affine (squares). The kites of
+  hexagons and triangles are not affine.
+- **Order of the height space:** `KiteRadau(0)` (one column per primal cell, as TRiSK) is stable,
+  `KiteRadau(1)` (13 columns per hexagon) grows slowly (×2 per 2 h), `KiteRadau(2)` (37 columns) fast.
+- **Structure:** 99 % of the mode is inside the primal cells (zero cell mean), largest in the
+  lowest layers.
+- **Energy:** the total energy stays constant (it decreases slightly by the off-centring) while
+  the kinetic energy grows by 10³: the mode releases potential and internal energy, so the
+  conserved energy is not a sufficient stability bound for these sub-cell modes. `TRiSKNonhydrostatic`
+  on the same vertical grid and noise stays bounded without any diffusion.
+
+Next: the linearized operator on a small mesh (hexagon 1, a few layers) to find the unstable
+eigenmodes and the term that makes the pseudo-energy indefinite.
