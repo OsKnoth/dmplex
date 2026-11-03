@@ -185,3 +185,29 @@ end
         @test maximum(abs, dρ) < 0.1 * 20.0 / m.radius
     end
 end
+
+@testset "kite nonhydrostatic: column solver" begin
+    m = KiteNonhydrostatic(create_hexagon_mesh(2), VerticalGrid(10, 30000.0; stretch=3); damping_height=22000.0,
+                           damping_rate=0.05)
+    # the columns sit at the Radau nodes of the height dofs
+    x = column_points(m)
+    @test length(x) == num_columns(m) && all(p -> norm(p) ≈ 1, x)
+    @test maximum(abs, project_layers(m, (x, z) -> x[3])[:, 1] .- getindex.(x, 3)) < 1e-4
+    # a column in discrete hydrostatic balance stays at rest
+    rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
+    y = initial_state(m, rest)
+    ρ0, ys = copy(y.ρ), zero_state(m)
+    for _ in 1:5
+        vertical_step!(m, y, 300.0, ys)
+    end
+    @test maximum(abs, y.w) < 1e-12
+    @test y.ρ ≈ ρ0 rtol = 1e-14
+    # a warm layer rises, every column keeps its mass
+    y.ρθ .*= 1 .+ (m.vgrid.z_full' .< 3000) ./ 300
+    column = y.ρ * m.vgrid.dz
+    for _ in 1:5
+        vertical_step!(m, y, 300.0, ys)
+    end
+    @test maximum(y.w) > 0.01
+    @test y.ρ * m.vgrid.dz ≈ column rtol = 1e-14
+end

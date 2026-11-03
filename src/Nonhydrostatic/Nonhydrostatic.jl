@@ -14,12 +14,14 @@ using KernelAbstractions
 using ..Topology
 import ..Topology: num_layers
 using ..FiniteVolumes: TRiSKGrid, TRiSKShallowWater, trisk_pv_edges, iap_trisk_weights, num_cells, num_edges, num_vertices
-using ..FEM: to_backend, project, row_mul!
+using ..FEM: to_backend, project, row_mul!, reference_element, cell_dofs, num_dofs
+using ..Geometry: CellMap, map_point
 using ..ShallowWater: NonlinearKiteShallowWater, height_dofs, velocity_dofs
 import ..ShallowWater: initial_state, total_mass
 
 export VerticalGrid, TRiSKNonhydrostatic, zero_state, stage!, step!, baroclinic_wave, lowest_pressure
-export KiteNonhydrostatic, num_columns, project_layers, project_velocity, mass_divergence!, column_weights
+export KiteNonhydrostatic, num_columns, project_layers, project_velocity, mass_divergence!, column_weights,
+    column_points, vertical_stage!, vertical_step!
 
 include("VerticalGrid.jl")
 include("TRiSKNonhydrostatic.jl")

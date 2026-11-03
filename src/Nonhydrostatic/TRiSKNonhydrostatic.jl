@@ -265,7 +265,7 @@ end
 # lines of the gathered neighbours are shared by eight levels in the cache (ICON's nproma blocks).
 const BLOCK = (32, 8)
 
-function launch!(m::TRiSKNonhydrostatic, kernel, ndrange, args...)
+function launch!(m, kernel, ndrange, args...)   # a model with a `backend`
     k = ndrange isa Tuple{Integer, Integer} ? kernel(m.backend, BLOCK) : kernel(m.backend)
     k(args...; ndrange)
     KernelAbstractions.synchronize(m.backend)

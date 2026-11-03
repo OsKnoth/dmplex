@@ -54,6 +54,33 @@ function east_north(x)
 end
 
 """
+    balanced_column(profile, v, iap_theta) -> (ρ, ρθ)
+
+Layer values of a column at rest in the discrete hydrostatic balance of the
+vertical solver, `c_p θ_j (π_j - π_{j-1}) / dzh_j = -g`, with the temperature
+of `profile(z) = (T, p, ...)` at the layer centres and its pressure at the
+lowest one. `θ_j` at the interfaces is linearly interpolated, or with
+`iap_theta` the upwind stencil at rest, which couples to the layers above
+(fixed-point sweeps of the column).
+"""
+function balanced_column(profile, v::VerticalGrid, iap_theta::Bool)
+    nlev, κ = num_layers(v), Rd / Cpd
+    T = [profile(z)[1] for z in v.z_full]
+    πk = [(profile(z)[2] / P0)^κ for z in v.z_full]
+    for _ in 1:(iap_theta ? 30 : 1), j in 2:nlev
+        c = iap_theta ? theta_stencil(j, 0.0, v.dz, v.dzh, v.wlow, nlev) : (0.0, v.wlow[j], 1 - v.wlow[j], 0.0)
+        πj = πk[j]
+        for _ in 1:50
+            θh = sum(c[n] * T[j - 3 + n] / (j - 3 + n == j ? πj : πk[j - 3 + n]) for n in 1:4 if 1 <= j - 3 + n <= nlev)
+            πj = πk[j - 1] - GRAV * v.dzh[j] / (Cpd * θh)
+        end
+        πk[j] = πj
+    end
+    ρθ = @. P0 / Rd * πk^(Cvd / Rd)
+    return ρθ ./ (T ./ πk), ρθ
+end
+
+"""
     initial_state(m::TRiSKNonhydrostatic, profile)
 
 State `(vn, w, ρ, ρθ)` from `profile(lon, lat, z) -> (T, p, u, v)`. Every
@@ -68,26 +95,9 @@ function initial_state(m::TRiSKNonhydrostatic, profile)
     g, v = m.grid, m.vgrid
     nc, ne, nlev = num_cells(g), num_edges(g), num_layers(v)
     ρ, ρθ = zeros(nc, nlev), zeros(nc, nlev)
-    κ = Rd / Cpd
     for i in 1:nc
         λ, φ = lonlat(g.centers[i])
-        T = [profile(λ, φ, z)[1] for z in v.z_full]
-        πk = [(profile(λ, φ, z)[2] / P0)^κ for z in v.z_full]
-        # the interface θ of the model at rest couples to the layers above: sweep the column
-        for _ in 1:(m.vertical_theta == 2 ? 30 : 1), j in 2:nlev
-            c = m.vertical_theta == 2 ? theta_stencil(j, 0.0, v.dz, v.dzh, v.wlow, nlev) : (0.0, v.wlow[j], 1 - v.wlow[j], 0.0)
-            πj = πk[j]
-            for _ in 1:50
-                θh = sum(c[n] * T[j - 3 + n] / (j - 3 + n == j ? πj : πk[j - 3 + n])
-                         for n in 1:4 if 1 <= j - 3 + n <= nlev)
-                πj = πk[j - 1] - GRAV * v.dzh[j] / (Cpd * θh)
-            end
-            πk[j] = πj
-        end
-        for k in 1:nlev
-            ρθ[i, k] = P0 / Rd * πk[k]^(Cvd / Rd)
-            ρ[i, k] = ρθ[i, k] / (T[k] / πk[k])
-        end
+        ρ[i, :], ρθ[i, :] = balanced_column(z -> profile(λ, φ, z), v, m.vertical_theta == 2)
     end
     vn = zeros(ne, nlev)
     for e in 1:ne

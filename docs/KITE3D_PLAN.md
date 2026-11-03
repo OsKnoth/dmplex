@@ -62,11 +62,17 @@ As in `TRiSKNonhydrostatic`: Wicker–Skamarock RK3. In each stage:
 
 ## Steps
 
-1. **Extruded kite spaces:** dof numbering of H_h ⊗ DG_v, H_h ⊗ CG_{v+1} and U_h ⊗ DG_v on top of
+Done (`src/Nonhydrostatic/KiteNonhydrostatic.jl`, tests in `test/extruded.jl`): steps 1 and 2 at
+lowest vertical order, serial. The state is `(u, w, ρ, ρθ)` as arrays (dofs × levels).
+
+1. **Extruded kite spaces** (done: `zero_state`, `project_layers`, `project_velocity`,
+   `mass_divergence!`; mass to round-off, column sums exact): dof numbering of H_h ⊗ DG_v, H_h ⊗ CG_{v+1} and U_h ⊗ DG_v on top of
    `create_kite_mesh` and `VerticalGrid`, with layer-innermost or point-innermost layouts for the
    GPU (blocks of points × levels, as `BLOCK` in `TRiSKNonhydrostatic`). Tests: dimensions, and the
    divergence V1 → V2 exact per column.
-2. **Column solver for v = 0:** reuse `vertical_solve_kernel!` and `theta_interface_kernel!` with
+2. **Column solver for v = 0** (done: `column_points`, `initial_state` with `balanced_column`,
+   `vertical_stage!`, `vertical_step!`; rest state w < 1e-12 with `:upwind` and `:centred`, column
+   mass to round-off; `:iap` leaves rest as in `TRiSKNonhydrostatic`): reuse `vertical_solve_kernel!` and `theta_interface_kernel!` with
    one column per Radau node. Tests: hydrostatic rest state at rest, and a column at rest staying
    at rest with upwind θ.
 3. **Horizontal terms per layer** from the kite shallow-water operators. Tests: mass conservation
