@@ -51,10 +51,9 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
-    # the velocity mass with the rule of the projections: Π_U(θ̄ F) = θ̄ F for a constant θ̄, so the
-    # horizontal fluxes of ρ and ρθ do not create θ′ (on non-affine kites the default rule differs by 1e-2)
-    sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], mass_degree=2 * (k + 1),
-                                   backend)
+    # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
+    # so the horizontal fluxes of ρ and ρθ do not create θ′
+    sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], backend)
     nh, nu, nlev = length(height_dofs(sw)), length(velocity_dofs(sw)), num_layers(vgrid)
     z_top = vgrid.z_half[end]
     rayleigh = map(vgrid.z_half) do z

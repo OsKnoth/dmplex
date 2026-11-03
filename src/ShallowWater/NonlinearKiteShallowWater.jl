@@ -107,9 +107,9 @@ evaluated by KernelAbstractions kernels over the kites with atomic scatter.
 `velocity` selects the velocity space: `:rt` (`KiteBrokenRT(k)`, default),
 `:bdm` (`KiteBrokenBDM(k)`) or `:dual_radau` (`KiteDualRadau(k)`, the pair of
 Wess et al. with lumped velocity mass). `mass_degree` is the quadrature degree of
-the velocity mass (default that of the space); with `mass_degree = degree` it
-uses the rule of the nonlinear terms, so that `Π_U(c v) = c v` holds exactly for
-constants `c` also on non-affine kites (the 3D model needs this for `Π_U(θ F)`).
+the velocity mass. By default it is `degree`, the rule of the nonlinear terms, so
+that `Π_U(c v) = c v` holds exactly for constants `c` also on non-affine kites
+(where the metric is rational); the 3D model needs this for `Π_U(θ F)`.
 
 With an MPI communicator `comm` the model is distributed over its ranks
 (`KiteDistribution`, equal-area partition of the primal cells unless `part`
@@ -167,7 +167,7 @@ end
 function NonlinearKiteShallowWater(primal::Plex, k::Integer; height_order::Integer=k + 1, gravity::Real=1.0,
                                    coriolis=x -> 2x[3], flux::Symbol=:projected, vorticity::Symbol=:potential,
                                    degree::Integer=2 * (k + 1), geometry::Symbol=:sphere, centers=nothing,
-                                   comm=nothing, part=nothing, velocity::Symbol=:rt, mass_degree=nothing,
+                                   comm=nothing, part=nothing, velocity::Symbol=:rt, mass_degree::Integer=degree,
                                    backend=KernelAbstractions.CPU())
     flux in (:pointwise, :projected) || throw(ArgumentError("flux must be :pointwise or :projected"))
     vorticity in (:absolute, :potential) || throw(ArgumentError("vorticity must be :absolute or :potential"))
@@ -178,7 +178,7 @@ function NonlinearKiteShallowWater(primal::Plex, k::Integer; height_order::Integ
     U = FESpace(kites, kite_velocity_family(velocity, k); name="u", geometry)
     Z = FESpace(kites, Lagrange(k + 1); name="zeta", geometry)
     Sh, Sz = mass_solver(H; lumped=height_order > 0), mass_solver(Z; lumped=true)
-    Su = mass_solver(U; degree=something(mass_degree, FEM.default_degree(U)), lumped=velocity == :dual_radau)
+    Su = mass_solver(U; degree=mass_degree, lumped=velocity == :dual_radau)
     operator_degree = 2 * max(k, height_order) + 2
     B = assemble_kite_divergence(H, U; degree=operator_degree)
     R = assemble_bilinear(Z, U; degree=operator_degree) do t, u, a, b, q
