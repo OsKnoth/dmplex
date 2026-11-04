@@ -8,8 +8,9 @@
 #   julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu
 #
 # resolution: refinement level of the hexagonal mesh (6 ≈ 120 km, 7 ≈ 60 km) or of
-# the triangle mesh (20·4ⁿ triangles: 5 ≈ 160 km, 6 ≈ 80 km, 7 ≈ 40 km); dt in
-# seconds; 30 equidistant layers up to 30 km, Rayleigh damping of w above 22 km.
+# the triangle mesh (20·4ⁿ triangles: 5 ≈ 160 km, 6 ≈ 80 km, 7 ≈ 40 km, for ICON with
+# dt ≈ 150, 75, 37.5 s); dt in seconds; 30 equidistant layers up to 30 km, Rayleigh
+# damping of w above 22 km.
 # --gpu runs on the CUDA GPU (environment examples/gpu). Prints the minimum surface
 # pressure once a day and the time per step; writes p_s (Pa) and T of the lowest
 # layer (K) at the cells to baroclinic_wave_hexagon_<resolution>.vtkhdf.
