@@ -178,10 +178,34 @@ All kite variants grow, the upwind trace only delays it by about a day. θ′ is
 tropics and subtropics (0–45°, where the wind is strongest), through the whole column (27 K at
 15 km for dual Radau 1).
 
+**One layer, θ = 1, p = g(ρθ)²/2** (`equation_of_state=:shallow_water`, the shallow-water test of
+the compressible code, 2026-11-04): the horizontal tendencies of one layer agree with
+`NonlinearKiteShallowWater` to round-off (u̇ 4e-14, ρ̇ exactly, ρθ̇ = ρ̇ to 3e-15; tested), so the
+2D → 3D step of the horizontal terms is correct. But TC2 through the 3D step blows up within two
+days, while the 2D model runs: θ − 1 grows from round-off by about 1e9 per day. The one-layer model is
+thermal shallow water, and θ′ is unstable there, i.e. already horizontally, without any vertical
+coupling:
+
+| one layer, random θ′ = 1e-8 | max \|θ − 1\| after ¼ … 1 day |
+|---|---|
+| at rest, hexagon 3 | 5e-8, bounded |
+| TC2, hexagon 2 | 1.3e-7 → 5e-5 (×7 per ¼ day) |
+| TC2, hexagon 3 | 1.8e-6 → 3.5e-2 → NaN (×150 per ¼ day) |
+| TC2, cubed sphere 8 | 1.8e-7 → 1.4e-5 (×4 per ¼ day) |
+
+The growth needs the flow and scales like 0.3 |u|/Δx: an advective instability of θ′, the same
+signature as the 3D jet mode. The conserved energy bounds u and ρθ but not ρ and θ separately. The
+upwind θ trace (×1000 per day instead of 1e9) and the upwind traces of ρ and ρθ
+(`horizontal_theta=:upwind_density`, same rate) slow it but do not remove it: most of the mode lies
+inside the primal cells, where ρ and θ are continuous. The instantaneous Casimir rate
+d/dt Σ M ρ(θ−1)² is zero for smooth θ′ and small for random θ′ (2e-3), so the mode is a coupled
+u–ρ–θ′ mode through the pressure term −gρ∇θ′ − gθ′∇ρ, not passive advection.
+
 **Open problems of the kite model:**
 
 1. The node-scale mode is not removed by the upwind θ trace alone on a flow with strong
-   cross-edge wind everywhere. Candidates:
+   cross-edge wind everywhere; it is already present in one layer (thermal shallow water, above),
+   so it has to be fixed in the horizontal θ coupling. Candidates:
    - the pressure gradient `-c_p Π_U(θ∇π)` still uses the central θ, so the upwind ρθ flux has
      no adjoint in the momentum equation and the energy pair is no longer consistent;
    - ρ is also broken across the primal edges and only the mass flux is single valued;

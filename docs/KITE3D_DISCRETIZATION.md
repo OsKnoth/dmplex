@@ -1,6 +1,6 @@
 # Discretization of `KiteNonhydrostatic` (as implemented, 2026-11-04)
 
-This is the state of `src/Nonhydrostatic/KiteNonhydrostatic.jl` after steps 1–3 of
+This is the state of `src/Nonhydrostatic/Kite/KiteNonhydrostatic.jl` after steps 1–3 of
 [KITE3D_PLAN.md](KITE3D_PLAN.md): serial, lowest vertical order, with the vertical coupling of the vector-invariant form. The jet
 instability and the upwind θ trace that removes it are described at the end of the plan.
 
@@ -20,9 +20,12 @@ $$
 \partial_t(\rho\theta) = -\nabla_h\cdot(\theta\rho u_h) - \partial_z(\theta\rho w).
 $$
 
-Here $K = |u_h|^2/2$ and $\zeta = \hat r\cdot\nabla\times u_h$. Not yet included: vertical
-advection of $u_h$, all advection of $w$, and $w$ in the kinetic energy. Rayleigh damping of $w$
-acts above `damping_height`.
+Here $\zeta = \hat r\cdot\nabla\times u_h$. With `vertical_advection=:vector_invariant` (default)
+the momentum advection is the complete vector-invariant form $\omega\times u + \nabla K$ of the shallow
+atmosphere: $K = |u_h|^2/2 + w^2/2$, the horizontal vorticity $\eta = \partial_z u_h - \nabla_h w$, the term
+$-\eta w$ in the $u_h$ equation and $\eta\cdot u_h - \partial_z K$ in the $w$ equation (exactly adjoint, see
+below). The equations above show only the terms without it. Rayleigh damping of $w$ acts above
+`damping_height`.
 
 ## Mesh and spaces
 
@@ -122,6 +125,23 @@ $$
 $$
 
 The PV term uses $\zeta$, $\rho$ and $f$ at the quadrature points.
+
+**Vertical coupling of the vector-invariant form** (`vertical_advection=:vector_invariant`):
+
+$$
+\eta_j = \frac{u_j - u_{j-1}}{\Delta z^h_j} - M_U^{-1}B^Tw_j/a,\qquad
+(\eta w)_k = \frac{\Delta z^h_k\,\Pi_U(w_k\eta_k) + \Delta z^h_{k+1}\,\Pi_U(w_{k+1}\eta_{k+1})}{2\Delta z_k},
+$$
+
+$$
+\dot u_k \mathrel{-}= (\eta w)_k,\qquad
+t^w_j = M_H^{-1}\Big(\int \eta_j\cdot\tfrac{u_{j-1}+u_j}{2}\,\psi_i\Big) - \frac{K_j - K_{j-1}}{\Delta z^h_j},
+$$
+
+with $K_k$ including $(\Delta z^h_k w_k^2 + \Delta z^h_{k+1}w_{k+1}^2)/4\Delta z_k$. The two η terms are
+exactly adjoint, $\sum_k\Delta z_k u_k^TM_U(\eta w)_k = \sum_j\Delta z^h_j w_j^TM_H(\eta\cdot\tilde u)_j$
+(tested to 1e-10), so the exchange of horizontal and vertical kinetic energy is exact. $t^w$ is the
+explicit $w$ tendency of the column solver.
 
 **Upwind θ trace** (`horizontal_theta=:upwind`). $\theta$ is broken across the primal edges, and
 $B\,\Pi_U(\theta F)$ pairs the traces of the test function from both sides with the single-valued

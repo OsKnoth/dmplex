@@ -330,3 +330,25 @@ end
     @test maximum(abs, y.w) < 0.05
     @test maximum(abs, y.ρθ ./ y.ρ .- θ0) < 1.0
 end
+
+@testset "kite nonhydrostatic: one layer is kite shallow water" begin
+    # θ = 1, p = g (ρθ)²/2: the horizontal terms of one layer are those of NonlinearKiteShallowWater
+    u0 = 0.2
+    velocity(x) = u0 * SVector(-x[2], x[1], 0.0)
+    height(x) = 1 - (u0 + u0^2 / 2) * x[3]^2
+    for primal in (create_hexagon_mesh(2), create_cubed_sphere_mesh(4))
+        m2 = NonlinearKiteShallowWater(primal, 1; gravity=1.0, coriolis=x -> 2x[3])
+        m3 = KiteNonhydrostatic(primal, VerticalGrid(1, 1.0), 1; radius=1.0, omega=1.0,
+                                equation_of_state=:shallow_water, gravity=1.0)
+        y2 = initial_state(m2, velocity, height) .+ 1e-3 .* randn(MersenneTwister(3), num_dofs(m2.U) + num_dofs(m2.H))
+        y3 = zero_state(m3)
+        y3.u[:, 1] .= y2[velocity_dofs(m2)]
+        y3.ρ[:, 1] .= y2[height_dofs(m2)]
+        y3.ρθ .= y3.ρ
+        d2 = tendency!(similar(y2), y2, m2)
+        d3 = horizontal_tendency!(m3.work.dy, m3, y3)
+        @test d3.u[:, 1] ≈ d2[velocity_dofs(m2)] rtol = 1e-12
+        @test d3.ρ[:, 1] ≈ d2[height_dofs(m2)] rtol = 1e-12
+        @test d3.ρθ ≈ d3.ρ rtol = 1e-13
+    end
+end

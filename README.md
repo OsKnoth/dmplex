@@ -164,6 +164,8 @@ julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu   # n
 ```
 
 What each example tests, its options and reference results: [docs/EXAMPLES.md](docs/EXAMPLES.md).
+The three nonhydrostatic dycores (ICON, TRiSK in the ICON-IAP and MPAS forms, kite elements) with
+their results and GPU timings: [docs/dycores/](docs/dycores/README.md).
 
 GPU runs (kite model on CUDA, ADIOS2 output straight from the device, cuDSS
 mass solvers over MPI) are described in [docs/levante.md](docs/levante.md).

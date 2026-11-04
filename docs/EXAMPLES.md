@@ -14,8 +14,8 @@ top of each script.
 | `trisk_galewsky.jl` | `TRiSKShallowWater`, `ICONShallowWater` | Galewsky jet | C-grid finite volumes | CPU, MPI, GPU |
 | `galewsky.jl` | `NonlinearKiteShallowWater` | Galewsky jet | kite elements RT1 × Q2 × CG2 | CPU, MPI, GPU |
 | `bickley.jl` | `NonlinearKiteShallowWater` | Bickley jet on a periodic plane | kite elements | CPU |
-| `baroclinic_wave.jl` | `TRiSKNonhydrostatic` | baroclinic wave (Ullrich et al. 2014) | 3D TRiSK, HEVI | CPU, GPU |
-| `thermal_wind.jl` | `TRiSKNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D TRiSK, 3D kite elements, HEVI | CPU |
+| `baroclinic_wave.jl` | `TRiSKNonhydrostatic`, `ICONNonhydrostatic` (`--icon`) | baroclinic wave (Ullrich et al. 2014) | 3D TRiSK, HEVI; ICON triangles, predictor–corrector | CPU, GPU |
+| `thermal_wind.jl` | `TRiSKNonhydrostatic`, `ICONNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D TRiSK, 3D kite elements, HEVI | CPU |
 | `gpu/cudss_mass.jl` | mass matrices | solves against a known solution | RT_k, DG_k, CG_{k+1} | GPU, multi-GPU |
 
 Meshes are given by name: `icosahedron`/`triangle`, `cubed`, `hexagon` (the Voronoi dual of the
@@ -165,6 +165,18 @@ writes p_s and the temperature of the lowest layer.
 | hexagon 7, dt 150 s | 990.2 | 975.8 | 957.5 | 949.5 | 931.4 |
 
 The GPU and CPU runs of hexagon 6 agree, and mass is conserved to 4e-16.
+
+With `--icon` the same script runs `ICONNonhydrostatic` on the triangle mesh (ICON's
+predictor–corrector, Miura fluxes, divergence damping, fourth-order diffusion scaled with Δx³), see
+[dycores/ICON.md](dycores/ICON.md):
+
+| Day | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|
+| ICON R2B5 (triangles 6), dt 75 s | 992.63 | 981.41 | 961.49 | 939.03 | 918.16 |
+| ICON R2B6 (triangles 7), dt 37.5 s | 991.88 | 979.15 | 958.49 | 937.32 | 917.30 |
+
+`examples/gpu/dycores.sbatch` runs ICON and TRiSK in one job; on one A100 ICON takes 5.2 ms per step
+on R2B5 and 18.8 ms on R2B6. The three dycores are compared in [dycores/](dycores/README.md).
 
 **Time per step on one A100** (30 layers):
 
