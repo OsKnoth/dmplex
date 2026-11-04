@@ -219,6 +219,25 @@ q = 1 is an unstable fixed point. In 3D (steady jet, hexagon 3) q − 1 grows fr
 one day. The fix belongs to the tracer transport (and then θ), e.g. a stabilized (SUPG or upwind DG
 with interior terms) or a skew-symmetric form of the advection of q.
 
+**Pure transport with a prescribed velocity** (TC2 solid-body rotation, SSPRK3, one day, ρ
+perturbed by 1e-8; the zonal ρ is a steady solution): the kite continuity operator
+`ρ ↦ M_h⁻¹ B Π_U(ρ u)` is itself unstable, independent of the time step (dt = 0.1 and 0.3 Δx/u0):
+
+| mesh | max \|ρ − ρ(0)\| after ¼ / ½ / ¾ / 1 day |
+|---|---|
+| hexagon 2 | 0.05, 0.44, 3.3, 24 |
+| hexagon 3 | 0.16, 25, 3e3, 4e5 |
+| cubed sphere 8 | 0.03, 0.09, 0.14, 0.20 |
+
+Its eigenvalues have max Re λ ≈ 0.7 u0/Δx on hexagons and 0.28 u0/Δx on the cubed sphere (projected
+flux; the pointwise flux of the poster form 4.3–4.8 and 1.25); the symmetric part of the operator in the
+ρ-weighted norm is 40 % of the skew part. In shallow water and in the dycore the gravity-wave coupling
+to the momentum (the conserved energy) keeps ρ bounded; a transported quantity without that feedback
+(q, θ′) sees the bare operator. Neither form is the skew-symmetric DG central flux
+`∫ρ u⋅∇η − ∫{ρ} u⋅n [η]`. The natural fix for q and θ is a DG transport with the kite mass flux,
+`⟨ρq̇, η⟩ = Σ_K ∫_K q F⋅∇η − Σ_F ∫_F q̂ F⋅n [η]` with the upwind (or central) trace `q̂`: for q = 1 it is
+`B F` (consistency), and with upwinding it is stable in the ρ-weighted norm.
+
 **Open problems of the kite model:**
 
 1. The node-scale mode is not removed by the upwind θ trace alone on a flow with strong
