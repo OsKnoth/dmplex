@@ -263,3 +263,47 @@ end
     end
     @test maximum(abs, y.u) < 1e-10 && maximum(abs, y.w) < 1e-10
 end
+
+@testset "kite nonhydrostatic: upwind θ on the primal faces" begin
+    NH = dmplex.Nonhydrostatic
+    m = KiteNonhydrostatic(create_hexagon_mesh(2), VerticalGrid(4, 30000.0); horizontal_theta=:upwind)
+    sw, up = m.horizontal, m.upwind
+    rng = MersenneTwister(5)
+    F, θ = randn(rng, NH.num_velocity_dofs(m)), randn(rng, num_columns(m))
+    # both sides of every face point see the same normal flux
+    @test all(eachindex(up.cK)) do i
+        fK, fE = sw.faces[up.fK[i]], sw.faces[up.fE[i]]
+        nK = dot(dmplex.ShallowWater.gather_vector(F, fK.φ, sw.iu, sw.su, up.cK[i], up.qK[i]), fK.ν)
+        nE = dot(dmplex.ShallowWater.gather_vector(F, fE.φ, sw.iu, sw.su, up.cE[i], up.qE[i]), fE.ν)
+        abs(nK + nE) < 1e-12
+    end
+    th = NH.upwind_theta!(zeros(num_columns(m)), m, F, θ, 1.0)
+    @test abs(sum(th)) < 1e-12 * sum(abs, th)                 # conserves ρθ
+    @test dot(θ, th) < 0                                       # damps the jumps of θ
+    @test maximum(abs, NH.upwind_theta!(zeros(num_columns(m)), m, F, fill(300.0, num_columns(m)), 1.0)) <
+          1e-12 * 300 * sum(abs, F)                            # vanishes for constant θ
+    # a horizontally homogeneous column in balance stays at rest
+    rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
+    y, ys = initial_state(m, rest), zero_state(m)
+    for _ in 1:3
+        step!(m, y, 150.0, ys)
+    end
+    @test maximum(abs, y.u) < 1e-10 && maximum(abs, y.w) < 1e-10
+end
+
+@testset "thermal wind: analytic balance" begin
+    NH = dmplex.Nonhydrostatic
+    a, Ω, h = 6.37122e6, 7.292e-5, 1e-4
+    for φ in (-1.2, -0.5, 0.1, 0.7, 1.3), z in (0.0, 5000.0, 15000.0, 28000.0)
+        T, p, u, v = thermal_wind(0.3, φ, z)
+        ρ = p / (NH.Rd * T)
+        dpdz = (thermal_wind(0.3, φ, z + h)[2] - thermal_wind(0.3, φ, z - h)[2]) / 2h
+        dpdφ = (thermal_wind(0.3, φ + h, z)[2] - thermal_wind(0.3, φ - h, z)[2]) / 2h
+        @test dpdz ≈ -ρ * NH.GRAV rtol = 1e-6                          # hydrostatic
+        @test (2Ω * sin(φ) + u * tan(φ) / a) * u ≈ -dpdφ / (ρ * a) atol = 1e-9   # gradient wind
+        @test v == 0
+    end
+    @test thermal_wind(0.0, 0.5, 0.0)[3] == 0                            # no wind at the ground
+    @test 20 < thermal_wind(0.0, 0.0, 15000.0)[3] < 30
+    @test thermal_wind(0.0, 0.0, 29000.0)[3] - thermal_wind(0.0, 0.0, 25000.0)[3] < 0.5   # no shear aloft
+end

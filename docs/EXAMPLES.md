@@ -15,6 +15,7 @@ top of each script.
 | `galewsky.jl` | `NonlinearKiteShallowWater` | Galewsky jet | kite elements RT1 × Q2 × CG2 | CPU, MPI, GPU |
 | `bickley.jl` | `NonlinearKiteShallowWater` | Bickley jet on a periodic plane | kite elements | CPU |
 | `baroclinic_wave.jl` | `TRiSKNonhydrostatic` | baroclinic wave (Ullrich et al. 2014) | 3D TRiSK, HEVI | CPU, GPU |
+| `thermal_wind.jl` | `TRiSKNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D TRiSK, 3D kite elements, HEVI | CPU |
 | `gpu/cudss_mass.jl` | mass matrices | solves against a known solution | RT_k, DG_k, CG_{k+1} | GPU, multi-GPU |
 
 Meshes are given by name: `icosahedron`/`triangle`, `cubed`, `hexagon` (the Voronoi dual of the
@@ -177,6 +178,28 @@ The GPU and CPU runs of hexagon 6 agree, and mass is conserved to 4e-16.
 
 In the last version, on hexagon 7, `vertical_solve` takes 5.1 ms, `vn_tendency` 4.5 ms and
 `theta_interface` 2.3 ms.
+
+## Nonhydrostatic thermal wind: `thermal_wind.jl`
+
+```sh
+julia --project examples/thermal_wind.jl trisk 4 5 300
+julia --project examples/thermal_wind.jl kite 3 5 150 rt upwind
+```
+
+A steady rotating wind in exact thermal-wind (gradient-wind) balance (`thermal_wind`). The
+temperature falls towards the poles near the ground, `1/T = (1 + ε sin²φ sech²(z/z_s))/T0` with
+T0 = 300 K, ε = 0.1, z_s = 12 km. The surface pressure is the same everywhere, so there is no
+wind at the ground. The westerly grows up to about z_s and is nearly constant above (24 m/s at the
+equator), so the damping layer sees no shear. The flow should stay at rest in the rotating
+frame; the script prints max |w|, max |θ − θ(0)| and max |Δp_s| twice a day. 30 layers up to
+30 km, Rayleigh damping of w above 22 km.
+
+| model | max \|w\| day 1 | day 3 | day 5 |
+|---|---|---|---|
+| TRiSK, hexagon 4, dt 300 s | 2.6e-3 m/s | 8.4e-4 | 6.7e-4 (θ′ 0.35 K, Δp_s 0.35 hPa) |
+| kite RT1 × Q2, upwind θ, hexagon 3 | 7.3e-4 | 0.30 | unstable |
+
+The kite model is not yet stable on this case, see [KITE3D_PLAN.md](KITE3D_PLAN.md).
 
 ## Mass solves with cuDSS: `gpu/cudss_mass.jl`
 

@@ -127,9 +127,70 @@ The growing jet mode (2026-11-03, open), unperturbed baroclinic wave, dt 150 s, 
   the w tendency of the balanced state is 3e-14; u̇ converges in the lower layers, in the upper
   layers it is set by the vertical resolution (second order in Δz, from the discrete hydrostatic
   integration of the initial state, as for TRiSK).
-- **Open question:** the central trace of the broken θ on the primal faces in the ρθ flux (B pairs
-  the traces from both sides with the single-valued normal component of Π_U(θF)); an upwind trace
-  would be the DG-type stabilization.
+- **Central θ trace on the primal faces:** B pairs the traces of the broken θ from both sides with
+  the single-valued normal component of Π_U(θF), and the jump [θ] never enters. The upwind trace,
+  see the next section, is the DG-type stabilization.
+
+## Upwind θ trace on the primal faces (2026-11-04)
+
+`KiteNonhydrostatic(...; horizontal_theta=:upwind)` adds the DG upwind correction
+`-∫_e η_i |F⋅n|/2 (θ^K - θ^E)` on every primal face to the ρθ flux (`upwind_theta!`, see
+[KITE3D_DISCRETIZATION.md](KITE3D_DISCRETIZATION.md)). It conserves ρθ, vanishes for constant θ and
+dissipates the θ variance (tested). Serial CPU loop for now.
+
+![max |w| on the steady jet](images/kite3d_jet_growth.png)
+
+**Steady jet** (unperturbed baroclinic wave, 10 stretched layers), max |w|:
+
+| pair, mesh | central | upwind θ |
+|---|---|---|
+| RT1 × Q2, hexagon 3, 42 h | 0.55 m/s, growing | **0.029 m/s** |
+| RT1 × Q2, hexagon 4 (dt 60 s), 6 h / 12 h | 4.1 m/s at 6 h | **0.0025 / 0.004 m/s** |
+| Q2 × dual Radau 2, hexagon 3, 42 h | 1.6 m/s | 0.45 m/s, still growing |
+| Q1 × dual Radau 1, hexagon 3, 42 h | 0.024 m/s | – |
+| Q1 × dual Radau 1, hexagon 4, 12 h | 0.012 m/s | 0.011 m/s |
+
+The growth with resolution is gone for RT1 × Q2: on hexagon 4 the upwind run stays at the TRiSK
+level. The node-scale pattern is 20 times weaker but still visible near the pentagons at 50–60°:
+
+![w at 10.6 km after 42 h, central and upwind θ](images/kite3d_jet_w.png)
+
+**Perturbed baroclinic wave**, 30 layers, hexagon 3 (8322 columns, dt 150 s), Q1 × dual Radau 1,
+central θ: minimum p_s 989.2 (day 6), 985.1 (7), 981.4 (8), 978.2 (9), 976.6 hPa (day 10); mass to
+2e-16. The wave develops but is far too weak (TRiSK hexagon 5: 921.8 hPa at day 10), as expected for
+about 100 km columns of first order. The same pair on hexagon 4 grew from 0.03 to 0.25 m/s between
+day 1 and 1.5 (w noise, before the wave), so it is not stable at higher resolution either; the run
+was stopped. RT1 × Q2 with upwind θ on hexagon 3 is running.
+
+**Thermal wind** (`thermal_wind`, new steady state in exact gradient-wind balance, 30 layers,
+5 days, `examples/thermal_wind.jl`): this is the hardest test so far.
+
+![max |w| and θ′ on the thermal wind](images/kite3d_thermal_wind.png)
+
+| model | max \|w\| day 1 | day 2 | day 3 | max \|θ′\| |
+|---|---|---|---|---|
+| TRiSK, hexagon 4 | 2.6e-3 | 1.2e-3 | 8.4e-4 | 0.35 K at day 5, steady |
+| kite RT1 × Q2, central | 1.5e-2 | 1.8 | crashes (p < 0) | 470 K at day 2 |
+| kite RT1 × Q2, upwind θ | 7.3e-4 | 1.3e-2 | 0.30 | 31 K at day 3.5 |
+| kite dual Radau 1 × Q1, central | 2.7e-3 | 8.4e-3 | 9.5e-2 | 94 K at day 5 |
+
+All kite variants grow, the upwind trace only delays it by about a day. θ′ is largest in the
+tropics and subtropics (0–45°, where the wind is strongest), through the whole column (27 K at
+15 km for dual Radau 1).
+
+**Open problems of the kite model:**
+
+1. The node-scale mode is not removed by the upwind θ trace alone on a flow with strong
+   cross-edge wind everywhere. Candidates:
+   - the pressure gradient `-c_p Π_U(θ∇π)` still uses the central θ, so the upwind ρθ flux has
+     no adjoint in the momentum equation and the energy pair is no longer consistent;
+   - ρ is also broken across the primal edges and only the mass flux is single valued;
+   - θ in `Π_U(θ F)` is the Q2 interpolation of the nodal θ, with no limiting.
+   Next: the upwind θ also in the face part of the pressure gradient (an energy-consistent
+   upwind pair), then the same correction for ρ.
+2. The upwind term is a CPU loop; GPU kernel and distribution still to do.
+3. Coarse columns of first order give a far too weak baroclinic wave; resolution and order must
+   go up together, which needs the GPU.
 
 Record of the search:
 

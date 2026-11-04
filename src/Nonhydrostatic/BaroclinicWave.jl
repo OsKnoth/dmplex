@@ -33,6 +33,37 @@ function baroclinic_wave(lon, lat, z; radius=6.37122e6, omega=7.292e-5, perturba
     return T, p, u, v
 end
 
+"""
+    thermal_wind(lon, lat, z; T0=300, epsilon=0.1, zs=12000, ps=1e5, radius, omega) -> (T, p, u, v)
+
+A steady rotating wind in thermal-wind balance, shallow atmosphere, height
+coordinates. The temperature falls towards the poles near the ground and the
+meridional gradient decays with height,
+
+    1/T = (1 + ε sin²φ s(z)) / T0,  s(z) = sech²(z/zs),  S(z) = ∫₀ᶻ s = zs tanh(z/zs),
+
+the pressure is hydrostatic with the same surface pressure everywhere (no
+wind at the ground), `p = ps exp(-g (z + ε sin²φ S(z)) / (R T0))`, and the
+zonal wind follows from the gradient-wind balance
+`(2Ω sin φ + u tan φ / a) u = -(R T / a) ∂ln p/∂φ`:
+
+    u = -Ω r + √((Ω r)² + 2 g ε cos²φ S(z) T / T0),  r = a cos φ.
+
+The westerly grows up to about `zs` and is constant above (about 25 m/s at
+the equator for `ε = 0.1`), so the upper levels and the damping layer see
+no shear. It is an exact steady state of the dry Euler equations, stably
+stratified; the shear below `zs` is weakly baroclinically unstable.
+"""
+function thermal_wind(lon, lat, z; T0=300.0, epsilon=0.1, zs=12000.0, ps=1e5, radius=6.37122e6, omega=7.292e-5)
+    s2 = sin(lat)^2
+    S = zs * tanh(z / zs)
+    T = T0 / (1 + epsilon * s2 * sech(z / zs)^2)
+    p = ps * exp(-GRAV * (z + epsilon * s2 * S) / (Rd * T0))
+    rc = radius * cos(lat)
+    u = -omega * rc + sqrt((omega * rc)^2 + 2GRAV * epsilon * cos(lat)^2 * S * T / T0)
+    return T, p, u, 0.0
+end
+
 function baroclinic_perturbation(lon, lat, z)
     d0, Vp, λc, φc, zp = 1 / 6, 1.0, π / 9, 2π / 9, 15000.0
     d = acos(clamp(sin(φc) * sin(lat) + cos(φc) * cos(lat) * cos(lon - λc), -1, 1))

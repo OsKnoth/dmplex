@@ -32,10 +32,12 @@ in the vertical (`vertical_mass=:consistent`, tridiagonal) or the lumped one
 order pair of Wess et al. with `height_order = k`), always with the exact mass in
 the rule of the projections. `vertical_advection=:vector_invariant` adds the vertical coupling of the
 vector-invariant form, `-η w` in the `u` equation and `η ⋅ ṽ - ∂K/∂z` in the
-`w` equation (`horizontal_tendency!`); `:none` leaves it out. Horizontal operators act layer by
+`w` equation (`horizontal_tendency!`); `:none` leaves it out. `horizontal_theta=:upwind` adds the
+upwind trace of θ on the primal faces to the horizontal ρθ flux (`upwind_theta!`, serial CPU only);
+`:central` (default) keeps the energy-conserving flux `B Π_U(θ F)`. Horizontal operators act layer by
 layer with the 2D kite operators (scaled from the unit sphere by `radius`).
 """
-struct KiteNonhydrostatic{SW, V, W, BE}
+struct KiteNonhydrostatic{SW, V, W, UP, BE}
     horizontal::SW
     vgrid::VerticalGrid
     dz::V
@@ -48,6 +50,7 @@ struct KiteNonhydrostatic{SW, V, W, BE}
     beta::Float64
     vertical_theta::Int  # 0 centred, 1 upwind in the flux, 2 upwind also in ∂π/∂z
     vertical_advection::Bool
+    upwind::UP           # paired primal-face points for the upwind θ trace, or nothing
     backend::BE
 end
 
@@ -55,12 +58,14 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                             radius::Real=6.37122e6, omega::Real=7.292e-5, beta::Real=0.65,
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
                             vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
-                            velocity::Symbol=:rt, backend=KernelAbstractions.CPU())
+                            velocity::Symbol=:rt, horizontal_theta::Symbol=:central,
+                            backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
     vertical_advection in (:vector_invariant, :none) ||
         throw(ArgumentError("vertical_advection must be :vector_invariant or :none"))
+    horizontal_theta in (:central, :upwind) || throw(ArgumentError("horizontal_theta must be :central or :upwind"))
     # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
     # so the horizontal fluxes of ρ and ρθ do not create θ′
     # (also for the dual Radau velocity of Wess et al.: its exact mass, not the nodal one)
@@ -85,7 +90,7 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
     dev(x) = to_backend(backend, x)
     return KiteNonhydrostatic(sw, vgrid, dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work,
                               Float64(radius), Float64(omega), Float64(beta), vtheta, vertical_advection == :vector_invariant,
-                              backend)
+                              horizontal_theta == :upwind ? upwind_faces(sw) : nothing, backend)
 end
 
 num_layers(m::KiteNonhydrostatic) = num_layers(m.vgrid)
@@ -374,8 +379,64 @@ function horizontal_divergence!(dρ, dρθ, m::KiteNonhydrostatic, θ)
     ldiv!(dρ, sw.Mh_solver, th)
     weighted_projection!(w.Fθ, m, w.F, θ)
     row_mul!(th, sw.B_owned, w.Fθ, 1 / m.radius)
+    m.upwind === nothing || upwind_theta!(th, m, w.F, θ, 1 / m.radius)
     ldiv!(dρθ, sw.Mh_solver, th)
     return nothing
+end
+
+"""
+    upwind_faces(sw) -> (; cK, qK, fK, cE, qE, fE)
+
+The quadrature points of the primal faces (halves of primal edges) of the local
+kites in pairs: point `qK` of face `fK` of kite `cK` coincides with point `qE`
+of face `fE` of the neighbour kite `cE` across the primal edge. Serial only.
+"""
+function upwind_faces(sw)
+    kites, H = sw.kites, sw.H
+    shape = reference_element(H, first(cell_range(kites))).shape
+    open = Dict{NTuple{3, Int}, NTuple{3, Int}}()
+    pairs = NTuple{6, Int}[]
+    for (c, kite) in enumerate(sw.distribution.kite_ids)
+        cmap = CellMap(kites, first(cell_range(kites)) + kite - 1)
+        for (f, face) in enumerate(sw.faces)
+            t, _ = gauss_legendre(length(face.weights))
+            for q in eachindex(t)
+                x = first(map_point(cmap, edge_point(shape, KITE_PRIMAL_FACES[f], t[q])))
+                key = Tuple(round.(Int, 1e8 .* x))
+                other = pop!(open, key, nothing)
+                other === nothing ? (open[key] = (c, q, f)) : push!(pairs, (other..., c, q, f))
+            end
+        end
+    end
+    isempty(open) || error("unpaired primal-face points: \$(length(open))")
+    return NamedTuple{(:cK, :qK, :fK, :cE, :qE, :fE)}(Tuple([p[i] for p in pairs] for i in 1:6))
+end
+
+"""
+    upwind_theta!(th, m, F, θ, scale)
+
+Adds the upwind trace of θ on the primal faces to the ρθ divergence `th = B Π_U(θ F)`:
+
+    -scale ∫_F η_i^K |F ⋅ n|/2 (θ^K - θ^E)
+
+for the test functions of both kites `K`, `E` at every face. It vanishes for θ
+continuous across the primal edges and conserves ρθ; it damps the jumps of θ.
+"""
+function upwind_theta!(th, m::KiteNonhydrostatic, F, θ, scale)
+    sw, up = m.horizontal, m.upwind
+    ih = sw.ih
+    @inbounds for p in eachindex(up.cK)
+        cK, qK, cE, qE = up.cK[p], up.qK[p], up.cE[p], up.qE[p]
+        fK, fE = sw.faces[up.fK[p]], sw.faces[up.fE[p]]
+        ûn = dot(ShallowWater.gather_vector(F, fK.φ, sw.iu, sw.su, cK, qK), fK.ν)
+        jump = ShallowWater.gather_scalar(θ, fK.η, ih, cK, qK) - ShallowWater.gather_scalar(θ, fE.η, ih, cE, qE)
+        g = scale * fK.weights[qK] * abs(ûn) * jump / 2
+        for a in axes(ih, 1)
+            th[ih[a, cK]] -= g * fK.η[a, 1, qK]
+            th[ih[a, cE]] += g * fE.η[a, 1, qE]
+        end
+    end
+    return th
 end
 
 """

@@ -1,8 +1,8 @@
-# Discretization of `KiteNonhydrostatic` (as implemented, 2026-11-03)
+# Discretization of `KiteNonhydrostatic` (as implemented, 2026-11-04)
 
 This is the state of `src/Nonhydrostatic/KiteNonhydrostatic.jl` after steps 1–3 of
-[KITE3D_PLAN.md](KITE3D_PLAN.md): serial, lowest vertical order, no vertical advection. The open
-sub-cell instability is described at the end of the plan.
+[KITE3D_PLAN.md](KITE3D_PLAN.md): serial, lowest vertical order, with the vertical coupling of the vector-invariant form. The jet
+instability and the upwind θ trace that removes it are described at the end of the plan.
 
 ## Equations
 
@@ -123,6 +123,26 @@ $$
 
 The PV term uses $\zeta$, $\rho$ and $f$ at the quadrature points.
 
+**Upwind θ trace** (`horizontal_theta=:upwind`). $\theta$ is broken across the primal edges, and
+$B\,\Pi_U(\theta F)$ pairs the traces of the test function from both sides with the single-valued
+normal component of $\Pi_U(\theta F)$: a central flux, in which the jump $[\theta]$ never enters.
+The upwind option adds the DG upwind correction on every primal face $e$ (half of a primal edge)
+between the kites $K$ and $E$:
+
+$$
+M_H\dot{(\rho\theta)} \mathrel{+}= -\frac1a\sum_e\int_e \eta_i^K\,\frac{|F\cdot n|}{2}\,(\theta^K - \theta^E)
+\;-\;\frac1a\sum_e\int_e \eta_i^E\,\frac{|F\cdot n|}{2}\,(\theta^E - \theta^K),
+$$
+
+with the 1D Gauss rule of the face, $F\cdot n\,ds = \hat F\cdot\hat\nu\,dt$ (contravariant
+Piola, metric free) and the two sides paired by the physical position of their face points
+(`upwind_faces`). It vanishes for $\theta$ continuous across the face, conserves $\rho\theta$
+(the two sides cancel), and dissipates the θ variance, $\theta^T(\cdot) = -\frac1a\sum_e\int_e
+\frac{|F\cdot n|}{2}[\theta]^2 \le 0$. Together with $B\,\Pi_U(\theta F)$ it is the upwind
+flux $\theta^{up}F\cdot n$ up to the projection. The energy exchange of the pressure pair is no
+longer exact: the correction removes energy at the rate of the jumps. The momentum equation and
+the mass flux are unchanged.
+
 **Energy:** with $E = \sum_k\Delta z_k\big[\int\rho|u|^2/2 + \sum_i M_{H,ii}\,(c_v\rho\theta\,\pi + \rho g z_k)_i\big]$,
 we have $\partial E/\partial u = M_U F$, $\partial E/\partial\rho = M_H(K + g z)$ and
 $\partial E/\partial(\rho\theta) = M_H c_p\pi$. The horizontal terms then give
@@ -187,7 +207,8 @@ The explicit horizontal time-step limit on hexagon 3 is between 250 and 300 s.
   have no metric (contravariant Piola) and are exact.
 - The vertical $w$ mass: the consistent and the lumped $CG_1$ mass give the same growth.
 - $\theta$ at the quadrature points is the $Q_2$ interpolation of the nodal $\theta$, used in
-  $F_\theta$ and in the pressure gradient. Horizontally, $\theta$ is never upwinded.
+  $F_\theta$ and in the pressure gradient. With `horizontal_theta=:central` it is never upwinded
+  horizontally; `:upwind` adds the face term above.
 - $\rho$ in the vertical flux and $\theta_j$ in the vertical pressure gradient are nodal values of
   the column, while the horizontal pressure gradient sees $\pi$ only through $B^T$. A sub-cell
   pressure pattern in a layer is therefore weighted differently horizontally and vertically.
