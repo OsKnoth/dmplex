@@ -34,7 +34,11 @@ the rule of the projections. `vertical_advection=:vector_invariant` adds the ver
 vector-invariant form, `-η w` in the `u` equation and `η ⋅ ṽ - ∂K/∂z` in the
 `w` equation (`horizontal_tendency!`); `:none` leaves it out. `horizontal_theta=:upwind` adds the
 upwind trace of θ on the primal faces to the horizontal ρθ flux (`upwind_theta!`, serial CPU only);
-`:central` (default) keeps the energy-conserving flux `B Π_U(θ F)`. Horizontal operators act layer by
+`:central` (default) keeps the energy-conserving flux `B Π_U(θ F)`.
+`equation_of_state=:shallow_water` replaces the dry Exner pressure in the
+horizontal pressure gradient by `g ρθ / c_p` (`exner!`): with one layer and
+θ = 1 the model is the kite shallow-water model with `ρ` as the height (a test;
+the column solver keeps the dry equation of state). Horizontal operators act layer by
 layer with the 2D kite operators (scaled from the unit sphere by `radius`).
 """
 struct KiteNonhydrostatic{SW, V, W, UP, BE}
@@ -50,7 +54,9 @@ struct KiteNonhydrostatic{SW, V, W, UP, BE}
     beta::Float64
     vertical_theta::Int  # 0 centred, 1 upwind in the flux, 2 upwind also in ∂π/∂z
     vertical_advection::Bool
-    upwind::UP           # paired primal-face points for the upwind θ trace, or nothing
+    upwind::UP           # paired primal-face points for the upwind traces, or nothing
+    upwind_density::Bool # upwind jumps of ρ and ρθ (true) or of θ alone
+    shallow_water::Float64   # g of the shallow-water equation of state π = g ρθ / c_p, 0 for the dry one
     backend::BE
 end
 
@@ -59,13 +65,16 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
                             vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
                             velocity::Symbol=:rt, horizontal_theta::Symbol=:central,
-                            backend=KernelAbstractions.CPU())
+                            equation_of_state::Symbol=:dry, gravity::Real=GRAV, backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
     vertical_advection in (:vector_invariant, :none) ||
         throw(ArgumentError("vertical_advection must be :vector_invariant or :none"))
-    horizontal_theta in (:central, :upwind) || throw(ArgumentError("horizontal_theta must be :central or :upwind"))
+    horizontal_theta in (:central, :upwind, :upwind_density) ||
+        throw(ArgumentError("horizontal_theta must be :central, :upwind or :upwind_density"))
+    equation_of_state in (:dry, :shallow_water) ||
+        throw(ArgumentError("equation_of_state must be :dry or :shallow_water"))
     # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
     # so the horizontal fluxes of ρ and ρθ do not create θ′
     # (also for the dual Radau velocity of Wess et al.: its exact mass, not the nodal one)
@@ -90,7 +99,8 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
     dev(x) = to_backend(backend, x)
     return KiteNonhydrostatic(sw, vgrid, dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work,
                               Float64(radius), Float64(omega), Float64(beta), vtheta, vertical_advection == :vector_invariant,
-                              horizontal_theta == :upwind ? upwind_faces(sw) : nothing, backend)
+                              horizontal_theta == :central ? nothing : upwind_faces(sw), horizontal_theta == :upwind_density,
+                              equation_of_state == :shallow_water ? Float64(gravity) : 0.0, backend)
 end
 
 num_layers(m::KiteNonhydrostatic) = num_layers(m.vgrid)
@@ -293,7 +303,7 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
     tz, tu, th = sw.row_buffers
     nk, nlev = num_local_kites(sw.distribution), num_layers(m)
     w.θ .= y.ρθ ./ y.ρ
-    @. w.π = (Rd * y.ρθ / P0)^(Rd / Cvd)
+    exner!(w.π, m, y.ρθ)
     # mass flux and kinetic energy of every layer (with the w² part)
     for k in 1:nlev
         fill!(s.rhs_K, 0.0)
@@ -337,7 +347,7 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
         end
         # mass and ρθ
         copyto!(w.F, F)
-        horizontal_divergence!(view(dy.ρ, :, k), view(dy.ρθ, :, k), m, θ)
+        horizontal_divergence!(view(dy.ρ, :, k), view(dy.ρθ, :, k), m, θ, u, ρ, view(y.ρθ, :, k))
     end
     fill!(w.tw, 0.0)
     if m.vertical_advection
@@ -349,6 +359,20 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
         end
     end
     return dy
+end
+
+"""
+    exner!(π, m, ρθ)
+
+The Exner pressure of the horizontal pressure gradient: `(R ρθ / p0)^(R/c_v)`, or
+with `equation_of_state=:shallow_water` `g ρθ / c_p`, so that for θ = 1 the term
+`-c_p θ ∇π` is `-g ∇ρ` and the pressure `p = g ρ²/2` of shallow water (the
+energy stays consistent, `∂E/∂ρθ = c_p π = g ρθ`).
+"""
+function exner!(π, m::KiteNonhydrostatic, ρθ)
+    g = m.shallow_water
+    g == 0 ? (@. π = (Rd * ρθ / P0)^(Rd / Cvd)) : (@. π = g * ρθ / Cpd)
+    return π
 end
 
 """
@@ -371,15 +395,28 @@ function dot_product!(out, m::KiteNonhydrostatic, p, q)
     return out
 end
 
-"`dρ = M_h⁻¹ B F / a` and `dρθ = M_h⁻¹ B Π_U(θ F) / a` for the flux `F` in `m.work.F`."
-function horizontal_divergence!(dρ, dρθ, m::KiteNonhydrostatic, θ)
+"""
+    horizontal_divergence!(dρ, dρθ, m, θ, u, ρ, ρθ)
+
+`dρ = M_h⁻¹ B F / a` and `dρθ = M_h⁻¹ B Π_U(θ F) / a` for the flux `F` in
+`m.work.F`, with `horizontal_theta=:upwind` the upwind θ trace in `dρθ`
+(`upwind_theta!`), with `:upwind_density` the upwind traces of `ρ` and `ρθ`
+with the velocity `u` (`upwind_jump!`), which are identical for θ = 1.
+"""
+function horizontal_divergence!(dρ, dρθ, m::KiteNonhydrostatic, θ, u, ρ, ρθ)
     sw, w = m.horizontal, m.work
     th = sw.row_buffers[3]
+    density = m.upwind !== nothing && m.upwind_density
     row_mul!(th, sw.B_owned, w.F, 1 / m.radius)
+    density && upwind_jump!(th, m, u, ρ, 1 / m.radius)
     ldiv!(dρ, sw.Mh_solver, th)
     weighted_projection!(w.Fθ, m, w.F, θ)
     row_mul!(th, sw.B_owned, w.Fθ, 1 / m.radius)
-    m.upwind === nothing || upwind_theta!(th, m, w.F, θ, 1 / m.radius)
+    if density
+        upwind_jump!(th, m, u, ρθ, 1 / m.radius)
+    elseif m.upwind !== nothing
+        upwind_theta!(th, m, w.F, θ, 1 / m.radius)
+    end
     ldiv!(dρθ, sw.Mh_solver, th)
     return nothing
 end
@@ -410,6 +447,31 @@ function upwind_faces(sw)
     end
     isempty(open) || error("unpaired primal-face points: \$(length(open))")
     return NamedTuple{(:cK, :qK, :fK, :cE, :qE, :fE)}(Tuple([p[i] for p in pairs] for i in 1:6))
+end
+
+"""
+    upwind_jump!(th, m, u, q, scale)
+
+Adds the upwind correction of the density `q` (ρ or ρθ) on the primal faces,
+`-scale ∫_F η_i^K |u ⋅ n|/2 (q^K - q^E)` for both kites, to `th`: the
+Lax–Friedrichs/upwind penalty of the jumps of a broken density, conservative
+and dissipative in `q²`.
+"""
+function upwind_jump!(th, m::KiteNonhydrostatic, u, q, scale)
+    sw, up = m.horizontal, m.upwind
+    ih = sw.ih
+    @inbounds for p in eachindex(up.cK)
+        cK, qK, cE, qE = up.cK[p], up.qK[p], up.cE[p], up.qE[p]
+        fK, fE = sw.faces[up.fK[p]], sw.faces[up.fE[p]]
+        ûn = dot(ShallowWater.gather_vector(u, fK.φ, sw.iu, sw.su, cK, qK), fK.ν)
+        jump = ShallowWater.gather_scalar(q, fK.η, ih, cK, qK) - ShallowWater.gather_scalar(q, fE.η, ih, cE, qE)
+        g = scale * fK.weights[qK] * abs(ûn) * jump / 2
+        for a in axes(ih, 1)
+            th[ih[a, cK]] -= g * fK.η[a, 1, qK]
+            th[ih[a, cE]] += g * fE.η[a, 1, qE]
+        end
+    end
+    return th
 end
 
 """
@@ -453,7 +515,8 @@ function stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
     @. y.u = y0.u + τ * w.dy.u
     for k in 1:num_layers(m)
         weighted_projection!(w.F, m, view(y.u, :, k), view(ys.ρ, :, k))
-        horizontal_divergence!(view(w.ρexpl, :, k), view(w.ρθexpl, :, k), m, view(w.θ, :, k))
+        horizontal_divergence!(view(w.ρexpl, :, k), view(w.ρθexpl, :, k), m, view(w.θ, :, k), view(y.u, :, k),
+                               view(ys.ρ, :, k), view(ys.ρθ, :, k))
     end
     @. w.ρexpl = y0.ρ + τ * w.ρexpl
     @. w.ρθexpl = y0.ρθ + τ * w.ρθexpl

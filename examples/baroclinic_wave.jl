@@ -2,7 +2,7 @@
 # the extruded hexagonal mesh (ICON-IAP form: PV usage, momentum advection, TRiSK
 # weights, Smagorinsky diffusion, upwind vertical θ), or with --icon the ICON model
 # on the extruded triangle mesh (predictor–corrector, Miura fluxes, divergence
-# damping), on one CPU or one GPU.
+# damping, fourth-order diffusion of vn), on one CPU or one GPU.
 #
 #   julia --project examples/baroclinic_wave.jl [resolution] [days] [dt] [levels] [--icon]
 #   julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu
@@ -45,8 +45,15 @@ function main(args)
     backend = USE_GPU ? CUDA.CUDABackend() : KernelAbstractions.CPU()
     # neighbours close in memory
     dm = hilbert_order(USE_ICON ? create_spherical_mesh(resolution) : create_hexagon_mesh(resolution))
-    model = USE_ICON ? ICONNonhydrostatic : TRiSKNonhydrostatic
-    m = model(TRiSKGrid(dm), VerticalGrid(levels, 30000.0); damping_height=22000.0, damping_rate=0.05, backend)
+    v = VerticalGrid(levels, 30000.0)
+    m = if USE_ICON
+        # fourth-order diffusion of vn scaled as ICON's (∝ A²/Δt ∝ Δx³), 5e14 m⁴/s at 79 km (R2B5)
+        Δx = sqrt(4π / num_cells(dm)) * 6.37122e6
+        ICONNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05,
+                           hyperdiffusion=5e14 * (Δx / 79e3)^3, backend)
+    else
+        TRiSKNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05, backend)
+    end
     @printf("%d cells (≈ %.0f km) × %d layers on %s, dt = %.0f s\n", num_cells(dm),
             sqrt(4π / num_cells(dm)) * 6.37122e6 / 1000, levels, nameof(typeof(backend)), dt)
     y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z))
