@@ -201,6 +201,24 @@ inside the primal cells, where ρ and θ are continuous. The instantaneous Casim
 d/dt Σ M ρ(θ−1)² is zero for smooth θ′ and small for random θ′ (2e-3), so the mode is a coupled
 u–ρ–θ′ mode through the pressure term −gρ∇θ′ − gθ′∇ρ, not passive advection.
 
+**Passive tracer** (`tracer=true`, `ρq` transported as ρθ: horizontally `B Π_U(q F)`, vertically
+with the mass flux of the column solve; for q = 1 the equations of ρ, tested). One layer, TC2,
+hexagon 3:
+
+| | max \|θ − 1\|, max \|q − 1\| after ¼ / ½ / ¾ / 1 day |
+|---|---|
+| θ = q = 1 exactly, central | identical: 1.4e-13, 1.6e-11, 1.9e-9, 2.2e-7 |
+| random θ′, q′ = 1e-8, central | θ′ 1.8e-6 / q′ 2.1e-6, …, 3.5e-2 / 3.4e-2, NaN |
+| random θ′, q′ = 1e-8, upwind | θ′ 1.1e-7 / q′ 1.2e-7, …, 1.1e-5 / 2.3e-5 |
+
+The passive tracer grows exactly like θ, although it does not feed back on the flow and its
+equation is linear in q′. So the pressure coupling is not the cause: **the transport of a mixing
+ratio on the kite height space, `ρq̇ = M_h⁻¹ B Π_U(q F)/a` with the nodal `q = ρq/ρ` and
+`ρ̇ = M_h⁻¹ B F/a`, is unstable in a flow**, already in 2D. With q = 1 it keeps ρq = ρ exactly, but
+q = 1 is an unstable fixed point. In 3D (steady jet, hexagon 3) q − 1 grows from 1e-14 to 2e-12 in
+one day. The fix belongs to the tracer transport (and then θ), e.g. a stabilized (SUPG or upwind DG
+with interior terms) or a skew-symmetric form of the advection of q.
+
 **Open problems of the kite model:**
 
 1. The node-scale mode is not removed by the upwind θ trace alone on a flow with strong

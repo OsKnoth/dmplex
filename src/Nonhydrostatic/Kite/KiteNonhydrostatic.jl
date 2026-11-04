@@ -35,6 +35,9 @@ vector-invariant form, `-η w` in the `u` equation and `η ⋅ ṽ - ∂K/∂z` 
 `w` equation (`horizontal_tendency!`); `:none` leaves it out. `horizontal_theta=:upwind` adds the
 upwind trace of θ on the primal faces to the horizontal ρθ flux (`upwind_theta!`, serial CPU only);
 `:central` (default) keeps the energy-conserving flux `B Π_U(θ F)`.
+`tracer=true` adds a passive tracer `ρq` to the state (`tracer_divergence!`,
+`tracer_column_kernel!`), transported as ρθ with the same flux and upwind option;
+for `q = 1` its equations are those of `ρ`.
 `equation_of_state=:shallow_water` replaces the dry Exner pressure in the
 horizontal pressure gradient by `g ρθ / c_p` (`exner!`): with one layer and
 θ = 1 the model is the kite shallow-water model with `ρ` as the height (a test;
@@ -57,6 +60,7 @@ struct KiteNonhydrostatic{SW, V, W, UP, BE}
     upwind::UP           # paired primal-face points for the upwind traces, or nothing
     upwind_density::Bool # upwind jumps of ρ and ρθ (true) or of θ alone
     shallow_water::Float64   # g of the shallow-water equation of state π = g ρθ / c_p, 0 for the dry one
+    tracer::Bool         # passive tracer ρq in the state
     backend::BE
 end
 
@@ -65,7 +69,8 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
                             vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
                             velocity::Symbol=:rt, horizontal_theta::Symbol=:central,
-                            equation_of_state::Symbol=:dry, gravity::Real=GRAV, backend=KernelAbstractions.CPU())
+                            equation_of_state::Symbol=:dry, gravity::Real=GRAV, tracer::Bool=false,
+                            backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
@@ -92,15 +97,18 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
             tw=z(nh, nlev + 1), ρexpl=z(nh, nlev), ρθexpl=z(nh, nlev), π=z(nh, nlev),
             F=KernelAbstractions.zeros(backend, Float64, nu), Fθ=KernelAbstractions.zeros(backend, Float64, nu),
             g=KernelAbstractions.zeros(backend, Float64, nu), gθ=KernelAbstractions.zeros(backend, Float64, nu),
-            dy=(u=z(nu, nlev), ρ=z(nh, nlev), ρθ=z(nh, nlev)),
+            dy=tracer ? (u=z(nu, nlev), ρ=z(nh, nlev), ρθ=z(nh, nlev), ρq=z(nh, nlev)) :
+                        (u=z(nu, nlev), ρ=z(nh, nlev), ρθ=z(nh, nlev)),
+            q=z(nh, nlev), ρqexpl=z(nh, nlev), Fq=KernelAbstractions.zeros(backend, Float64, nu),
             K=z(nh, nlev), Fs=z(nu, nlev), η=z(nu, nlev + 1), a=KernelAbstractions.zeros(backend, Float64, nu),
             b=KernelAbstractions.zeros(backend, Float64, nu),
-            y0=(u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev)))
+            y0=tracer ? (u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev), ρq=z(nh, nlev)) :
+                        (u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev)))
     dev(x) = to_backend(backend, x)
     return KiteNonhydrostatic(sw, vgrid, dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work,
                               Float64(radius), Float64(omega), Float64(beta), vtheta, vertical_advection == :vector_invariant,
                               horizontal_theta == :central ? nothing : upwind_faces(sw), horizontal_theta == :upwind_density,
-                              equation_of_state == :shallow_water ? Float64(gravity) : 0.0, backend)
+                              equation_of_state == :shallow_water ? Float64(gravity) : 0.0, tracer, backend)
 end
 
 num_layers(m::KiteNonhydrostatic) = num_layers(m.vgrid)
@@ -108,11 +116,12 @@ num_layers(m::KiteNonhydrostatic) = num_layers(m.vgrid)
 num_columns(m::KiteNonhydrostatic) = length(height_dofs(m.horizontal))
 num_velocity_dofs(m::KiteNonhydrostatic) = length(velocity_dofs(m.horizontal))
 
-"State `(u, w, ρ, ρθ)` of the model, zero."
+"State `(u, w, ρ, ρθ)` of the model, with `tracer` also `ρq`, zero."
 function zero_state(m::KiteNonhydrostatic)
     nh, nu, nlev = num_columns(m), num_velocity_dofs(m), num_layers(m)
     z(n, l) = KernelAbstractions.zeros(m.backend, Float64, n, l)
-    return (u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev))
+    y = (u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev))
+    return m.tracer ? (; y..., ρq=z(nh, nlev)) : y
 end
 
 """
@@ -185,14 +194,15 @@ function column_points(m::KiteNonhydrostatic)
 end
 
 """
-    initial_state(m::KiteNonhydrostatic, profile)
+    initial_state(m::KiteNonhydrostatic, profile; tracer=(λ, φ, z) -> 1.0)
 
 State from `profile(λ, φ, z) = (T, p, u, v)` as for `TRiSKNonhydrostatic`:
 every column in the discrete hydrostatic balance of the column solver at its
 Radau node (`balanced_column`), the velocity `u east + v north` projected
-into the velocity space per layer, `w = 0`.
+into the velocity space per layer, `w = 0`; with a tracer `ρq = ρ q` for the
+mixing ratio `tracer(λ, φ, z)` at the nodes and layer centres (default 1).
 """
-function initial_state(m::KiteNonhydrostatic, profile)
+function initial_state(m::KiteNonhydrostatic, profile; tracer=(λ, φ, z) -> 1.0)
     v, nlev = m.vgrid, num_layers(m)
     x = column_points(m)
     ρ, ρθ = zeros(length(x), nlev), zeros(length(x), nlev)
@@ -207,7 +217,10 @@ function initial_state(m::KiteNonhydrostatic, profile)
         ue * east + vn * north
     end)
     dev(a) = to_backend(m.backend, a)
-    return (u=u, w=KernelAbstractions.zeros(m.backend, Float64, length(x), nlev + 1), ρ=dev(ρ), ρθ=dev(ρθ))
+    y = (u=u, w=KernelAbstractions.zeros(m.backend, Float64, length(x), nlev + 1), ρ=dev(ρ), ρθ=dev(ρθ))
+    m.tracer || return y
+    q = [tracer(lonlat(xi)..., v.z_full[k]) for xi in x, k in 1:nlev]
+    return (; y..., ρq=dev(ρ .* q))
 end
 
 """
@@ -303,6 +316,7 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
     tz, tu, th = sw.row_buffers
     nk, nlev = num_local_kites(sw.distribution), num_layers(m)
     w.θ .= y.ρθ ./ y.ρ
+    m.tracer && (w.q .= y.ρq ./ y.ρ)
     exner!(w.π, m, y.ρθ)
     # mass flux and kinetic energy of every layer (with the w² part)
     for k in 1:nlev
@@ -348,6 +362,7 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
         # mass and ρθ
         copyto!(w.F, F)
         horizontal_divergence!(view(dy.ρ, :, k), view(dy.ρθ, :, k), m, θ, u, ρ, view(y.ρθ, :, k))
+        m.tracer && tracer_divergence!(view(dy.ρq, :, k), m, view(w.q, :, k), u, view(y.ρq, :, k))
     end
     fill!(w.tw, 0.0)
     if m.vertical_advection
@@ -517,10 +532,61 @@ function stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
         weighted_projection!(w.F, m, view(y.u, :, k), view(ys.ρ, :, k))
         horizontal_divergence!(view(w.ρexpl, :, k), view(w.ρθexpl, :, k), m, view(w.θ, :, k), view(y.u, :, k),
                                view(ys.ρ, :, k), view(ys.ρθ, :, k))
+        m.tracer && tracer_divergence!(view(w.ρqexpl, :, k), m, view(w.q, :, k), view(y.u, :, k), view(ys.ρq, :, k))
     end
     @. w.ρexpl = y0.ρ + τ * w.ρexpl
     @. w.ρθexpl = y0.ρθ + τ * w.ρθexpl
-    return vertical_stage!(m, y, y0, ys, τ)
+    vertical_stage!(m, y, y0, ys, τ)
+    if m.tracer
+        @. w.ρqexpl = y0.ρq + τ * w.ρqexpl
+        launch!(m, tracer_column_kernel!, num_columns(m), y.ρq, w.ρqexpl, w.q, ys.ρ, y.w, y0.w, m.dz, m.wlow, τ,
+                m.beta, num_layers(m))
+    end
+    return y
+end
+
+"""
+    tracer_divergence!(dρq, m, q, u, ρq)
+
+Horizontal tracer transport of one layer, `dρq = M_h⁻¹ B Π_U(q F) / a` with the
+mass flux `F` in `m.work.F`, as `ρθ` (with the same upwind option): for `q = 1`
+it is the mass divergence.
+"""
+function tracer_divergence!(dρq, m::KiteNonhydrostatic, q, u, ρq)
+    sw, w = m.horizontal, m.work
+    th = sw.row_buffers[3]
+    weighted_projection!(w.Fq, m, w.F, q)
+    row_mul!(th, sw.B_owned, w.Fq, 1 / m.radius)
+    if m.upwind !== nothing
+        m.upwind_density ? upwind_jump!(th, m, u, ρq, 1 / m.radius) : upwind_theta!(th, m, w.F, q, 1 / m.radius)
+    end
+    ldiv!(dρq, sw.Mh_solver, th)
+    return dρq
+end
+
+"""
+Vertical tracer transport of one column: `ρq = ρq_expl - τ δ_z(q_j M_j)` with
+the mass flux of the column solve, `M_j = ρ_j (β w_j + (1 - β) w0_j)`, and `q`,
+`ρ` of the stage state linearly interpolated to the interfaces; for `q = 1` the
+mass update of `vertical_solve_kernel!`.
+"""
+@kernel function tracer_column_kernel!(ρq, @Const(ρqexpl), @Const(q), @Const(ρs), @Const(w), @Const(w0), @Const(dz),
+                                       @Const(wlow), τ, β, nlev)
+    i = @index(Global)
+    @inbounds begin
+        Flow = 0.0
+        for k in 1:nlev
+            F = 0.0
+            if k < nlev
+                j = k + 1
+                ρj = wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]
+                qj = wlow[j] * q[i, j - 1] + (1 - wlow[j]) * q[i, j]
+                F = qj * ρj * (β * w[i, j] + (1 - β) * w0[i, j])
+            end
+            ρq[i, k] = ρqexpl[i, k] - τ / dz[k] * (F - Flow)
+            Flow = F
+        end
+    end
 end
 
 """

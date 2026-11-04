@@ -352,3 +352,18 @@ end
         @test d3.ρθ ≈ d3.ρ rtol = 1e-13
     end
 end
+
+@testset "kite nonhydrostatic: tracer with mixing ratio one" begin
+    m = KiteNonhydrostatic(create_hexagon_mesh(2), VerticalGrid(6, 30000.0); damping_height=22000.0, damping_rate=0.05,
+                           tracer=true)
+    y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false))
+    @test y.ρq == y.ρ
+    ys = zero_state(m)
+    @test haskey(ys, :ρq)
+    for _ in 1:4
+        step!(m, y, 150.0, ys)
+    end
+    @test maximum(abs, y.ρq ./ y.ρ .- 1) < 1e-13        # ρq = ρ: the tracer equations are those of ρ for q = 1
+    q0 = (λ, φ, z) -> 1 + 0.1 * sin(φ)
+    @test initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false); tracer=q0).ρq != y.ρ
+end
