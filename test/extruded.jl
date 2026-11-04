@@ -367,3 +367,52 @@ end
     q0 = (λ, φ, z) -> 1 + 0.1 * sin(φ)
     @test initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false); tracer=q0).ρq != y.ρ
 end
+
+@testset "kite nonhydrostatic: DG transport of ρθ and ρq" begin
+    NH = dmplex.Nonhydrostatic
+    for primal in (create_hexagon_mesh(1), create_cubed_sphere_mesh(3), create_spherical_mesh(1)), ht in (:dg, :dg_upwind)
+        m = KiteNonhydrostatic(primal, VerticalGrid(1, 1.0), 1; radius=1.0, horizontal_theta=ht)
+        nh, nu = NH.num_columns(m), NH.num_velocity_dofs(m)
+        F, θ, π = randn(nu), 1 .+ 0.1 .* randn(nh), randn(nh)
+        th, tu, BF = zeros(nh), zeros(nu), zeros(nh)
+        NH.dg_divergence!(th, m, F, θ, 1.0)
+        NH.dg_gradient!(tu, m, F, θ, π, 1.0)
+        @test dot(π, th) ≈ dot(F, tu) rtol = 1e-12       # adjoint: the energy exchange is exact
+        dmplex.FEM.row_mul!(BF, m.horizontal.B_owned, F)
+        @test NH.dg_divergence!(th, m, F, ones(nh), 1.0) ≈ BF rtol = 1e-12   # q = 1 gives the mass flux
+        @test abs(sum(NH.dg_divergence!(th, m, F, θ, 1.0))) < 1e-10 * norm(th)  # conservative
+        # DG advection u ⋅ ∇w (the w tendency subtracts it) and its adjoint in the momentum equation:
+        # exact energy exchange for the central trace, the upwind penalty only removes energy
+        u, wv = randn(nu), randn(nh)
+        @test norm(NH.w_advection!(th, m, u, fill(2.0, nh), 1.0)) < 1e-12           # a constant w is not advected
+        adv, flux = dot(wv, NH.w_advection!(th, m, u, wv, 1.0)), dot(u, NH.w_advection_flux!(tu, m, wv, 1.0))
+        ht == :dg ? (@test adv ≈ flux rtol = 1e-12) : (@test adv > flux)
+    end
+    m = KiteNonhydrostatic(create_hexagon_mesh(2), VerticalGrid(6, 30000.0); damping_height=22000.0, damping_rate=0.05,
+                           tracer=true, horizontal_theta=:dg_upwind)
+    y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false)); ys = zero_state(m)
+    for _ in 1:4
+        step!(m, y, 150.0, ys)
+    end
+    @test maximum(abs, y.ρq ./ y.ρ .- 1) < 1e-13
+end
+
+@testset "baroclinic channel: balance and planar kite model" begin
+    f0 = 1.0313e-4
+    for (y, z) in ((1.5e6, 3000.0), (3e6, 8000.0), (9e6, 3000.0))
+        p(yy, zz) = baroclinic_channel(0.0, yy, zz; perturbation=false)[2]
+        T, pr, u, _ = baroclinic_channel(0.0, y, z; perturbation=false)
+        ρ = pr / (dmplex.Nonhydrostatic.Rd * T)
+        @test -(p(y + 1, z) - p(y - 1, z)) / (2 * f0 * ρ) ≈ u rtol = 1e-5                       # geostrophic
+        @test (p(y, z + 1) - p(y, z - 1)) / 2 ≈ -ρ * dmplex.Nonhydrostatic.GRAV rtol = 1e-6   # hydrostatic
+    end
+    @test baroclinic_channel(0.0, 1.0, 5000.0; perturbation=false)[1] ≈ baroclinic_channel(0.0, 1.2e7 - 1.0, 5000.0; perturbation=false)[1]
+    primal = create_periodic_plane(10, 3; Lx=4e7, Ly=1.2e7)
+    m = KiteNonhydrostatic(primal, VerticalGrid(4, 30000.0), 1; radius=1.0, coriolis=x -> f0, horizontal_theta=:dg_upwind)
+    y = initial_state(m, (x, yy, z) -> baroclinic_channel(x, yy, z; perturbation=false)); ys = zero_state(m)
+    W = column_weights(m); mass(y) = sum(W' * y.ρ .* m.vgrid.dz')
+    m0 = mass(y)
+    step!(m, y, 300.0, ys)
+    @test all(isfinite, y.ρ)
+    @test abs(mass(y) / m0 - 1) < 1e-13
+end

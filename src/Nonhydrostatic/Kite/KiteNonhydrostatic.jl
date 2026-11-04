@@ -34,7 +34,12 @@ the rule of the projections. `vertical_advection=:vector_invariant` adds the ver
 vector-invariant form, `-η w` in the `u` equation and `η ⋅ ṽ - ∂K/∂z` in the
 `w` equation (`horizontal_tendency!`); `:none` leaves it out. `horizontal_theta=:upwind` adds the
 upwind trace of θ on the primal faces to the horizontal ρθ flux (`upwind_theta!`, serial CPU only);
-`:central` (default) keeps the energy-conserving flux `B Π_U(θ F)`.
+`:central` (default) keeps the energy-conserving flux `B Π_U(θ F)`. `:dg` and `:dg_upwind` transport
+ρθ by DG with the kite mass flux, `Σ_K ∫ θ F ⋅ ∇η - Σ_F ∫ θ̂ F ⋅ n [η]` with the central or upwind
+trace θ̂ (`dg_divergence!`), and use its adjoint in the pressure gradient (`dg_gradient!`), so the
+energy exchange stays exact; ρ keeps `B F`. With these options the horizontal advection
+of `w` is also DG (`w_advection!`, its adjoint `w_advection_flux!` in the momentum equation)
+in place of the projected gradient `M_u⁻¹ Bᵀ w` in `η` (serial CPU only).
 `tracer=true` adds a passive tracer `ρq` to the state (`tracer_divergence!`,
 `tracer_column_kernel!`), transported as ρθ with the same flux and upwind option;
 for `q = 1` its equations are those of `ρ`.
@@ -43,6 +48,8 @@ horizontal pressure gradient by `g ρθ / c_p` (`exner!`): with one layer and
 θ = 1 the model is the kite shallow-water model with `ρ` as the height (a test;
 the column solver keeps the dry equation of state). Horizontal operators act layer by
 layer with the 2D kite operators (scaled from the unit sphere by `radius`).
+On a periodic plane (`create_periodic_plane` with lengths in m) use `radius=1`
+and `coriolis`, the Coriolis parameter `f(x)` (default `2Ω x₃` on the sphere).
 """
 struct KiteNonhydrostatic{SW, V, W, UP, BE}
     horizontal::SW
@@ -59,6 +66,8 @@ struct KiteNonhydrostatic{SW, V, W, UP, BE}
     vertical_advection::Bool
     upwind::UP           # paired primal-face points for the upwind traces, or nothing
     upwind_density::Bool # upwind jumps of ρ and ρθ (true) or of θ alone
+    dg::Bool             # DG transport of ρθ and ρq with the kite mass flux
+    dg_upwind::Float64   # 0: central trace, 1: upwind trace of the DG transport
     shallow_water::Float64   # g of the shallow-water equation of state π = g ρθ / c_p, 0 for the dry one
     tracer::Bool         # passive tracer ρq in the state
     backend::BE
@@ -70,20 +79,20 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                             vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
                             velocity::Symbol=:rt, horizontal_theta::Symbol=:central,
                             equation_of_state::Symbol=:dry, gravity::Real=GRAV, tracer::Bool=false,
-                            backend=KernelAbstractions.CPU())
+                            coriolis=x -> 2omega * x[3], backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
     vertical_advection in (:vector_invariant, :none) ||
         throw(ArgumentError("vertical_advection must be :vector_invariant or :none"))
-    horizontal_theta in (:central, :upwind, :upwind_density) ||
-        throw(ArgumentError("horizontal_theta must be :central, :upwind or :upwind_density"))
+    horizontal_theta in (:central, :upwind, :upwind_density, :dg, :dg_upwind) ||
+        throw(ArgumentError("horizontal_theta must be :central, :upwind, :upwind_density, :dg or :dg_upwind"))
     equation_of_state in (:dry, :shallow_water) ||
         throw(ArgumentError("equation_of_state must be :dry or :shallow_water"))
     # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
     # so the horizontal fluxes of ρ and ρθ do not create θ′
     # (also for the dual Radau velocity of Wess et al.: its exact mass, not the nodal one)
-    sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis=x -> 2omega * x[3], velocity,
+    sw = NonlinearKiteShallowWater(primal, k; height_order, coriolis, velocity,
                                    velocity_lumped=false, backend)
     nh, nu, nlev = length(height_dofs(sw)), length(velocity_dofs(sw)), num_layers(vgrid)
     z_top = vgrid.z_half[end]
@@ -101,13 +110,14 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                         (u=z(nu, nlev), ρ=z(nh, nlev), ρθ=z(nh, nlev)),
             q=z(nh, nlev), ρqexpl=z(nh, nlev), Fq=KernelAbstractions.zeros(backend, Float64, nu),
             K=z(nh, nlev), Fs=z(nu, nlev), η=z(nu, nlev + 1), a=KernelAbstractions.zeros(backend, Float64, nu),
-            b=KernelAbstractions.zeros(backend, Float64, nu),
+            b=KernelAbstractions.zeros(backend, Float64, nu), hw=KernelAbstractions.zeros(backend, Float64, nh),
             y0=tracer ? (u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev), ρq=z(nh, nlev)) :
                         (u=z(nu, nlev), w=z(nh, nlev + 1), ρ=z(nh, nlev), ρθ=z(nh, nlev)))
     dev(x) = to_backend(backend, x)
     return KiteNonhydrostatic(sw, vgrid, dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work,
                               Float64(radius), Float64(omega), Float64(beta), vtheta, vertical_advection == :vector_invariant,
                               horizontal_theta == :central ? nothing : upwind_faces(sw), horizontal_theta == :upwind_density,
+                              horizontal_theta in (:dg, :dg_upwind), horizontal_theta == :dg_upwind ? 1.0 : 0.0,
                               equation_of_state == :shallow_water ? Float64(gravity) : 0.0, tracer, backend)
 end
 
@@ -196,7 +206,8 @@ end
 """
     initial_state(m::KiteNonhydrostatic, profile; tracer=(λ, φ, z) -> 1.0)
 
-State from `profile(λ, φ, z) = (T, p, u, v)` as for `TRiSKNonhydrostatic`:
+State from `profile(λ, φ, z) = (T, p, u, v)` as for `TRiSKNonhydrostatic`
+(on a plane `profile(x, y, z)` and `tracer(x, y, z)` with `u`, `v` along x and y):
 every column in the discrete hydrostatic balance of the column solver at its
 Radau node (`balanced_column`), the velocity `u east + v north` projected
 into the velocity space per layer, `w = 0`; with a tracer `ρq = ρ q` for the
@@ -205,21 +216,23 @@ mixing ratio `tracer(λ, φ, z)` at the nodes and layer centres (default 1).
 function initial_state(m::KiteNonhydrostatic, profile; tracer=(λ, φ, z) -> 1.0)
     v, nlev = m.vgrid, num_layers(m)
     x = column_points(m)
+    plane = m.horizontal.primal.surface != :sphere
+    coordinates(x) = plane ? (x[1], x[2]) : lonlat(x)
     ρ, ρθ = zeros(length(x), nlev), zeros(length(x), nlev)
     for (i, xi) in enumerate(x)
-        λ, φ = lonlat(xi)
+        λ, φ = coordinates(xi)
         ρ[i, :], ρθ[i, :] = balanced_column(z -> profile(λ, φ, z), v, m.vertical_theta == 2)
     end
     u = project_velocity(m, (x, z) -> begin
-        λ, φ = lonlat(x)
-        east, north = east_north(x)
+        λ, φ = coordinates(x)
+        east, north = plane ? (SVector(1.0, 0.0, 0.0), SVector(0.0, 1.0, 0.0)) : east_north(x)
         _, _, ue, vn = profile(λ, φ, z)
         ue * east + vn * north
     end)
     dev(a) = to_backend(m.backend, a)
     y = (u=u, w=KernelAbstractions.zeros(m.backend, Float64, length(x), nlev + 1), ρ=dev(ρ), ρθ=dev(ρθ))
     m.tracer || return y
-    q = [tracer(lonlat(xi)..., v.z_full[k]) for xi in x, k in 1:nlev]
+    q = [tracer(coordinates(xi)..., v.z_full[k]) for xi in x, k in 1:nlev]
     return (; y..., ρq=dev(ρ .* q))
 end
 
@@ -329,9 +342,11 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
         # horizontal vorticity η = ∂u/∂z - ∇w at the interior interfaces
         fill!(w.η, 0.0)
         for j in 2:nlev
+            @views @. w.η[:, j] = (y.u[:, j] - y.u[:, j - 1]) / v.dzh[j]
+            m.dg && continue       # the -∇w part is the DG advection of w (w_advection!, w_advection_flux!)
             row_mul!(tu, sw.Bt_owned, view(y.w, :, j), 1 / a)
             ldiv!(w.a, sw.Mu_solver, tu)
-            @views @. w.η[:, j] = (y.u[:, j] - y.u[:, j - 1]) / v.dzh[j] - w.a
+            @views @. w.η[:, j] -= w.a
         end
     end
     for k in 1:nlev
@@ -347,9 +362,14 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
         ShallowWater.launch!(ShallowWater.vorticity_kernel!, s.rhs_u, nk, s.rhs_u, F, ρ, s.ζ, Q.piola, Q.dA,
                              Q.normal, Q.coriolis, sw.φu, sw.iu, sw.su, sw.φh, sw.ih, sw.φz, sw.iz, true)
         ldiv!(du, sw.Mu_solver, s.rhs_u)
-        row_mul!(tu, sw.Bt_owned, π, 1 / a)
-        ldiv!(w.g, sw.Mu_solver, tu)
-        weighted_projection!(w.gθ, m, w.g, θ)
+        if m.dg
+            dg_gradient!(tu, m, F, θ, π, 1 / a)
+            ldiv!(w.gθ, sw.Mu_solver, tu)
+        else
+            row_mul!(tu, sw.Bt_owned, π, 1 / a)
+            ldiv!(w.g, sw.Mu_solver, tu)
+            weighted_projection!(w.gθ, m, w.g, θ)
+        end
         du .-= Cpd .* w.gθ
         # vertical coupling -η w at the two interfaces of the layer
         if m.vertical_advection
@@ -357,6 +377,11 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
                 2 <= j <= nlev || continue
                 weighted_projection!(w.gθ, m, view(w.η, :, j), view(y.w, :, j))
                 du .-= (c / (2 * v.dz[k])) .* w.gθ
+                if m.dg
+                    w_advection_flux!(tu, m, view(y.w, :, j), 1 / a)
+                    ldiv!(w.gθ, sw.Mu_solver, tu)
+                    du .+= (c / (2 * v.dz[k])) .* w.gθ
+                end
             end
         end
         # mass and ρθ
@@ -370,6 +395,11 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
             @views @. w.a = w.η[:, j] + (y.u[:, j - 1] + y.u[:, j]) / 2
             @views @. w.b = w.η[:, j] - (y.u[:, j - 1] + y.u[:, j]) / 2
             dot_product!(view(w.tw, :, j), m, w.a, w.b)
+            if m.dg
+                @. w.g = (w.a - w.b) / 2
+                ldiv!(w.hw, sw.Mh_solver, w_advection!(th, m, w.g, view(y.w, :, j), 1 / a))
+                @views w.tw[:, j] .-= w.hw
+            end
             @views @. w.tw[:, j] -= (w.K[:, j] - w.K[:, j - 1]) / v.dzh[j]
         end
     end
@@ -425,6 +455,11 @@ function horizontal_divergence!(dρ, dρθ, m::KiteNonhydrostatic, θ, u, ρ, ρ
     row_mul!(th, sw.B_owned, w.F, 1 / m.radius)
     density && upwind_jump!(th, m, u, ρ, 1 / m.radius)
     ldiv!(dρ, sw.Mh_solver, th)
+    if m.dg
+        dg_divergence!(th, m, w.F, θ, 1 / m.radius)
+        ldiv!(dρθ, sw.Mh_solver, th)
+        return nothing
+    end
     weighted_projection!(w.Fθ, m, w.F, θ)
     row_mul!(th, sw.B_owned, w.Fθ, 1 / m.radius)
     if density
@@ -516,6 +551,167 @@ function upwind_theta!(th, m::KiteNonhydrostatic, F, θ, scale)
     return th
 end
 
+"Trace of `q` on a primal face: the mean, with `dg_upwind` the upwind value for the normal flux `ûn`."
+@inline face_trace(qK, qE, ûn, α) = (qK + qE) / 2 + α * sign(ûn) * (qK - qE) / 2
+
+"""
+    dg_divergence!(th, m, F, q, scale)
+
+DG transport of a density `ρq = ρ q` with the kite mass flux `F` of one layer
+(`horizontal_theta=:dg`, `:dg_upwind`), into the owned height rows `th`:
+
+    th_i = scale (Σ_K ∫_K q F ⋅ ∇η_i - Σ_F ∫_F q̂ (F ⋅ n_K) (η_i^K - η_i^E)),
+
+`q̂` the central or upwind trace (`face_trace`). For `q = 1` it is `B F`, so
+`ρq = ρ` is kept; with the central trace it is skew in `q` for a divergence-free
+`F`, with the upwind trace it damps the jumps of `q`. Serial CPU.
+"""
+function dg_divergence!(th, m::KiteNonhydrostatic, F, q, scale)
+    sw, up = m.horizontal, m.upwind
+    ih, α = sw.ih, m.dg_upwind
+    fill!(th, 0.0)
+    # volume term and the interior trace q_K on every face, then the trace corrected to q̂
+    ShallowWater.launch!(ShallowWater.pointwise_flux_kernel!, th, num_local_kites(sw.distribution), th, F, q,
+                         sw.quadrature.weights, sw.φu, sw.iu, sw.su, sw.φh, sw.∇φh, ih, sw.faces)
+    @inbounds for p in eachindex(up.cK)
+        cK, qK, cE, qE = up.cK[p], up.qK[p], up.cE[p], up.qE[p]
+        fK, fE = sw.faces[up.fK[p]], sw.faces[up.fE[p]]
+        ûn = dot(ShallowWater.gather_vector(F, fK.φ, sw.iu, sw.su, cK, qK), fK.ν)
+        vK = ShallowWater.gather_scalar(q, fK.η, ih, cK, qK)
+        vE = ShallowWater.gather_scalar(q, fE.η, ih, cE, qE)
+        q̂ = face_trace(vK, vE, ûn, α)
+        gK, gE = fK.weights[qK] * ûn * (q̂ - vK), fK.weights[qK] * ûn * (q̂ - vE)
+        for a in axes(ih, 1)
+            th[ih[a, cK]] -= gK * fK.η[a, 1, qK]
+            th[ih[a, cE]] += gE * fE.η[a, 1, qE]
+        end
+    end
+    th .*= scale
+    return th
+end
+
+"""
+    dg_gradient!(tu, m, F, θ, π, scale)
+
+The pressure gradient adjoint to `dg_divergence!`, into the owned velocity rows `tu`:
+
+    tu_v = scale (Σ_K ∫_K θ φ_v ⋅ ∇π - Σ_F ∫_F θ̂ (φ_v ⋅ n_K) (π^K - π^E)),
+
+with the trace `θ̂` of the flux `F`, so that `πᵀ dg_divergence(F, θ) = Fᵀ tu`
+and the exchange of kinetic and internal energy is exact. Serial CPU.
+"""
+function dg_gradient!(tu, m::KiteNonhydrostatic, F, θ, π, scale)
+    sw, up = m.horizontal, m.upwind
+    ih, iu, su, α = sw.ih, sw.iu, sw.su, m.dg_upwind
+    fill!(tu, 0.0)
+    @inbounds for c in axes(ih, 2), (q, wq) in enumerate(sw.quadrature.weights)  # metric free: θ φ̂ ⋅ ∇̂π̂ dξ
+        θq = ShallowWater.gather_scalar(θ, sw.φh, ih, c, q)
+        g1 = g2 = 0.0
+        for a in axes(ih, 1)
+            g1 += π[ih[a, c]] * sw.∇φh[a, 1, 1, q]
+            g2 += π[ih[a, c]] * sw.∇φh[a, 1, 2, q]
+        end
+        g = wq * θq
+        for b in axes(iu, 1)
+            tu[iu[b, c]] += su[b, c] * g * (sw.φu[b, 1, q] * g1 + sw.φu[b, 2, q] * g2)
+        end
+    end
+    @inbounds for p in eachindex(up.cK)
+        cK, qK, cE, qE = up.cK[p], up.qK[p], up.cE[p], up.qE[p]
+        fK, fE = sw.faces[up.fK[p]], sw.faces[up.fE[p]]
+        ûn = dot(ShallowWater.gather_vector(F, fK.φ, iu, su, cK, qK), fK.ν)
+        θ̂ = face_trace(ShallowWater.gather_scalar(θ, fK.η, ih, cK, qK),
+                       ShallowWater.gather_scalar(θ, fE.η, ih, cE, qE), ûn, α)
+        jump = ShallowWater.gather_scalar(π, fK.η, ih, cK, qK) - ShallowWater.gather_scalar(π, fE.η, ih, cE, qE)
+        g = fK.weights[qK] * θ̂ * jump
+        for b in axes(iu, 1)   # the normal trace on the face is single valued: kite K's basis suffices
+            tu[iu[b, cK]] -= su[b, cK] * g * (fK.φ[b, 1, qK] * fK.ν[1] + fK.φ[b, 2, qK] * fK.ν[2])
+        end
+    end
+    tu .*= scale
+    return tu
+end
+
+"""
+    w_advection!(th, m, u, w, scale)
+
+Horizontal advection of `w` (broken across the primal edges) by the velocity `u`
+in DG advective form, into the owned height rows `th` (`horizontal_theta=:dg`, `:dg_upwind`):
+
+    th_i = scale (Σ_K ∫_K (u ⋅ ∇w) ψ_i - Σ_F ∫_F (u ⋅ n_K) [w] {ψ_i} + α Σ_F ∫_F |u ⋅ n|/2 [w] [ψ_i]),
+
+`[w] = w^K - w^E`, `α = 1` for `:dg_upwind`. The central part is skew in `w` for a
+divergence-free `u`; the projected gradient `M_u⁻¹ Bᵀ w` it replaces is not (its
+eigenvalues are those of `B Π_U(ρ u)`). Serial CPU.
+"""
+function w_advection!(th, m::KiteNonhydrostatic, u, w, scale)
+    sw, up = m.horizontal, m.upwind
+    ih, iu, su, α = sw.ih, sw.iu, sw.su, m.dg_upwind
+    fill!(th, 0.0)
+    @inbounds for c in axes(ih, 2), (q, wq) in enumerate(sw.quadrature.weights)  # metric free: (û ⋅ ∇̂w) ψ dξ
+        û = ShallowWater.gather_vector(u, sw.φu, iu, su, c, q)
+        g = 0.0
+        for a in axes(ih, 1)
+            g += w[ih[a, c]] * (û[1] * sw.∇φh[a, 1, 1, q] + û[2] * sw.∇φh[a, 1, 2, q])
+        end
+        for a in axes(ih, 1)
+            th[ih[a, c]] += wq * g * sw.φh[a, 1, q]
+        end
+    end
+    @inbounds for p in eachindex(up.cK)
+        cK, qK, cE, qE = up.cK[p], up.qK[p], up.cE[p], up.qE[p]
+        fK, fE = sw.faces[up.fK[p]], sw.faces[up.fE[p]]
+        ûn = dot(ShallowWater.gather_vector(u, fK.φ, iu, su, cK, qK), fK.ν)
+        jump = ShallowWater.gather_scalar(w, fK.η, ih, cK, qK) - ShallowWater.gather_scalar(w, fE.η, ih, cE, qE)
+        gc, gu = fK.weights[qK] * ûn * jump / 2, fK.weights[qK] * α * abs(ûn) * jump / 2
+        for a in axes(ih, 1)
+            th[ih[a, cK]] -= (gc - gu) * fK.η[a, 1, qK]
+            th[ih[a, cE]] -= (gc + gu) * fE.η[a, 1, qE]
+        end
+    end
+    th .*= scale
+    return th
+end
+
+"""
+    w_advection_flux!(tu, m, w, scale)
+
+The momentum term adjoint to the central part of `w_advection!` (the `w ∇w` of
+`-η w`), into the owned velocity rows `tu`: `tu_v = ∂/∂u_v` of `wᵀ w_advection(u, w)`,
+
+    tu_v = scale (Σ_K ∫_K (φ_v ⋅ ∇w) w - Σ_F ∫_F (φ_v ⋅ n_K) [w] {w}),
+
+so that `uᵀ tu = wᵀ w_advection(u, w)` (central) and the energy exchange of the
+vertical coupling stays exact. Serial CPU.
+"""
+function w_advection_flux!(tu, m::KiteNonhydrostatic, w, scale)
+    sw, up = m.horizontal, m.upwind
+    ih, iu, su = sw.ih, sw.iu, sw.su
+    fill!(tu, 0.0)
+    @inbounds for c in axes(ih, 2), (q, wq) in enumerate(sw.quadrature.weights)
+        g1 = g2 = 0.0
+        for a in axes(ih, 1)
+            g1 += w[ih[a, c]] * sw.∇φh[a, 1, 1, q]
+            g2 += w[ih[a, c]] * sw.∇φh[a, 1, 2, q]
+        end
+        g = wq * ShallowWater.gather_scalar(w, sw.φh, ih, c, q)
+        for b in axes(iu, 1)
+            tu[iu[b, c]] += su[b, c] * g * (sw.φu[b, 1, q] * g1 + sw.φu[b, 2, q] * g2)
+        end
+    end
+    @inbounds for p in eachindex(up.cK)
+        cK, qK, cE, qE = up.cK[p], up.qK[p], up.cE[p], up.qE[p]
+        fK, fE = sw.faces[up.fK[p]], sw.faces[up.fE[p]]
+        wK, wE = ShallowWater.gather_scalar(w, fK.η, ih, cK, qK), ShallowWater.gather_scalar(w, fE.η, ih, cE, qE)
+        g = fK.weights[qK] * (wK - wE) * (wK + wE) / 2
+        for b in axes(iu, 1)
+            tu[iu[b, cK]] -= su[b, cK] * g * (fK.φ[b, 1, qK] * fK.ν[1] + fK.φ[b, 2, qK] * fK.ν[2])
+        end
+    end
+    tu .*= scale
+    return tu
+end
+
 """
     stage!(m::KiteNonhydrostatic, y, y0, ys, τ)
 
@@ -555,6 +751,7 @@ it is the mass divergence.
 function tracer_divergence!(dρq, m::KiteNonhydrostatic, q, u, ρq)
     sw, w = m.horizontal, m.work
     th = sw.row_buffers[3]
+    m.dg && return ldiv!(dρq, sw.Mh_solver, dg_divergence!(th, m, w.F, q, 1 / m.radius))
     weighted_projection!(w.Fq, m, w.F, q)
     row_mul!(th, sw.B_owned, w.Fq, 1 / m.radius)
     if m.upwind !== nothing

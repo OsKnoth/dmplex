@@ -64,6 +64,44 @@ function thermal_wind(lon, lat, z; T0=300.0, epsilon=0.1, zs=12000.0, ps=1e5, ra
     return T, p, u, 0.0
 end
 
+"""
+    baroclinic_channel(x, y, z; Ly=6e6, f0=1.0313e-4, perturbation=true) -> (T, p, u, v)
+
+The baroclinic wave in a Cartesian f-plane channel of Ullrich, Reed and
+Jablonowski (2015), flat ground, in height coordinates, for a doubly periodic
+box `[0, Lx) × [0, 2Ly)`: the channel `0 ≤ y ≤ Ly` and its mirror image
+`Ly ≤ y ≤ 2Ly` with the easterly jet. The jet vanishes with its shear at
+`y = 0` and `Ly`, so the mirrored geopotential is smooth and periodic, and
+`v = 0` on these lines (the walls of the channel) holds by symmetry of the
+initial state. In the pressure coordinate `η = p/p0`
+
+    Φ = T0 g/Γ (1 - η^(RΓ/g)) + (u0 f0/2) [(y - y0) - Ly/2π sin(2πy/Ly)] ln η exp(-(ln η/b)²),
+    u = -u0 sin²(πy/Ly) ln η exp(-(ln η/b)²),  T = -(η/R) ∂Φ/∂η,
+
+with `T0 = 288 K`, `Γ = 0.005 K/m`, `u0 = 35 m/s`, `b = 2`, `y0 = Ly/2`; `η(z)`
+by Newton in `ln η` from `Φ(η) = g z`. On the f-plane this is an exact steady state in
+geostrophic and hydrostatic balance; the perturbation `u' = exp(-r²/Lp²)` m/s,
+`Lp = 600 km`, at `(2000 km, 2500 km)` starts the wave.
+"""
+function baroclinic_channel(x, y, z; Ly=6e6, f0=1.0313e-4, perturbation::Bool=true)
+    T0, Γ, u0, b = 288.0, 0.005, 35.0, 2.0
+    mirrored = y > Ly
+    ym = mirrored ? 2Ly - y : y
+    A = u0 * f0 / 2 * ((ym - Ly / 2) - Ly / 2π * sin(2π * ym / Ly))
+    temperature(η) = (l = log(η); T0 * η^(Rd * Γ / GRAV) - A / Rd * exp(-(l / b)^2) * (1 - 2l^2 / b^2))
+    geopotential(η) = (l = log(η); T0 * GRAV / Γ * (1 - η^(Rd * Γ / GRAV)) + A * l * exp(-(l / b)^2))
+    l = -GRAV * z / (Rd * T0)        # Newton in ln η: ∂Φ/∂ln η = -R T
+    for _ in 1:50
+        δ = (geopotential(exp(l)) - GRAV * z) / (-Rd * temperature(exp(l)))
+        l -= δ
+        abs(δ) < 1e-14 && break
+    end
+    η = exp(l)
+    u = -u0 * sin(π * ym / Ly)^2 * l * exp(-(l / b)^2) * (mirrored ? -1 : 1)
+    perturbation && (u += exp(-((x - 2e6)^2 + (y - 2.5e6)^2) / 6e5^2))
+    return temperature(η), P0 * η, u, 0.0
+end
+
 function baroclinic_perturbation(lon, lat, z)
     d0, Vp, λc, φc, zp = 1 / 6, 1.0, π / 9, 2π / 9, 15000.0
     d = acos(clamp(sin(φc) * sin(lat) + cos(φc) * cos(lat) * cos(lon - λc), -1, 1))

@@ -238,18 +238,117 @@ to the momentum (the conserved energy) keeps ρ bounded; a transported quantity 
 `⟨ρq̇, η⟩ = Σ_K ∫_K q F⋅∇η − Σ_F ∫_F q̂ F⋅n [η]` with the upwind (or central) trace `q̂`: for q = 1 it is
 `B F` (consistency), and with upwinding it is stable in the ρ-weighted norm.
 
+**Source of the positive eigenvalues** (dense eigenvalues of the height transport with the
+prescribed TC2 velocity u_h; RT1 × Q2, `eig_source.jl`, `eig_tracer_dg.jl` in the scratchpad):
+
+| max Re λ / (u0/Δx) | hexagon 2 | cubed sphere 4 | triangles 2 |
+|---|---|---|---|
+| projected flux `B Π_U(ρu)`, degree 4 | 0.700 | 0.278 | 1.473 |
+| projected flux, degree 10 | 0.695 | 0.277 | 1.409 |
+| pointwise flux (interior trace), degree 4 and 10 | 4.757 | 1.245 | 2.428 |
+| DG central `∫ρu⋅∇η − ∫{ρ}u⋅n[η]` | 0.001 | 0.000 | 0.002 |
+| DG upwind | 0.000 | 0.000 | 0.000 |
+
+- **Not under-integration:** degree 10 changes nothing (the pointwise form is exact with degree 4).
+- **Pointwise:** the interior trace ρ_K on every primal face decouples the primal cells. On inflow
+  faces it is the downwind value, so ½ d/dt ∫ρ² gets +½∫|u⋅n|ρ² there (anti-upwind). The
+  symmetric part is 75–93 % of the skew part.
+- **Projected:** ⟨ρ̇, η⟩ = ∫ ρ u⋅g_η with g_η = M_U⁻¹Bᵀη, the discrete gradient of η in U,
+  including the primal-face jumps of η. These are spread over the dual-cell mass blocks.
+  - So ⟨ρ̇,η⟩ + ⟨η̇,ρ⟩ = ∫u⋅(ρ g_η + η g_ρ) ≠ ∫u⋅∇(ρη) = 0.
+  - In effect, the trace of ρ in F⋅n is a weighting set by the mass blocks, not the mean.
+  - This is a projection (consistency) defect at the grid scale: max Re λ ∝ 1/Δx, independent
+    of the quadrature, and worst on the irregular kites of triangles.
+- **DG central** is skew up to the discrete divergence of u_h (symmetric part 2–4e-4 of the skew part).
+- **Tracer with the frozen kite flux F = Π_U(ρu):** `x = ρq ↦ M_h⁻¹[Σ∫q F⋅∇η − Σ∫q̂ F⋅n[η]]`, q = x/ρ.
+  - With q = 1 it reproduces B F to 1e-12 on all three meshes.
+  - max Re λ/(u0/Δx) is 0.001 / 0.000 / 0.002 for the central trace and 0 for upwind.
+  - The current `B Π_U(qF)` gives 0.70 / 0.28 / 1.47.
+  - So the DG tracer form removes the instability and keeps ρq = ρ for q = 1.
+
+**DG transport in the model** (`horizontal_theta=:dg` central, `:dg_upwind` upwind trace;
+2026-11-04):
+
+- **ρθ and ρq:** `Σ_K ∫ θ F⋅∇η − Σ_F ∫ θ̂ F⋅n [η]` with the kite mass flux F (`dg_divergence!`).
+- **Pressure gradient:** its adjoint (`dg_gradient!`), so πᵀ(ρθ̇) = Fᵀ(u̇) exactly and the
+  energy exchange stays exact.
+- **Horizontal advection of w:** the same defect. η = ∂u/∂z − ∇w used the projected gradient
+  M_u⁻¹Bᵀw, whose eigenvalues are identical to those of the ρ transport (0.700 / 0.278 / 1.473).
+  - It is now DG in advective form, `−Σ∫(u⋅∇w)ψ + Σ_F∫(u⋅n)[w]{ψ}`, with the upwind penalty for
+    `:dg_upwind` (`w_advection!`).
+  - Its adjoint goes into the momentum equation (`w_advection_flux!`; the adjoint holds to 1e-17).
+  - The eigenvalues drop to 0.0005 / 0.0000 / 0.0015.
+- ρ keeps `B F`.
+- **Tests:** adjoint, consistency (q = 1 gives B F), conservation and ρq = ρ, on all three meshes.
+
+| one layer, TC2, random θ′ = 1e-8 | hexagon 3 | cubed sphere 12 | triangles 3 |
+|---|---|---|---|
+| `B Π_U(θF)` | NaN in a day | 3e-3 | NaN in a day |
+| `:dg`, `:dg_upwind` | 6e-8 / 2e-8, constant | the same | the same |
+
+The thermal shallow-water instability is gone on all meshes. In 3D it is not:
+
+| thermal wind, max \|w\| at day 0.5 / 1.5 / 3 | hexagon 3 | cubed sphere 12 | triangles 3 |
+|---|---|---|---|
+| `:dg_upwind` | 5.0e-5 / 1.7e-4 / 2.9e-2 | 3.6e-5 / 3.0e-3 / 0.20 | 1.4e-4 / 0.14 / NaN (day 2.5) |
+| `:dg` | 7.7e-5 / 6.9e-4 / 6.7e-2 | | |
+
+With and without the DG advection of w these agree to three digits. The old upwind θ on
+hexagon 3 gave 3.9e-4 / – / 0.30, and TRiSK and ICON stay below 3e-3.
+
+**Third source: the momentum and continuity transport in supercritical flow.** Ablations on
+triangles 3 (max |w| at day 1, 3.5e-3 for the baseline):
+
+- **No vertical advection:** 3.5e-3.
+- **Centred vertical θ:** 3.5e-3.
+- **dt 75 s:** the same through day 0.5.
+- **Barotropic isothermal state in solid-body rotation (no shear):** 9.5e-3. With 5 layers of
+  1 km it gives 1.2e-2 at day 1; **one layer stays at rest**.
+
+So the growth needs neither shear nor vertical advection, but more than one layer. The high vertical
+modes have internal wave speeds NH/(mπ) of a few m/s, below the wind. One layer with a uniform flow
+(1, 0.3) on the periodic unit square, no rotation, `:dg_upwind`, random 1e-8:
+
+| 16 × 16, max \|δρ\|/h0 up to t = 8 | c = 3 | c = 1.5 | c = 1.0 | c = 0.5 |
+|---|---|---|---|---|
+| quadrilaterals | 1e-7 | 6e-7 | 4e-6 | NaN by t = 0.3 |
+| triangles | 3e-7 | 2e-6 | NaN by t = 0.8 | NaN by t = 0.2 |
+
+Eigenvalues of the linearized one-layer tendency on 6 × 6 (`eig_plane.jl`):
+
+| max Re λ/(\|u\|/Δx) | full, c = 0.5 | full, c = 3 | momentum block (ρ frozen) | continuity block (u frozen) |
+|---|---|---|---|---|
+| quadrilaterals | 3.49 | 0.000 | 0.77 | 0.77 |
+| triangles | 6.08 | 0.007 | 5.48 | 5.49 |
+
+- **Both transports are unstable on their own:** the vector-invariant momentum advection (PV flux
+  and ∇K) and the continuity `B Π_U(ρu)`.
+- **Subcritical flow (c > |u|):** the fast gravity-wave coupling and the conserved energy keep the
+  coupled system neutral. The 2D tests and the 3D one-layer tests are all subcritical.
+- **Supercritical flow:** the perturbation can draw energy from the mean flow, and the coupled rate
+  3.49 on quadrilaterals matches the observed growth (×260 per 0.1).
+- **In 3D:** every column has supercritical vertical modes, so this is the remaining 3D
+  instability.
+
+**Baroclinic channel** (`examples/baroclinic_channel.jl`, `baroclinic_channel`, Ullrich, Reed and
+Jablonowski 2015; mirrored, doubly periodic box 40000 × 12000 km on the f-plane, 30 layers to 30 km;
+`:dg_upwind`, dt 300 s, mass to 1e-15):
+
+| 40 × 12 cells (1000 km) | min p_s day 4 / 8 / 10 / 12 | max \|w\| days 0.5–4 | s/step |
+|---|---|---|---|
+| quadrilaterals (12000 columns) | 999.6 / 997.3 / 990.9 / 982.4 hPa | 3.5e-3 → 1e-3 | 1.9 |
+| triangles (18240 columns) | 973.8 at day 4.5, then 972–973 to day 10.5 | 1.7e-2 → 1.9 m/s by day 2 | 2.9 |
+
+- **Quadrilaterals:** the kites are affine and the growth rates small, so the wave develops
+  smoothly, though slowly at 1000 km. It is not yet compared with a reference solution.
+- **Triangles:** the run is dominated by the grid-scale mode from day 1.
+
 **Open problems of the kite model:**
 
-1. The node-scale mode is not removed by the upwind θ trace alone on a flow with strong
-   cross-edge wind everywhere; it is already present in one layer (thermal shallow water, above),
-   so it has to be fixed in the horizontal θ coupling. Candidates:
-   - the pressure gradient `-c_p Π_U(θ∇π)` still uses the central θ, so the upwind ρθ flux has
-     no adjoint in the momentum equation and the energy pair is no longer consistent;
-   - ρ is also broken across the primal edges and only the mass flux is single valued;
-   - θ in `Π_U(θ F)` is the Q2 interpolation of the nodal θ, with no limiting.
-   Next: the upwind θ also in the face part of the pressure gradient (an energy-consistent
-   upwind pair), then the same correction for ρ.
-2. The upwind term is a CPU loop; GPU kernel and distribution still to do.
+1. **The transport of ρ and u in supercritical flow** (above): this needs a DG transport of ρ with
+   its adjoint in the momentum equation (the ∇K and PV terms paired with the DG mass flux instead
+   of `B F`), or a stabilized (upwind) momentum advection.
+2. The DG and upwind terms are CPU loops; GPU kernels and distribution are still to do.
 3. Coarse columns of first order give a far too weak baroclinic wave; resolution and order must
    go up together, which needs the GPU.
 

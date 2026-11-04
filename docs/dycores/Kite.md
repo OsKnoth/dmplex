@@ -21,17 +21,25 @@ solver of the TRiSK dycore, one column per Radau node. Wicker–Skamarock RK3, H
 | steady jet, central θ | node-scale θ mode, growing faster with resolution |
 | perturbed baroclinic wave, hexagon 3, Q1 × dual Radau 1 | p_s 976.6 hPa at day 10 (too weak at 100 km) |
 | thermal wind | **all variants grow** (upwind θ delays it by about a day) |
+| thermal shallow water (one layer, TC2), DG θ (`:dg_upwind`) | θ′ bounded on hexagons, cubed sphere, triangles |
+| thermal wind, DG θ and DG advection of w | still grows on all three meshes (supercritical vertical modes, see below) |
+| baroclinic channel, f-plane, 40 × 12 quadrilaterals | wave develops, min p_s 982.4 hPa at day 12, mass to 1e-15 |
+| baroclinic channel, 40 × 12 triangles | grid-scale mode from day 1 |
 
 ![max |w| on the steady jet](../images/kite3d_jet_growth.png)
 
 ![max |w| and θ′ on the thermal wind](../images/kite3d_thermal_wind.png)
 
-**Open:** the node-scale mode on flows with strong cross-edge wind (see the plan): the upwind θ
-also in the pressure gradient, the same for ρ. The model is serial and runs on the CPU only (the
-upwind θ term is a CPU loop), so there is **no GPU timing yet**.
+**Open:** the horizontal transport of ρ and u is unstable in supercritical flow (wind faster than
+the gravity waves): the eigenvalues of the one-layer tendency in a uniform flow reach 3.5 |u|/Δx on
+quadrilaterals and 6 on triangles once c < |u|. In 3D the high vertical modes are always
+supercritical. The fix is a DG transport of ρ with its adjoint in the momentum equation. The model
+is serial and runs on the CPU only (the DG and upwind terms are CPU loops), so there is **no GPU
+timing yet**. Details: [KITE3D_PLAN.md](../KITE3D_PLAN.md).
 
 ## Run
 
 ```sh
-julia --project examples/thermal_wind.jl kite 3 5 150 rt upwind
+julia --project examples/thermal_wind.jl kite 3 5 150 rt dg_upwind hexagon   # or cubed, triangles
+julia --project examples/baroclinic_channel.jl 40 12 300 quadrilateral dg_upwind
 ```

@@ -16,6 +16,7 @@ top of each script.
 | `bickley.jl` | `NonlinearKiteShallowWater` | Bickley jet on a periodic plane | kite elements | CPU |
 | `baroclinic_wave.jl` | `TRiSKNonhydrostatic`, `ICONNonhydrostatic` (`--icon`) | baroclinic wave (Ullrich et al. 2014) | 3D TRiSK, HEVI; ICON triangles, predictor–corrector | CPU, GPU |
 | `thermal_wind.jl` | `TRiSKNonhydrostatic`, `ICONNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D TRiSK, 3D kite elements, HEVI | CPU |
+| `baroclinic_channel.jl` | `KiteNonhydrostatic` | baroclinic wave in an f-plane channel (Ullrich, Reed and Jablonowski 2015) | 3D kite elements on a periodic plane, HEVI | CPU |
 | `gpu/cudss_mass.jl` | mass matrices | solves against a known solution | RT_k, DG_k, CG_{k+1} | GPU, multi-GPU |
 
 Meshes are given by name: `icosahedron`/`triangle`, `cubed`, `hexagon` (the Voronoi dual of the
@@ -195,8 +196,11 @@ In the last version, on hexagon 7, `vertical_solve` takes 5.1 ms, `vn_tendency` 
 
 ```sh
 julia --project examples/thermal_wind.jl trisk 4 5 300
-julia --project examples/thermal_wind.jl kite 3 5 150 rt upwind
+julia --project examples/thermal_wind.jl kite 3 5 150 rt dg_upwind hexagon
 ```
+
+For the kite model the last argument is the primal mesh: `hexagon`, `cubed` (resolution = cells per
+panel edge) or `triangles`.
 
 A steady rotating wind in exact thermal-wind (gradient-wind) balance (`thermal_wind`). The
 temperature falls towards the poles near the ground, `1/T = (1 + ε sin²φ sech²(z/z_s))/T0` with
@@ -210,8 +214,35 @@ frame; the script prints max |w|, max |θ − θ(0)| and max |Δp_s| twice a day
 |---|---|---|---|
 | TRiSK, hexagon 4, dt 300 s | 2.6e-3 m/s | 8.4e-4 | 6.7e-4 (θ′ 0.35 K, Δp_s 0.35 hPa) |
 | kite RT1 × Q2, upwind θ, hexagon 3 | 7.3e-4 | 0.30 | unstable |
+| kite RT1 × Q2, DG θ (`dg_upwind`), hexagon 3 | 5.2e-5 | 2.9e-2 | unstable |
 
 The kite model is not yet stable on this case, see [KITE3D_PLAN.md](KITE3D_PLAN.md).
+
+## Baroclinic channel: `baroclinic_channel.jl`
+
+```sh
+julia --project examples/baroclinic_channel.jl 40 12 300 quadrilateral dg_upwind
+```
+
+The baroclinic wave in a Cartesian f-plane channel of Ullrich, Reed and Jablonowski (2015)
+(`baroclinic_channel`). The channel is 6000 km wide with walls at y = 0 and 6000 km; the jet
+reaches u0 = 35 m/s, with f0 = 1.0313e-4 1/s, a flat ground and the lid at 30 km. A Gaussian
+perturbation of u (1 m/s, 600 km) starts the wave. The kite model has no walls, so the box is
+doubly periodic, 40000 km × 12000 km: the channel and its mirror image with the easterly jet. Then
+v = 0 at the walls holds by symmetry, and the unperturbed state is an exact steady state.
+
+- Arguments: `[nx=80] [days=12] [dt=150·80/nx] [cells=quadrilateral|triangle] [theta=dg_upwind]
+  [perturbation=true]`, with ny = 3nx/10.
+- 30 layers, Rayleigh damping of w above 22 km.
+- Twice a day the script prints the minimum and maximum surface pressure, max |w|, the relative
+  mass change and the time per step.
+
+Only the kite model runs on planes; TRiSK and ICON need the spherical grids.
+
+| 40 × 12 cells (1000 km), dt 300 s | min p_s day 4 / 8 / 12 | s/step (CPU) |
+|---|---|---|
+| quadrilaterals | 999.6 / 997.3 / 982.4 hPa | 1.9 |
+| triangles | grid-scale mode from day 1 (973.8 hPa at day 4.5) | 2.9 |
 
 ## Mass solves with cuDSS: `gpu/cudss_mass.jl`
 
