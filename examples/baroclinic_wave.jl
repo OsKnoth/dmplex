@@ -1,11 +1,14 @@
 # Baroclinic wave of Ullrich et al. (2014) with the nonhydrostatic TRiSK model on
 # the extruded hexagonal mesh (ICON-IAP form: PV usage, momentum advection, TRiSK
-# weights, Smagorinsky diffusion, upwind vertical θ), on one CPU or one GPU.
+# weights, Smagorinsky diffusion, upwind vertical θ), or with --icon the ICON model
+# on the extruded triangle mesh (predictor–corrector, Miura fluxes, divergence
+# damping), on one CPU or one GPU.
 #
-#   julia --project examples/baroclinic_wave.jl [resolution] [days] [dt] [levels]
+#   julia --project examples/baroclinic_wave.jl [resolution] [days] [dt] [levels] [--icon]
 #   julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu
 #
-# resolution: refinement level of the hexagonal mesh (6 ≈ 120 km, 7 ≈ 60 km); dt in
+# resolution: refinement level of the hexagonal mesh (6 ≈ 120 km, 7 ≈ 60 km) or of
+# the triangle mesh (20·4ⁿ triangles: 5 ≈ 160 km, 6 ≈ 80 km, 7 ≈ 40 km); dt in
 # seconds; 30 equidistant layers up to 30 km, Rayleigh damping of w above 22 km.
 # --gpu runs on the CUDA GPU (environment examples/gpu). Prints the minimum surface
 # pressure once a day and the time per step; writes p_s (Pa) and T of the lowest
@@ -15,6 +18,7 @@ using Printf
 using dmplex
 
 const USE_GPU = "--gpu" in ARGS
+const USE_ICON = "--icon" in ARGS
 if USE_GPU
     using CUDA
 end
@@ -38,9 +42,10 @@ function main(args)
     levels = length(args) >= 4 ? parse(Int, args[4]) : 30
 
     backend = USE_GPU ? CUDA.CUDABackend() : KernelAbstractions.CPU()
-    dm = hilbert_order(create_hexagon_mesh(resolution))   # neighbours close in memory
-    m = TRiSKNonhydrostatic(TRiSKGrid(dm), VerticalGrid(levels, 30000.0); damping_height=22000.0,
-                            damping_rate=0.05, backend)
+    # neighbours close in memory
+    dm = hilbert_order(USE_ICON ? create_spherical_mesh(resolution) : create_hexagon_mesh(resolution))
+    model = USE_ICON ? ICONNonhydrostatic : TRiSKNonhydrostatic
+    m = model(TRiSKGrid(dm), VerticalGrid(levels, 30000.0); damping_height=22000.0, damping_rate=0.05, backend)
     @printf("%d cells (≈ %.0f km) × %d layers on %s, dt = %.0f s\n", num_cells(dm),
             sqrt(4π / num_cells(dm)) * 6.37122e6 / 1000, levels, nameof(typeof(backend)), dt)
     y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z))
@@ -59,7 +64,7 @@ function main(args)
     end
     @printf("%.1f s in %d time steps, %.2f ms per step\n", elapsed, nsteps, 1000elapsed / nsteps)
     ps, T = surface(m, y)
-    filename = write_vtkhdf("baroclinic_wave_hexagon_$(resolution).vtkhdf", dm; surface_pressure=ps, temperature=T)
+    filename = write_vtkhdf("baroclinic_wave_$(USE_ICON ? "triangles" : "hexagon")_$(resolution).vtkhdf", dm; surface_pressure=ps, temperature=T)
     println("wrote $filename")
     return m, y
 end

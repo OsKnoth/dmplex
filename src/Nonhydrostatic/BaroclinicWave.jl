@@ -112,7 +112,7 @@ function balanced_column(profile, v::VerticalGrid, iap_theta::Bool)
 end
 
 """
-    initial_state(m::TRiSKNonhydrostatic, profile)
+    initial_state(m::CGridNonhydrostatic, profile)
 
 State `(vn, w, ρ, ρθ)` from `profile(lon, lat, z) -> (T, p, u, v)`. Every
 column is in discrete hydrostatic balance with the vertical operators of the
@@ -122,7 +122,7 @@ model: `π` of the lowest layer from `p`, above from
 level, sweeps over the column for the upwind `θ`), so a state without
 horizontal motion stays at rest. `w = 0`.
 """
-function initial_state(m::TRiSKNonhydrostatic, profile)
+function initial_state(m::CGridNonhydrostatic, profile)
     g, v = m.grid, m.vgrid
     nc, ne, nlev = num_cells(g), num_edges(g), num_layers(v)
     ρ, ρθ = zeros(nc, nlev), zeros(nc, nlev)

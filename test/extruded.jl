@@ -307,3 +307,26 @@ end
     @test 20 < thermal_wind(0.0, 0.0, 15000.0)[3] < 30
     @test thermal_wind(0.0, 0.0, 29000.0)[3] - thermal_wind(0.0, 0.0, 25000.0)[3] < 0.5   # no shear aloft
 end
+
+@testset "ICON nonhydrostatic" begin
+    NH = dmplex.Nonhydrostatic
+    v = VerticalGrid(10, 30000.0)
+    m = ICONNonhydrostatic(create_spherical_mesh(2), v; damping_height=22000.0, damping_rate=0.05)
+    @test_throws ArgumentError ICONNonhydrostatic(create_hexagon_mesh(1), v)
+    # a horizontally homogeneous column in balance stays at rest
+    rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
+    y, ys = initial_state(m, rest), zero_state(m)
+    for _ in 1:5
+        step!(m, y, 300.0, ys)
+    end
+    @test maximum(abs, y.vn) < 1e-10 && maximum(abs, y.w) < 1e-10
+    # the steady jet keeps its mass to round-off and stays near the steady state
+    y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false))
+    m0, θ0 = NH.total_mass(m, y), y.ρθ ./ y.ρ
+    for _ in 1:24
+        step!(m, y, 300.0, ys)
+    end
+    @test abs(NH.total_mass(m, y) / m0 - 1) < 1e-14
+    @test maximum(abs, y.w) < 0.05
+    @test maximum(abs, y.ρθ ./ y.ρ .- θ0) < 1.0
+end

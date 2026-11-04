@@ -1,8 +1,10 @@
 # Steady rotating wind in thermal-wind balance (`thermal_wind`) with the
-# nonhydrostatic TRiSK model or the 3D kite model on the extruded hexagonal mesh:
-# a test of how well a model keeps a balanced, stratified, sheared flow at rest.
+# nonhydrostatic TRiSK model or the 3D kite model on the extruded hexagonal mesh,
+# or the ICON model on the extruded triangle mesh: a test of how well a model
+# keeps a balanced, stratified, sheared flow at rest.
 #
 #   julia --project examples/thermal_wind.jl trisk [resolution] [days] [dt]
+#   julia --project examples/thermal_wind.jl icon [resolution] [days] [dt]
 #   julia --project examples/thermal_wind.jl kite [resolution] [days] [dt] [velocity] [theta]
 #
 # velocity: rt (RT1 × Q2, default) or dual_radau (dual Radau 1 × Q1); theta: upwind
@@ -24,13 +26,16 @@ end
 
 function main(args)
     model = length(args) >= 1 ? args[1] : "trisk"
-    resolution = length(args) >= 2 ? parse(Int, args[2]) : (model == "trisk" ? 4 : 3)
+    resolution = length(args) >= 2 ? parse(Int, args[2]) : (model == "kite" ? 3 : 4)
     days = length(args) >= 3 ? parse(Float64, args[3]) : 5.0
-    dt = length(args) >= 4 ? parse(Float64, args[4]) : (model == "trisk" ? 300.0 : 150.0)
+    dt = length(args) >= 4 ? parse(Float64, args[4]) : (model == "kite" ? 150.0 : 300.0)
     v = VerticalGrid(30, 30000.0)
     if model == "trisk"
         m = TRiSKNonhydrostatic(TRiSKGrid(hilbert_order(create_hexagon_mesh(resolution))), v;
                                 damping_height=22000.0, damping_rate=0.05)
+    elseif model == "icon"
+        m = ICONNonhydrostatic(TRiSKGrid(hilbert_order(create_spherical_mesh(resolution))), v;
+                               damping_height=22000.0, damping_rate=0.05)
     else
         velocity = length(args) >= 5 ? Symbol(args[5]) : :rt
         theta = length(args) >= 6 ? Symbol(args[6]) : :upwind
