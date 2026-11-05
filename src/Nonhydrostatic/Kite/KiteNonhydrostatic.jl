@@ -51,7 +51,7 @@ layer with the 2D kite operators (scaled from the unit sphere by `radius`).
 On a periodic plane (`create_periodic_plane` with lengths in m) use `radius=1`
 and `coriolis`, the Coriolis parameter `f(x)` (default `2Ω x₃` on the sphere).
 """
-struct KiteNonhydrostatic{SW, V, W, UP, BE}
+struct KiteNonhydrostatic{SW, V, W, UP, AD, BE}
     horizontal::SW
     vgrid::VerticalGrid
     dz::V
@@ -68,6 +68,7 @@ struct KiteNonhydrostatic{SW, V, W, UP, BE}
     upwind_density::Bool # upwind jumps of ρ and ρθ (true) or of θ alone
     dg::Bool             # DG transport of ρθ and ρq with the kite mass flux
     dg_upwind::Float64   # 0: central trace, 1: upwind trace of the DG transport
+    advection::AD        # DG momentum advection (`horizontal_advection=:dg`): tables and mass blocks, or nothing
     shallow_water::Float64   # g of the shallow-water equation of state π = g ρθ / c_p, 0 for the dry one
     tracer::Bool         # passive tracer ρq in the state
     backend::BE
@@ -78,6 +79,7 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                             damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
                             vertical_mass::Symbol=:consistent, vertical_advection::Symbol=:vector_invariant,
                             velocity::Symbol=:rt, horizontal_theta::Symbol=:central,
+                            horizontal_advection::Symbol=:vector_invariant,
                             equation_of_state::Symbol=:dry, gravity::Real=GRAV, tracer::Bool=false,
                             coriolis=x -> 2omega * x[3], backend=KernelAbstractions.CPU())
     vtheta = get(Dict(:centred => 0, :upwind => 1, :iap => 2), vertical_theta) do
@@ -87,6 +89,10 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
         throw(ArgumentError("vertical_advection must be :vector_invariant or :none"))
     horizontal_theta in (:central, :upwind, :upwind_density, :dg, :dg_upwind) ||
         throw(ArgumentError("horizontal_theta must be :central, :upwind, :upwind_density, :dg or :dg_upwind"))
+    horizontal_advection in (:vector_invariant, :dg) ||
+        throw(ArgumentError("horizontal_advection must be :vector_invariant or :dg"))
+    horizontal_advection == :dg && !(horizontal_theta in (:dg, :dg_upwind)) &&
+        throw(ArgumentError("horizontal_advection=:dg needs horizontal_theta=:dg or :dg_upwind"))
     equation_of_state in (:dry, :shallow_water) ||
         throw(ArgumentError("equation_of_state must be :dry or :shallow_water"))
     # the velocity mass uses the rule of the projections (the default): Π_U(θ̄ F) = θ̄ F for a constant θ̄,
@@ -118,6 +124,8 @@ function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; hei
                               Float64(radius), Float64(omega), Float64(beta), vtheta, vertical_advection == :vector_invariant,
                               horizontal_theta == :central ? nothing : upwind_faces(sw), horizontal_theta == :upwind_density,
                               horizontal_theta in (:dg, :dg_upwind), horizontal_theta == :dg_upwind ? 1.0 : 0.0,
+                              horizontal_advection == :dg ? (tables=momentum_tables(sw), mass=weighted_mass_blocks(sw)) :
+                                                            nothing,
                               equation_of_state == :shallow_water ? Float64(gravity) : 0.0, tracer, backend)
 end
 
@@ -352,6 +360,12 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
     for k in 1:nlev
         u, ρ, θ, π = view(y.u, :, k), view(y.ρ, :, k), view(w.θ, :, k), view(w.π, :, k)
         F, du = view(w.Fs, :, k), view(dy.u, :, k)
+        if m.advection !== nothing
+            dg_momentum!(du, m, y, k)
+            horizontal_divergence!(view(dy.ρ, :, k), view(dy.ρθ, :, k), m, θ, u, ρ, view(y.ρθ, :, k))
+            m.tracer && tracer_divergence!(view(dy.ρq, :, k), m, view(w.q, :, k), u, view(y.ρq, :, k))
+            continue
+        end
         # relative vorticity of the layer
         row_mul!(tz, sw.R_owned, u, -1 / a)
         copyto!(s.rhs_ζ, 1, tz, 1, length(tz))
@@ -407,6 +421,41 @@ function horizontal_tendency!(dy, m::KiteNonhydrostatic, y)
 end
 
 """
+    dg_momentum!(du, m, y, k)
+
+Velocity tendency of layer `k` with `horizontal_advection=:dg`, from the
+density-weighted momentum equation (`a` the radius)
+
+    ∫ ρ u̇ ⋅ v = -N(u; v)/a - ∫ ρ f (r̂ × u) ⋅ v - c_p (Σ_K ∫_K ρθ v ⋅ ∇π - Σ_F ∫_F (ρθ)^ (v ⋅ n_K) [π])/a
+                - Σ_j dzh_j/(2 dz_k) ∫ ρ w_j η_j ⋅ v,
+
+`N` the DG advection `momentum_advection!`, the pressure term the adjoint of the
+DG ρθ transport (`dg_gradient!` with the weight ρθ, so the exchange with the
+internal energy is exact) and `η_j = (u_j - u_{j-1})/dzh_j` the vertical
+shear at the interfaces of the layer (vertical advection of `u`), solved with
+the density-weighted mass (`weighted_mass_solve!`). Uses `m.work.η`, `m.work.π`.
+"""
+function dg_momentum!(du, m::KiteNonhydrostatic, y, k)
+    sw, w, a, v, A = m.horizontal, m.work, m.radius, m.vgrid, m.advection
+    tu = sw.row_buffers[2]
+    u, ρ, ρθ = view(y.u, :, k), view(y.ρ, :, k), view(y.ρθ, :, k)
+    rhs = w.g
+    momentum_advection!(tu, sw, A.tables, u, ρ, m.dg_upwind)
+    @. rhs = -tu / a
+    coriolis_momentum!(rhs, sw, u, ρ)
+    dg_gradient!(tu, m, u, ρθ, view(w.π, :, k), 1 / a)
+    @. rhs -= Cpd * tu
+    if m.vertical_advection
+        for (j, c) in ((k, v.dzh[k]), (k + 1, v.dzh[k + 1]))
+            2 <= j <= num_layers(m) || continue
+            @views @. w.hw = -c / (2 * v.dz[k]) * ρ * y.w[:, j]
+            weighted_vector!(rhs, sw, view(w.η, :, j), w.hw)
+        end
+    end
+    return weighted_mass_solve!(du, sw, A.mass, ρ, rhs)
+end
+
+"""
     exner!(π, m, ρθ)
 
 The Exner pressure of the horizontal pressure gradient: `(R ρθ / p0)^(R/c_v)`, or
@@ -451,6 +500,11 @@ with the velocity `u` (`upwind_jump!`), which are identical for θ = 1.
 function horizontal_divergence!(dρ, dρθ, m::KiteNonhydrostatic, θ, u, ρ, ρθ)
     sw, w = m.horizontal, m.work
     th = sw.row_buffers[3]
+    if m.advection !== nothing      # DG transport with the pointwise velocity
+        ldiv!(dρ, sw.Mh_solver, dg_divergence!(th, m, u, ρ, 1 / m.radius))
+        ldiv!(dρθ, sw.Mh_solver, dg_divergence!(th, m, u, ρθ, 1 / m.radius))
+        return nothing
+    end
     density = m.upwind !== nothing && m.upwind_density
     row_mul!(th, sw.B_owned, w.F, 1 / m.radius)
     density && upwind_jump!(th, m, u, ρ, 1 / m.radius)
@@ -481,6 +535,7 @@ of face `fE` of the neighbour kite `cE` across the primal edge. Serial only.
 function upwind_faces(sw)
     kites, H = sw.kites, sw.H
     shape = reference_element(H, first(cell_range(kites))).shape
+    lattice = face_lattice(kites)
     open = Dict{NTuple{3, Int}, NTuple{3, Int}}()
     pairs = NTuple{6, Int}[]
     for (c, kite) in enumerate(sw.distribution.kite_ids)
@@ -488,14 +543,13 @@ function upwind_faces(sw)
         for (f, face) in enumerate(sw.faces)
             t, _ = gauss_legendre(length(face.weights))
             for q in eachindex(t)
-                x = first(map_point(cmap, edge_point(shape, KITE_PRIMAL_FACES[f], t[q])))
-                key = Tuple(round.(Int, 1e8 .* x))
+                key = lattice(first(map_point(cmap, edge_point(shape, KITE_PRIMAL_FACES[f], t[q]))))
                 other = pop!(open, key, nothing)
                 other === nothing ? (open[key] = (c, q, f)) : push!(pairs, (other..., c, q, f))
             end
         end
     end
-    isempty(open) || error("unpaired primal-face points: \$(length(open))")
+    isempty(open) || error("unpaired primal-face points: $(length(open))")
     return NamedTuple{(:cK, :qK, :fK, :cE, :qE, :fE)}(Tuple([p[i] for p in pairs] for i in 1:6))
 end
 
@@ -751,6 +805,7 @@ it is the mass divergence.
 function tracer_divergence!(dρq, m::KiteNonhydrostatic, q, u, ρq)
     sw, w = m.horizontal, m.work
     th = sw.row_buffers[3]
+    m.advection !== nothing && return ldiv!(dρq, sw.Mh_solver, dg_divergence!(th, m, u, ρq, 1 / m.radius))
     m.dg && return ldiv!(dρq, sw.Mh_solver, dg_divergence!(th, m, w.F, q, 1 / m.radius))
     weighted_projection!(w.Fq, m, w.F, q)
     row_mul!(th, sw.B_owned, w.Fq, 1 / m.radius)

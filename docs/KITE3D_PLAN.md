@@ -343,11 +343,75 @@ Jablonowski 2015; mirrored, doubly periodic box 40000 × 12000 km on the f-plane
   smoothly, though slowly at 1000 km. It is not yet compared with a reference solution.
 - **Triangles:** the run is dominated by the grid-scale mode from day 1.
 
+## DG momentum advection (2026-11-05, solves the supercritical instability)
+
+`horizontal_advection=:dg` (`KiteAdvection.jl`; requires `horizontal_theta` `:dg` or `:dg_upwind`)
+replaces the vector-invariant momentum and the projected continuity by DG transport with the
+pointwise velocity u:
+
+- **Momentum, advective form** with the ρ-weighted velocity mass (Cholesky per dual-cell block):
+  `∫ρ u̇·v = −N(u; v) − ∫ρ f (r̂×u)·v − c_p (Σ∫ρθ v·∇π − Σ (ρθ)^ (v·n)[π]) − (vertical ∂u/∂z)`,
+  `N(u; v) = Σ_K ∫ρ v·(u·∇)u − Σ_F ρ̂ {u·n} [u]·{v} + α Σ_F ρ̂ |u·n|/2 [u]·[v]` over all four
+  faces of every kite (primal and dual edges), ρ̂ the mean. α = 1 (upwind) with `:dg_upwind`.
+- **ρ, ρθ, ρq:** `dg_divergence!` with u, as ρθ before. Mass stays exact per kite.
+- **Volume term:** `(u·∇)u dA = Σ_k û_k ∂_k u dξ`, with `∂_k (P û) = ∂_k P û + P ∂_k û` and `∂_k P`
+  of the contravariant Piola factor by a Richardson difference of the cell map.
+
+The central part is skew in the energy norm diag(ρ M_u, g M_h) up to the projection of K. Without
+the upwind term the eigenvalues of the one-layer tendency, uniform flow, c = 0.5, 6 × 6
+(`eig_model.jl`), are:
+
+| max Re λ/(\|u\|/Δx), c = 0.5 | vector invariant | `:dg`, α = 0 | `:dg`, α = 1 |
+|---|---|---|---|
+| quadrilaterals | 3.49 | 0.0000 | 0 |
+| triangles | 6.08 | 0.014 (non-affine kites) | 0 |
+
+The DG advection has the CFL limit of DG with RK3, about 0.1 per kite (0.13 failed in the one-layer
+plane test). The 3D runs here are at about 0.02. It costs about 20 % more per step than the vector-invariant form.
+
+**Thermal wind**, `:dg_upwind` with `:dg` advection, 30 layers, dt 150 s (before: 2.9e-2 / 0.20 / NaN at day 3):
+
+| max \|w\| at day 0.5 / 1 / 3 | hexagon 3 | cubed sphere 12 | triangles 3 |
+|---|---|---|---|
+| `:dg` advection | 4.5e-5 / 6.6e-5 / 1.3e-4 | 2.6e-5 / 4.0e-5 / 1.1e-4 | 4.9e-5 / 7.1e-5 / 1.5e-4 |
+
+max |θ′| stays at 2e-2 K and max |Δp_s| at 5e-2 hPa on all three meshes, about 10× below TRiSK
+on hexagon 4.
+
+**Baroclinic channel** (`:dg` advection; k = 10 is the amplitude of zonal wavenumber 10 of p_s in the
+channel, linear QG growth rate 6.59e-6 1/s):
+
+| | min p_s day 4 / 8 / 10 / 12 | k = 10 growth days 3–12 | max \|w\| day 12 | s/step |
+|---|---|---|---|---|
+| 40 × 12 quadrilaterals, dt 300 s | 999.6 / 997.7 / 993.2 / 979.8 hPa | – | 2.6e-2 | 2.1 |
+| 40 × 12 triangles, dt 300 s | 999.6 / 997.8 / 993.5 / 980.7 hPa | – | 3.9e-2 | 3.3 |
+| 60 × 18 quadrilaterals, dt 200 s | 999.7 / 997.7 / 993.0 / 978.7 hPa | 5.9–6.6e-6 1/s (6.58e-6 at day 11) | 2.7e-2 | 4.5 |
+| 60 × 18 triangles, dt 200 s | 999.7 / 997.8 / … | 5.8–6.0e-6 1/s (to day 8) | | 7.1 |
+
+The triangle run that the vector-invariant form ruined from day 1 now follows the quadrilateral
+one to 1 hPa. The growth of the k = 10 wave matches the QG rate within 10 % from day 3 on, and
+within 0.2 % at its maximum. Ullrich, Reed and Jablonowski (2015) see the wave after about 6 days
+and the breaking near day 13.5 at 100 km; at 667 km it is a little slower.
+
+**Spherical baroclinic wave** (Ullrich et al. 2014, `baroclinic_wave`), RT1 × Q2, `:dg_upwind`, `:dg`
+advection, 30 layers, dt 150 s, minimum p_s (hPa):
+
+| day | 6 | 7 | 8 | 9 | 10 | max \|w\| day 10 | s/step |
+|---|---|---|---|---|---|---|---|
+| hexagon 3 (23682 columns) | 993.5 | 984.3 | 968.3 | 941.6 | 925.8 | 0.11 | 3.9 |
+| cubed sphere 12 (21600) | 993.4 | 984.1 | 966.9 | 942.7 | 926.3 | 0.13 | 3.7 |
+| triangles 3 (24320) | 993.4 | 984.7 | 967.3 | 936.0 | 925.4 | 0.11 | 4.3 |
+| TRiSK, hexagon 6 (40962 cells) | 991.7 | 982.3 | 963.1 | 940.4 | 925.1 | | |
+
+The three meshes agree to 1 hPa at day 10 and to TRiSK at a similar resolution. Mass is
+conserved to 1e-15. The old Q1 × dual Radau 1 run on hexagon 3 gave 976.6 hPa with max |w| ≈ 1 m/s.
+
 **Open problems of the kite model:**
 
-1. **The transport of ρ and u in supercritical flow** (above): this needs a DG transport of ρ with
-   its adjoint in the momentum equation (the ∇K and PV terms paired with the DG mass flux instead
-   of `B F`), or a stabilized (upwind) momentum advection.
+1. The supercritical instability is solved by `:dg` advection (above). The constructor defaults
+   (`:central` θ, `:vector_invariant`) are kept for the tests; the examples use `:dg_upwind` with
+   `:dg`. Not yet energy conserving: the kinetic energy of the advective form differs from
+   the K of the pressure term by the projection of K, and the upwind term supplies the dissipation.
 2. The DG and upwind terms are CPU loops; GPU kernels and distribution are still to do.
 3. Coarse columns of first order give a far too weak baroclinic wave; resolution and order must
    go up together, which needs the GPU.

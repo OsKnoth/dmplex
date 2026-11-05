@@ -5,12 +5,13 @@
 #
 #   julia --project examples/thermal_wind.jl trisk [resolution] [days] [dt]
 #   julia --project examples/thermal_wind.jl icon [resolution] [days] [dt]
-#   julia --project examples/thermal_wind.jl kite [resolution] [days] [dt] [velocity] [theta] [mesh]
+#   julia --project examples/thermal_wind.jl kite [resolution] [days] [dt] [velocity] [theta] [mesh] [advection]
 #
 # velocity: rt (RT1 × Q2, default) or dual_radau (dual Radau 1 × Q1); theta: the
 # horizontal_theta of KiteNonhydrostatic, dg_upwind (default), dg, upwind or central;
 # mesh: the primal mesh of the kites, hexagon (default), cubed (cubed sphere with
-# `resolution` cells per panel edge) or triangles. 30 equidistant layers up to
+# `resolution` cells per panel edge) or triangles; advection: the horizontal_advection of
+# KiteNonhydrostatic, dg (default) or vector_invariant. 30 equidistant layers up to
 # 30 km, Rayleigh damping of w above 22 km. Prints twice a day the largest |w|, the
 # largest change of θ and of the surface pressure.
 using Printf
@@ -42,10 +43,12 @@ function main(args)
         velocity = length(args) >= 5 ? Symbol(args[5]) : :rt
         theta = length(args) >= 6 ? Symbol(args[6]) : :dg_upwind
         mesh = length(args) >= 7 ? args[7] : "hexagon"
+        advection = length(args) >= 8 ? Symbol(args[8]) : :dg
         primal = mesh == "hexagon" ? create_hexagon_mesh(resolution) :
                  mesh == "cubed" ? create_cubed_sphere_mesh(resolution) : create_spherical_mesh(resolution)
         m = KiteNonhydrostatic(primal, v, 1; height_order=velocity == :rt ? 2 : 1,
-                               velocity, horizontal_theta=theta, damping_height=22000.0, damping_rate=0.05)
+                               velocity, horizontal_theta=theta, horizontal_advection=advection,
+                               damping_height=22000.0, damping_rate=0.05)
     end
     y = initial_state(m, (λ, φ, z) -> thermal_wind(λ, φ, z))
     ys = zero_state(m)

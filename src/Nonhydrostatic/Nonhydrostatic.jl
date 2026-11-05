@@ -22,8 +22,8 @@ using ..Topology
 import ..Topology: num_layers
 using ..FiniteVolumes: TRiSKGrid, TRiSKShallowWater, trisk_pv_edges, iap_trisk_weights, num_cells, num_edges, num_vertices,
     bilinear_weights, rbf_coefficients
-using ..FEM: to_backend, project, row_mul!, reference_element, cell_dofs, num_dofs, gauss_legendre, KITE_PRIMAL_FACES
-using ..Geometry: CellMap, map_point, edge_point
+using ..FEM: to_backend, project, row_mul!, reference_element, cell_dofs, num_dofs, gauss_legendre, KITE_PRIMAL_FACES, tabulate
+using ..Geometry: CellMap, map_point, edge_point, edge_normal
 using ..ShallowWater: NonlinearKiteShallowWater, height_dofs, velocity_dofs
 using ..Parallel: num_local_kites
 import ..ShallowWater
@@ -39,5 +39,6 @@ include("TRiSK/TRiSKNonhydrostatic.jl")
 include("ICON/ICONNonhydrostatic.jl")
 include("BaroclinicWave.jl")
 include("Kite/KiteNonhydrostatic.jl")
+include("Kite/KiteAdvection.jl")
 
 end # module

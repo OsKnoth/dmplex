@@ -416,3 +416,37 @@ end
     @test all(isfinite, y.ρ)
     @test abs(mass(y) / m0 - 1) < 1e-13
 end
+
+@testset "kite nonhydrostatic: DG momentum advection" begin
+    NH = dmplex.Nonhydrostatic
+    # affine kites (squares of a periodic plane): the central advection by a uniform flow is skew
+    primal = create_periodic_plane(4, 4)
+    m = KiteNonhydrostatic(primal, VerticalGrid(1, 1.0), 1; radius=1.0, coriolis=x -> 0.0,
+                           horizontal_theta=:dg, horizontal_advection=:dg)
+    sw, T = m.horizontal, m.advection.tables
+    nu, nh = NH.num_velocity_dofs(m), NH.num_columns(m)
+    m2 = NonlinearKiteShallowWater(primal, 1)
+    U = initial_state(m2, x -> SVector(1.0, 0.3, 0.0), x -> 1.0)[velocity_dofs(m2)]
+    ρ = ones(nh)
+    u, v = randn(nu), randn(nu)
+    N(x, α) = NH.momentum_advection!(zeros(nu), sw, T, x, ρ, α; a=U)
+    @test dot(v, N(u, 0.0)) ≈ -dot(u, N(v, 0.0)) rtol = 1e-8
+    @test dot(u, N(u, 1.0)) > 0                                     # the upwind penalty removes energy
+    @test norm(NH.momentum_advection!(zeros(nu), sw, T, U, ρ, 1.0)) < 1e-10   # a uniform flow is not advected
+    # the density-weighted mass with ρ = 1 is the velocity mass
+    rhs = randn(nu)
+    @test NH.weighted_mass_solve!(zeros(nu), sw, m.advection.mass, ρ, rhs) ≈ sw.Mu \ rhs rtol = 1e-10
+    # 3D: mass and ρq = ρ on the sphere
+    for primal in (create_hexagon_mesh(1), create_spherical_mesh(1), create_cubed_sphere_mesh(3))
+        m = KiteNonhydrostatic(primal, VerticalGrid(6, 30000.0), 1; damping_height=22000.0, damping_rate=0.05,
+                               tracer=true, horizontal_theta=:dg_upwind, horizontal_advection=:dg)
+        y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z)); ys = zero_state(m)
+        W = column_weights(m); mass(y) = sum(W' * y.ρ .* m.vgrid.dz')
+        m0 = mass(y)
+        for _ in 1:4
+            step!(m, y, 150.0, ys)
+        end
+        @test abs(mass(y) / m0 - 1) < 1e-13
+        @test maximum(abs, y.ρq ./ y.ρ .- 1) < 1e-13
+    end
+end

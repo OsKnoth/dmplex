@@ -196,11 +196,12 @@ In the last version, on hexagon 7, `vertical_solve` takes 5.1 ms, `vn_tendency` 
 
 ```sh
 julia --project examples/thermal_wind.jl trisk 4 5 300
-julia --project examples/thermal_wind.jl kite 3 5 150 rt dg_upwind hexagon
+julia --project examples/thermal_wind.jl kite 3 5 150 rt dg_upwind hexagon dg
 ```
 
-For the kite model the last argument is the primal mesh: `hexagon`, `cubed` (resolution = cells per
-panel edge) or `triangles`.
+For the kite model the last two arguments are the primal mesh, `hexagon`, `cubed` (resolution =
+cells per panel edge) or `triangles`, and the `horizontal_advection`: `dg` (default) or
+`vector_invariant`.
 
 A steady rotating wind in exact thermal-wind (gradient-wind) balance (`thermal_wind`). The
 temperature falls towards the poles near the ground, `1/T = (1 + ε sin²φ sech²(z/z_s))/T0` with
@@ -214,14 +215,18 @@ frame; the script prints max |w|, max |θ − θ(0)| and max |Δp_s| twice a day
 |---|---|---|---|
 | TRiSK, hexagon 4, dt 300 s | 2.6e-3 m/s | 8.4e-4 | 6.7e-4 (θ′ 0.35 K, Δp_s 0.35 hPa) |
 | kite RT1 × Q2, upwind θ, hexagon 3 | 7.3e-4 | 0.30 | unstable |
-| kite RT1 × Q2, DG θ (`dg_upwind`), hexagon 3 | 5.2e-5 | 2.9e-2 | unstable |
+| kite RT1 × Q2, DG θ (`dg_upwind`), vector-invariant momentum, hexagon 3 | 5.2e-5 | 2.9e-2 | unstable |
+| kite RT1 × Q2, `dg_upwind`, `dg` advection, hexagon 3, dt 150 s | 6.6e-5 | 1.3e-4 | |
+| the same, cubed sphere 12 | 4.0e-5 | 1.1e-4 | |
+| the same, triangles 3 | 7.1e-5 | 1.5e-4 | |
 
-The kite model is not yet stable on this case, see [KITE3D_PLAN.md](KITE3D_PLAN.md).
+The vector-invariant momentum advection is unstable in supercritical flow; see
+[KITE3D_PLAN.md](KITE3D_PLAN.md).
 
 ## Baroclinic channel: `baroclinic_channel.jl`
 
 ```sh
-julia --project examples/baroclinic_channel.jl 40 12 300 quadrilateral dg_upwind
+julia --project examples/baroclinic_channel.jl 60 14 200 quadrilateral dg_upwind true dg
 ```
 
 The baroclinic wave in a Cartesian f-plane channel of Ullrich, Reed and Jablonowski (2015)
@@ -232,17 +237,24 @@ doubly periodic, 40000 km × 12000 km: the channel and its mirror image with the
 v = 0 at the walls holds by symmetry, and the unperturbed state is an exact steady state.
 
 - Arguments: `[nx=80] [days=12] [dt=150·80/nx] [cells=quadrilateral|triangle] [theta=dg_upwind]
-  [perturbation=true]`, with ny = 3nx/10.
+  [perturbation=true] [advection=dg|vector_invariant]`, with ny = 3nx/10.
 - 30 layers, Rayleigh damping of w above 22 km.
-- Twice a day the script prints the minimum and maximum surface pressure, max |w|, the relative
-  mass change and the time per step.
+- Twice a day the script prints:
+  - the minimum and maximum surface pressure and max |w|;
+  - the amplitude of zonal wavenumber 10 of p_s in the channel, with its growth rate over the
+    last half day (linear QG theory: 6.59e-6 1/s for this most unstable 4000 km wave);
+  - the relative mass change and the time per step.
 
 Only the kite model runs on planes; TRiSK and ICON need the spherical grids.
 
-| 40 × 12 cells (1000 km), dt 300 s | min p_s day 4 / 8 / 12 | s/step (CPU) |
-|---|---|---|
-| quadrilaterals | 999.6 / 997.3 / 982.4 hPa | 1.9 |
-| triangles | grid-scale mode from day 1 (973.8 hPa at day 4.5) | 2.9 |
+| advection `dg` | min p_s day 4 / 8 / 12 | k = 10 growth, days 3–12 | s/step (CPU) |
+|---|---|---|---|
+| 40 × 12 quadrilaterals (1000 km), dt 300 s | 999.6 / 997.7 / 979.8 hPa | | 2.1 |
+| 40 × 12 triangles, dt 300 s | 999.6 / 997.8 / 980.7 hPa | | 3.3 |
+| 60 × 18 quadrilaterals (667 km), dt 200 s | 999.7 / 997.7 / 978.7 hPa | 5.9–6.6e-6 1/s | 4.5 |
+| 60 × 18 triangles, dt 200 s | 999.7 / 997.8 / … | 5.8–6.0e-6 1/s to day 8 | 7.1 |
+
+With `vector_invariant` the triangles develop a grid-scale mode from day 1.
 
 ## Mass solves with cuDSS: `gpu/cudss_mass.jl`
 
