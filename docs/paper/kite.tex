@@ -1,0 +1,712 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage[font=small,labelfont=bf]{caption}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bu}{\mathbf{u}}
+\newcommand{\bv}{\mathbf{v}}
+\newcommand{\ba}{\mathbf{a}}
+\newcommand{\bF}{\mathbf{F}}
+\newcommand{\bn}{\mathbf{n}}
+\newcommand{\rhat}{\hat{\mathbf{r}}}
+\newcommand{\Pc}{\mathcal{P}}
+\newcommand{\Pt}{\widetilde{\mathcal{P}}}
+\newcommand{\Fc}{\mathcal{F}}
+\newcommand{\jump}[1]{[\![#1]\!]}
+\newcommand{\avg}[1]{\{\!\{#1\}\!\}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newtheorem{proposition}{Proposition}
+
+\title{Staggered kite finite elements for the shallow-water equations\\
+and the compressible Euler equations on polygonal meshes}
+\author{Oswald Knoth}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Every polygonal mesh of the sphere or the plane --- triangles, quadrilaterals and the hexagons
+and pentagons of Voronoi meshes --- is split into quadrilaterals (\emph{kites}) by joining the
+cell centres with the edge points. On the kite grid we define a height space of tensor
+Gauss--Radau elements, continuous inside a primal cell and broken across primal edges, and a
+velocity space of Raviart--Thomas elements, continuous in the normal component inside a dual
+cell and broken across its boundary. The height mass matrix is diagonal, the velocity mass matrix
+block diagonal with one block per dual cell, and the divergence and gradient are exactly adjoint
+and metric free. The resulting shallow-water scheme conserves mass and energy exactly and is
+second-order accurate on all mesh types. The extension to the nonhydrostatic compressible Euler
+equations is a direct product with the layers of a height-based vertical grid: one implicit
+column per height node and an explicit horizontal step (HEVI). Its horizontal transport needs
+care. We identify three instabilities, analyse them with eigenvalues of the linearized tendency,
+and remove them: a quadrature mismatch between the velocity mass and the projections, a
+projection defect of the transport of the potential temperature, and an instability of the
+vector-invariant momentum transport when the wind is faster than the internal gravity waves,
+which in a stratified atmosphere it always is for the higher vertical modes. A discontinuous
+Galerkin transport of momentum, density and potential temperature with the pointwise velocity
+removes it. The model then reproduces the linear growth rate of baroclinic instability in an
+$f$-plane channel to within a few per cent and gives the same baroclinic wave on hexagonal,
+cubed-sphere and triangular meshes. Everything is implemented in the Julia package
+\code{dmplex.jl}.
+\end{abstract}
+
+\tableofcontents
+
+%==============================================================================
+\section{Introduction}
+
+Compatible (mimetic) finite elements give the discrete operators of geophysical fluid dynamics
+the structure of the continuous ones: the gradient is the negative adjoint of the divergence,
+the curl of a gradient vanishes, and the semi-discrete equations conserve mass and energy
+\cite{CotterShipton2012,McRaeCotter2014,NataleShiptonCotter2016}. The price is that the mass
+matrices of the usual pairs (e.g.\ $\mathrm{RT}_k\times\mathrm{DG}_k$) are not diagonal, so every
+explicit step needs global solves. Finite-volume C grids such as TRiSK \cite{Thuburn2009,Ringler2010}
+and ICON \cite{Zaengl2015} avoid them with diagonal Hodge stars, at the price of first-order
+operators on general meshes.
+
+The dual cell method of Wess, Kapidani, Codecasa and Sch\"oberl \cite{Wess2024} splits every
+primal cell into quadrilaterals around the primal vertices and uses spaces that are continuous
+inside primal or dual cells only. The mass matrices become diagonal or block diagonal, and the
+order can be raised. This paper transfers that idea to the rotating shallow-water equations on
+arbitrary polygonal meshes of the sphere (Sections~\ref{sec:grid}--\ref{sec:sw-results}) and then
+to the nonhydrostatic compressible Euler equations (Sections~\ref{sec:3d}--\ref{sec:3d-results}).
+The 2D model conserves mass and energy exactly. The 3D model is a direct product with the layers
+of a vertical grid, so it keeps the column structure that a horizontally explicit, vertically
+implicit (HEVI) time step needs.
+
+The 3D extension is not straightforward. Section~\ref{sec:stability} records three horizontal
+instabilities that the 2D tests do not show, their analysis with eigenvalues of the linearized
+tendency and their removal. The last one is the most important: the energy-conserving
+vector-invariant transport is unstable when the flow is faster than the gravity waves, and in a
+stratified atmosphere the internal waves of the higher vertical modes are always slower than the
+wind. A discontinuous Galerkin (DG) transport with the pointwise velocity removes it. With it the
+model is stable on the steady thermal wind, reproduces the linear baroclinic growth rate in an
+$f$-plane channel and gives the same baroclinic wave on three different meshes.
+
+%==============================================================================
+\section{The kite grid}\label{sec:grid}
+
+Let $\Pc$ be a polygonal primal mesh of a closed surface $\Omega$ (the unit sphere or a doubly
+periodic plane). Every cell $P\in\Pc$ with vertices $w_1,\dots,w_n$ is split into $n$ kites
+\[
+  K_i = (w_i,\; m_i,\; c_P,\; m_{i-1}),\qquad i = 1,\dots,n,
+\]
+where $c_P$ is the cell centre and $m_i$ a point on the primal edge $(w_i,w_{i+1})$
+(Figure~\ref{fig:kites}). The kites around a primal vertex $w$ form its dual cell
+$\widetilde P_w$. Every kite has the same local numbering: vertex~1 is the primal vertex and
+vertex~3 the centre. Local edges~1 and~4 are halves of primal edges (\emph{primal faces}).
+Local edges~2 and~3 join an edge point to the centre (\emph{dual faces}); they form the
+boundaries of the dual cells.
+
+\paragraph{Cell centres.} The centre is the vertex of the orthogonal dual mesh when there is one:
+the circumcentre of a triangle, the generator of a Voronoi cell. The generators of a Voronoi
+mesh are recovered from the cells as the null vector of the homogeneous linear system
+$g_i - g_j\parallel\bn_e$, $\bn_e\cdot(g_i+g_j) = 0$ over all edges $e$ between cells $i,j$; for
+MPAS and ICON meshes this reproduces the stored generators to $10^{-14}$. On other meshes (cubed
+sphere, planes) the centre is the centroid. With an orthogonal dual, $m_i$ is the crossing of the
+primal edge with the dual edge, so the dual faces lie on the dual edges; otherwise $m_i$ is the
+edge midpoint.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=2.1]
+  % hexagons: centre (0,0) and the two neighbours sharing the vertex w = (1,0)
+  \foreach \cx/\cy/\name in {0/0/P, 1.5/0.8660254/Q, 1.5/-0.8660254/R} {
+    \coordinate (\name) at (\cx,\cy);
+    \foreach \k in {0,...,5} {
+      \coordinate (\name v\k) at ($(\cx,\cy)+({cos(60*\k)},{sin(60*\k)})$);
+    }
+  }
+  % dual cell of w = P v0: three kites
+  \fill[blue!12] (Pv0) -- ($(Pv0)!0.5!(Pv1)$) -- (P) -- ($(Pv0)!0.5!(Pv5)$) -- cycle;
+  \fill[blue!12] (Pv0) -- ($(Pv0)!0.5!(Pv1)$) -- (Q) -- ($(Pv0)!0.5!(Rv1)$) -- cycle;
+  \fill[blue!12] (Pv0) -- ($(Pv0)!0.5!(Rv1)$) -- (R) -- ($(Pv0)!0.5!(Pv5)$) -- cycle;
+  % one kite of P
+  \fill[orange!35] (Pv2) -- ($(Pv2)!0.5!(Pv3)$) -- (P) -- ($(Pv2)!0.5!(Pv1)$) -- cycle;
+  % primal edges and dual faces
+  \foreach \name in {P,Q,R} {
+    \draw[thick] (\name v0) -- (\name v1) -- (\name v2) -- (\name v3) -- (\name v4) -- (\name v5) -- cycle;
+    \foreach \k [evaluate={\k as \kk using int(mod(\k+1,6))}] in {0,...,5} {
+      \draw[gray, dashed] (\name) -- ($(\name v\k)!0.5!(\name v\kk)$);
+    }
+    \fill (\name) circle (0.025);
+  }
+  % Q2 Radau height nodes of the orange kite: s, t in {0.1551, 0.6449, 1}, primal vertex at (0,0)
+  \coordinate (A) at (Pv2); \coordinate (B) at ($(Pv2)!0.5!(Pv3)$);
+  \coordinate (C) at (P);   \coordinate (D) at ($(Pv2)!0.5!(Pv1)$);
+  \foreach \s in {0.1551,0.6449,1} {
+    \foreach \t in {0.1551,0.6449,1} {
+      \fill[orange!70!black] ($ ($(A)!\s!(B)$) ! \t ! ($(D)!\s!(C)$) $) circle (0.03);
+    }
+  }
+  \node[below right] at (Pv0) {$w$};
+  \node[below left] at (P) {$c_P$};
+  \node at (-0.55,-0.25) {$P$};
+  \node at (1.55,0.25) {$\widetilde P_w$};
+  \node[left] at (Pv2) {$w_i$};
+\end{tikzpicture}
+\caption{Kite grid of a hexagonal mesh: primal edges (solid), dual faces from the centres to the
+edge points (dashed). Shaded blue: the dual cell $\widetilde P_w$ of the vertex $w$, made of the
+three kites that touch it. Orange: one kite of the cell $P$ with the nine Gauss--Radau nodes of
+the $Q_2$ height space; they lie inside the kite, on its dual faces and at the centre, never on
+primal edges.}
+\label{fig:kites}
+\end{figure}
+
+%==============================================================================
+\section{Finite-element spaces}\label{sec:spaces}
+
+All kite spaces live on the reference square $[-1,1]^2$ with the primal vertex at $(-1,-1)$ and
+the centre at $(1,1)$. The reference map is the bilinear interpolant of the four kite vertices,
+on the sphere radially projected (curved elements).
+
+\paragraph{Height.} $H_p$ = \code{KiteRadau}$(p)$: $Q_p$ on every kite with the nodes at the tensor
+Gauss--Radau points $r_0<\dots<r_p = 1$ that include the end point at the centre side. The nodes
+lie inside the kite ($p^2$), on its dual faces ($p$ each) and at the centre, never on primal edges.
+So a height field is continuous inside a primal cell and broken across primal edges,
+\[
+  H_p = \{ h \in L^2(\Omega) : h|_P \in H^1(P)\ \forall P\in\Pc,\ h|_K\in Q_p \},
+\]
+with $1 + n_P(p + p^2)$ degrees of freedom per primal cell (37 for $p = 2$ on a hexagon). With the
+Radau nodes as quadrature the mass matrix $M_h$ is diagonal; for $p\ge1$ the rule integrates the
+bilinear area element exactly, so the lumped mass is consistent.
+
+\paragraph{Velocity.} $U_k$ = \code{KiteBrokenRT}$(k)$: $\mathrm{RTCF}_k$ on every kite, mapped with
+the contravariant Piola transform $\bv = J\hat\bv/\det J$, with normal continuity across the primal
+faces (inside a dual cell) and none across the dual faces:
+\[
+  U_k = \{ \bu \in L^2(\Omega)^2 : \bu|_{\widetilde P} \in H(\mathrm{div},\widetilde P)
+  \ \forall \widetilde P\in\Pt,\ \bu|_K\in\mathrm{RTCF}_k \}.
+\]
+The degrees of freedom of the dual faces belong to the kite itself. The mass matrix $M_u$ is block
+diagonal with one block per dual cell (30 for $\mathrm{RT}_1$ on the triangular dual cell of a
+hexagonal mesh). Two alternatives with the same continuity pattern are implemented: broken
+$\mathrm{BDM}_k$, and the $Q_p\times Q_p$ space of Wess et al.\ \cite{Wess2024} with Radau nodes
+at the primal-vertex side, whose lumped mass couples only the components at one node.
+
+\paragraph{Vorticity.} $Z_{k+1}$: continuous $Q_{k+1}$ on the kites with Gauss--Lobatto nodes and
+lumped mass.
+
+The default pair is $\mathrm{RT}_1\times Q_2\times\mathrm{CG}_2$ ($k = 1$, $p = 2$).
+
+%==============================================================================
+\section{Discrete operators}\label{sec:operators}
+
+With the contravariant Piola map one has $\bv\cdot\nabla\eta\,dA = \hat\bv\cdot\hat\nabla\hat\eta\,d\xi$,
+$(\nabla\cdot\bv)\,\eta\,dA = (\hat\nabla\cdot\hat\bv)\,\hat\eta\,d\xi$ and
+$\bv\cdot\bn\,ds = \hat\bv\cdot\hat\nu\,dt$, so both operators below are free of the metric.
+
+\paragraph{Divergence.} For $\eta\in H_p$ and $\bF\in U_k$
+\begin{equation}\label{eq:div}
+  D(\eta;\bF) = \sum_{K} \int_K \bF\cdot\nabla\eta
+  - \sum_K \sum_{e\subset\partial K\cap\partial\Pc} \int_e \eta_K\,\bF\cdot\bn_K,
+\end{equation}
+summed over the primal faces of each kite with the trace of $\eta$ from inside $K$. As a matrix,
+$B_{ij} = D(\eta_i;\bv_j)$.
+
+\paragraph{Gradient.} For $p\in H_p$ and $\bv\in U_k$
+\[
+  G(p;\bv) = \sum_K \int_K p\,\nabla\cdot\bv
+  - \sum_K \sum_{e\subset\partial K,\ e\ \text{dual}} \int_e p\,\bv_K\cdot\bn_K,
+\]
+where $p$ is single valued on the dual faces.
+
+\begin{proposition}
+$G(p;\bv) = -D(p;\bv)$, i.e.\ $G = -B^T$, and $\mathbf 1^T B = 0$.
+\end{proposition}
+\begin{proof}
+On each kite $\int_K p\,\nabla\cdot\bv = -\int_K \nabla p\cdot\bv + \int_{\partial K} p\,\bv\cdot\bn_K$.
+The boundary integral over the dual faces cancels the face term of $G$, leaving
+$-\sum_K\int_K\nabla p\cdot\bv + \sum_K\sum_{\text{primal}}\int p_K\,\bv\cdot\bn_K = -D(p;\bv)$.
+For $\eta \equiv 1$, $D(1;\bv) = -\sum_K\sum_{\text{primal}}\int\bv\cdot\bn_K = 0$, since $\bv\cdot\bn$
+is continuous across primal faces and both sides appear with opposite normals.
+\end{proof}
+
+\paragraph{Vorticity, kinetic energy, Coriolis.}
+$\langle\zeta,\gamma\rangle = -\int \bu\cdot(\rhat\times\nabla\gamma)$ for $\gamma\in Z_{k+1}$,
+$\langle K,\eta\rangle = \int\tfrac12|\bu|^2\eta$ in $H_p$, and the antisymmetric
+$C_{ij} = \int f\,\bv_i\cdot(\rhat\times\bv_j)$, with $\rhat = J_1\times J_2/|J_1\times J_2|$.
+
+%==============================================================================
+\section{Shallow-water schemes}\label{sec:sw}
+
+The rotating shallow-water equations in vector-invariant form are
+\begin{align}
+  \partial_t \bu + q\,\rhat\times\bF + \nabla\bigl(K + g h\bigr) &= 0, &
+  \partial_t h + \nabla\cdot\bF &= 0,
+\end{align}
+with the mass flux $\bF = h\bu$, $K = \tfrac12|\bu|^2$ and the potential vorticity
+$q = (\zeta + f)/h$. They conserve mass and the energy $E = \int \tfrac12 h|\bu|^2 + \tfrac12 g h^2$.
+
+\paragraph{Linear.} $M_h\dot h = H\,B\,\bu$, $M_u\dot\bu = -C\bu - g\,B^T h$ conserves mass
+($\mathbf 1^T B = 0$) and the energy $\tfrac12 H\bu^T M_u\bu + \tfrac12 g h^T M_h h$ ($C$
+antisymmetric, $G=-B^T$).
+
+\paragraph{Nonlinear.} The mass flux is projected into the velocity space,
+$\bF = \Pi_U(h\bu)$, i.e.\ $M_u\bF = (\int h\bu\cdot\bv_i)_i$, one solve with the block-diagonal
+$M_u$, and $q$ is evaluated at the quadrature points:
+\begin{align}\label{eq:sw}
+  M_h\dot h &= B\bF, &
+  \int\dot\bu\cdot\bv &= -\int q\,(\rhat\times\bF)\cdot\bv - B^T(gh+K).
+\end{align}
+\begin{proposition}\label{prop:energy}
+The scheme \eqref{eq:sw} conserves mass and the discrete energy
+$E_h = \int\tfrac12 h|\bu|^2 + \tfrac12 g\,h^T M_h h$ exactly.
+\end{proposition}
+\begin{proof}
+Mass: $\mathbf 1^T M_h\dot h = \mathbf 1^T B\bF = 0$. Energy: with the same quadrature in $E_h$ and
+the right-hand sides, $\partial E_h/\partial\bu = M_u\bF$ and $\partial E_h/\partial h = M_h(K + g h)$,
+so $\dot E_h = -\int q\,(\rhat\times\bF)\cdot\bF - \bF^T B^T(gh+K) + (gh+K)^T B\bF = 0$.
+\end{proof}
+This is the framework of McRae and Cotter \cite{McRaeCotter2014} on the kite spaces, with mass
+matrices that stay diagonal or block diagonal. The nonlinear terms use one Gauss rule per kite
+($3\times3$ for $\mathrm{RT}_1$) with precomputed metric terms; energy conservation is an algebraic
+property and holds for every rule. The terms are KernelAbstractions kernels over the kites with
+atomic scatter and run unchanged on CPUs and GPUs; the model is distributed with MPI over equal-area
+partitions of the primal cells, one ring of ghost cells deep.
+
+%==============================================================================
+\section{Shallow-water results}\label{sec:sw-results}
+
+\paragraph{Operator consistency.} $L^2$ errors of the discrete gradient $M_u^{-1}B^T\Pi p$ and
+divergence $M_h^{-1}B\,\Pi\bu$ against the projections of the exact operators, for smooth $p$ and
+$\bu$, on hexagon kites (960, 3840, 15\,360 kites) and cubed-sphere kites (384, 1536, 6144):
+\begin{center}
+\begin{tabular}{llcc}
+\toprule
+pair & mesh & gradient & divergence \\
+\midrule
+$Q_0\times\mathrm{RT}_0$ & hexagons  & 7.4, 7.6, 7.7 & 0.017, 0.0069, 0.0030 \\
+                         & cube & 5.6, 5.8, 5.9 & 0.065, 0.076, 0.067 \\
+$Q_1\times\mathrm{RT}_0$ & hexagons  & 0.10, 0.052, 0.026 & 0.23, 0.21, 0.21 \\
+                         & cube & 0.19, 0.094, 0.047 & 0.40, 0.36, 0.31 \\
+$Q_1\times\mathrm{RT}_1$ & hexagons  & 0.21, 0.11, 0.052 & 0.016, 0.0060, 0.0027 \\
+                         & cube & 0.31, 0.15, 0.077 & 0.044, 0.022, 0.012 \\
+$Q_2\times\mathrm{RT}_1$ & hexagons  & 0.0038, 0.00091, 0.00023 & 0.088, 0.045, 0.023 \\
+                         & cube & 0.0091, 0.0023, 0.00057 & 0.059, 0.035, 0.019 \\
+\bottomrule
+\end{tabular}
+\end{center}
+At the lowest order one of the two operators is inconsistent: with $Q_0$ heights the pressure is
+constant per primal cell and does not control the velocity degrees of freedom of the dual faces,
+and the divergence of broken $\mathrm{RT}_0$ tested with $Q_1$ does not converge. From
+$\mathrm{RT}_1$ on both converge.
+
+\paragraph{Williamson test case 2.} The steady geostrophic flow \cite{Williamson1992} converges at
+second order on all meshes. Linear model, $Q_1\times\mathrm{RT}_1$, RK4, $\|h(T)-h(0)\|$:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+primal mesh & coarse & medium & fine \\
+\midrule
+hexagons (162, 642, 2562 cells) & $3.09\cdot10^{-3}$ & $7.72\cdot10^{-4}$ & $1.94\cdot10^{-4}$ \\
+triangles (80, 320, 1280)       & $9.67\cdot10^{-3}$ & $2.46\cdot10^{-3}$ & $6.16\cdot10^{-4}$ \\
+cubed sphere (96, 384, 1536)    & $7.88\cdot10^{-3}$ & $1.94\cdot10^{-3}$ & $4.88\cdot10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Nonlinear model, $\mathrm{RT}_1\times Q_2\times\mathrm{CG}_2$, SSP-RK3: $3.60\cdot10^{-4}$ and
+$8.80\cdot10^{-5}$ on hexagons 2 and 3 (rate 2.03), mass and energy conserved to round-off. Flat
+(chordal) kites give rate 1.87. The velocity pairs compare as follows (linear geostrophic state
+with Coriolis, finest hexagon mesh, rate in brackets):
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+pair (velocity / height) & gradient & divergence & geostrophic \\
+\midrule
+$\mathrm{RT}_1$ / $Q_1$            & 0.21, 0.11, 0.052     & 0.016, 0.0060, 0.0027 & $1.94\cdot10^{-4}$ (1.99) \\
+$\mathrm{RT}_1$ / $Q_2$            & 0.0038, 0.00091, 0.00023 & 0.088, 0.045, 0.023 & $4.12\cdot10^{-5}$ (2.10) \\
+$\mathrm{BDM}_1$ / $Q_1$           & 0.13, 0.065, 0.032    & 0.28, 0.26, 0.25      & $1.46\cdot10^{-4}$ (1.78) \\
+Wess et al., $p=1$ & 0.14, 0.069, 0.035 & 0.21, 0.18, 0.18    & $1.68\cdot10^{-4}$ (1.86) \\
+Wess et al., $p=2$ & 0.0070, 0.0018, 0.00044 & 0.026, 0.013, 0.0064 & $5.61\cdot10^{-6}$ (2.07) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Comparison with the mixed method on the kite quadrilaterals.} The kite grid is an
+ordinary quadrilateral mesh, so the compatible pair $\mathrm{RT}_1\times\mathrm{DG}_1\times\mathrm{CG}_2$
+with global mass matrices runs on it unchanged. On hexagon kites 2 and 3 it is about $1.9\times$
+more accurate ($1.94\cdot10^{-4}$, $4.72\cdot10^{-5}$) with fewer degrees of freedom, but needs a
+global sparse factorization; the kite method replaces it by independent dual-cell blocks, which
+matters most for explicit time stepping, on GPUs and in parallel.
+
+\paragraph{Galewsky jet.} The barotropically unstable mid-latitude jet of Galewsky et al.\
+\cite{Galewsky2004}, without diffusion, on 10\,242 hexagons (61\,440 kites, about 91\,km), SSP-RK3 with
+$\Delta t = 33.5$\,s (Figure~\ref{fig:galewsky}). The jet breaks up after day~4 and rolls up into
+the familiar vortices by day~6. After 6 days the relative change of mass is $1.2\cdot10^{-11}$ and of
+energy $9\cdot10^{-10}$, from the time integration only. Without any dissipation, grid-scale noise
+in the vorticity accompanies the vortices.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/kite_galewsky.pdf}
+\caption{Galewsky jet, relative vorticity after 6 days, kite method
+$\mathrm{RT}_1\times Q_2\times\mathrm{CG}_2$ on 10\,242 hexagons (61\,440 kites), no dissipation.}
+\label{fig:galewsky}
+\end{figure}
+
+\paragraph{Bickley jet.} A doubly periodic $[0,4\pi)^2$, $u = \mathrm{sech}^2(y-2\pi)$, no rotation,
+Froude number 0.2, perturbed in wavenumber~1. On $64\times64$ quadrilaterals (16\,384 kites) the jet forms a
+vortex street with two cat's-eye pairs by $t = 40$ (Figure~\ref{fig:bickley}); mass and energy
+change by $1.6\cdot10^{-10}$ and $7\cdot10^{-11}$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/kite_bickley.pdf}
+\caption{Bickley jet, relative vorticity at $t = 40$ on $64\times64$ quadrilaterals (16\,384 kites), no dissipation.}
+\label{fig:bickley}
+\end{figure}
+
+%==============================================================================
+\section{The 3D compressible model}\label{sec:3d}
+
+\subsection{Equations}
+The dry compressible Euler equations of a shallow atmosphere over flat ground, in height
+coordinates, with the prognostic variables $\bu$ (horizontal velocity), $w$, $\rho$ and $\rho\theta$
+and the Exner pressure $\pi = (R\rho\theta/p_0)^{R/c_v}$:
+\begin{align}
+  \partial_t \bu &= -(\zeta + f)\,\rhat \times \bu - w\,\partial_z\bu - \nabla K - c_p\theta\nabla\pi, &
+  \partial_t w &= -\bu\cdot\nabla w - w\,\partial_z w - c_p\theta\,\partial_z\pi - g,\\
+  \partial_t \rho &= -\nabla\cdot(\rho \bu) - \partial_z(\rho w), &
+  \partial_t(\rho\theta) &= -\nabla\cdot(\rho\theta \bu) - \partial_z(\rho\theta w),
+\end{align}
+with $K = \tfrac12|\bu|^2$; Rayleigh damping of $w$ acts near the lid.
+
+\subsection{Spaces}
+The spaces are tensor products of the 2D kite spaces with the layers of a vertical grid
+(thicknesses $\Delta z_k$, centres $z_k$, interfaces $z_{j-1/2}$, $\Delta z^h_j = z_j - z_{j-1}$):
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+field & space & lowest order \\
+\midrule
+$\rho$, $\rho\theta$ & $H_2\otimes\mathrm{DG}_0$ & $Q_2$ Radau $\times$ constant per layer \\
+$w$ & $H_2\otimes\mathrm{CG}_1$ & $Q_2$ Radau $\times$ linear, values at the interfaces \\
+$\bu$ & $U_1\otimes\mathrm{DG}_0$ & $\mathrm{RT}_1$ $\times$ constant per layer \\
+\bottomrule
+\end{tabular}
+\end{center}
+Together $(\bu, w)$ lies in a space whose divergence maps onto that of $\rho$, so the discrete
+continuity equation is exact per kite column. $\theta$ lives in the layers with $\rho$ (Lorenz
+staggering, as in ICON). Every height node carries one column of $\rho$, $\rho\theta$ and $w$; for
+the Radau nodes these columns are both degrees of freedom and quadrature points, so the vertical
+problem decouples into independent columns. The mass matrices are the tensor products
+$M_h\otimes\mathrm{diag}(\Delta z)$ (diagonal), $M_u\otimes\mathrm{diag}(\Delta z)$ (block diagonal)
+and, for $w$, $M_h$ times the consistent tridiagonal $\mathrm{CG}_1$ mass, whose bandwidth is that of
+the coupling through $\rho$ and $\rho\theta$.
+
+\subsection{Horizontal terms: the vector-invariant form}
+Per layer the horizontal terms are those of the shallow-water scheme \eqref{eq:sw} with $\rho$ in
+place of $h$:
+\begin{equation}\label{eq:vi}
+\begin{gathered}
+  \bF = \Pi_U(\rho\bu),\qquad
+  M_u\dot\bu = -\tfrac1a B^T K - \Bigl(\int \tfrac{\zeta + f}{\rho}\,(\rhat\times\bF)\cdot\bv_j\Bigr)_j
+     - c_p\,M_u\,\Pi_U\bigl(\theta\, M_u^{-1}B^T\pi/a\bigr),\\
+  M_h\dot\rho = B\bF/a,\qquad M_h\dot{(\rho\theta)} = B\,\Pi_U(\theta\bF)/a ,
+\end{gathered}
+\end{equation}
+with the radius $a$. With $E = \sum_k\Delta z_k\bigl[\int\rho|\bu|^2/2 + \sum_i M_{h,ii}(c_v\rho\theta\,\pi + \rho g z_k)_i\bigr]$
+one has $\partial E/\partial\bu = M_u\bF$, $\partial E/\partial\rho = M_h(K + gz)$ and
+$\partial E/\partial(\rho\theta) = M_h c_p\pi$, and the horizontal terms exchange energy without loss,
+since the pressure pair cancels through the symmetric $\Theta = (\int\theta\,\bv_i\cdot\bv_j)$.
+The vertical coupling $-\boldsymbol\eta w$ with the horizontal vorticity
+$\boldsymbol\eta = \partial_z\bu - \nabla w$ and its counterpart $\boldsymbol\eta\cdot\bu$ in the
+$w$ equation are discretized as exact adjoints.
+
+\subsection{Vertical terms and time stepping}
+The vertical terms are those of the C-grid dycores of \code{dmplex.jl}, one column per height node:
+\[
+  \dot w_j = -c_p\,\theta_j\,\frac{\pi_j - \pi_{j-1}}{\Delta z^h_j} - g - r_j w_j,\qquad
+  \dot\rho_k = -\frac{M_{k+1} - M_k}{\Delta z_k},\qquad
+  \dot{(\rho\theta)}_k = -\frac{\tilde\theta_{k+1}M_{k+1} - \tilde\theta_kM_k}{\Delta z_k},
+\]
+with $M_j = \rho_j w_j$ and $\tilde\theta_j$ the third-order upwind interface value after a
+Crank--Nicolson vertical advection of $\theta$, as in ICON-IAP. The time step is the Wicker--Skamarock
+RK3 scheme \cite{WickerSkamarock2002} with HEVI stages: explicit horizontal momentum, a
+forward--backward update of $\rho$ and $\rho\theta$ with the new velocity, and an implicit vertical
+solve per column, off-centred with $\beta = 0.65$ and linearized around the Exner pressure of the
+step, which reduces to one tridiagonal system in $w$. The initial states are in the discrete
+hydrostatic balance of these operators, so an atmosphere at rest stays at rest to round-off.
+
+%==============================================================================
+\section{Stability of the horizontal transport}\label{sec:stability}
+
+The 3D model with \eqref{eq:vi} conserves energy and keeps the rest state, but is unstable in a
+flow. Three different causes had to be found. The tool is the spectrum of the linearized horizontal
+tendency of one layer; max $\mathrm{Re}\,\lambda>0$ is a growing mode of the semi-discrete
+equations, independent of the time step.
+
+\subsection{Quadrature of the velocity mass}
+The velocity mass was first assembled with an exact rule (degree 6), the projections $\Pi_U(h\bv)$
+with the $3\times3$ rule of the nonlinear terms. On non-affine kites the metric $J^TJ/\det J$ is
+rational, the two differ, and $\Pi_U(c\,\bv)\ne c\,\bv$ for a constant $c$ ($1.4\cdot10^{-2}$ on
+hexagon kites). Then the $\rho\theta$ flux $\Pi_U(\bar\theta\bF)$ is not $\bar\theta$ times the
+mass flux: the horizontal fluxes create sub-cell entropy at rest. The energy is still conserved,
+but the Casimir $\int\rho f(\theta)$ that makes the stratified rest state stable is not, and a
+sub-cell mode lives on the released potential energy. On the affine kites of the cubed sphere both
+rules are exact and the mode is absent. Assembling $M_u$ with the rule of the projections restores
+$\Pi_U(c\,\bv) = c\,\bv$ to round-off and removes the mode.
+
+\subsection{Projected transport of $\theta$}
+A passive tracer $\rho q$ transported like $\rho\theta$, $M_h\dot{(\rho q)} = B\,\Pi_U(q\bF)/a$,
+grows exactly like $\theta'$ in a one-layer flow, although its equation is linear and has no
+feedback: the transport itself is unstable. The spectrum of the transport of a height field with a
+prescribed velocity (Williamson case~2, $\mathrm{RT}_1\times Q_2$), in units of $u_0/\Delta x$:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+max $\mathrm{Re}\,\lambda$ & hexagons & cubed sphere & triangles \\
+\midrule
+projected flux $B\,\Pi_U(\rho\bu)$ & 0.700 & 0.278 & 1.473 \\
+pointwise flux, interior trace & 4.757 & 1.245 & 2.428 \\
+DG, central trace & 0.001 & 0.000 & 0.002 \\
+DG, upwind trace & 0.000 & 0.000 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The projected flux tests $\rho\bu$ with the discrete gradient $M_u^{-1}B^T\eta$ of the test function,
+which carries the jumps of $\eta$ across primal edges spread over the dual-cell mass blocks, so
+$\langle\dot\rho,\eta\rangle + \langle\dot\eta,\rho\rangle\ne\int\bu\cdot\nabla(\rho\eta) = 0$: a
+consistency defect at the grid scale, independent of the quadrature (degree 10 changes nothing) and
+largest on the irregular kites of triangles. In shallow water and in the 3D model the gravity-wave
+coupling to the momentum keeps $\rho$ bounded; a transported quantity without that feedback ($q$,
+$\theta'$) sees the bare operator. The remedy is the DG transport with the kite mass flux,
+\begin{equation}\label{eq:dg-theta}
+  \langle \dot{(\rho q)}, \eta\rangle = \frac1a\Bigl(\sum_K \int_K q\,\bF\cdot\nabla\eta
+     - \sum_{F\in\Fc_p} \int_F \hat q\,(\bF\cdot\bn_K)\,\jump{\eta}\Bigr),
+\end{equation}
+over the primal faces $\Fc_p$ with the central or upwind trace $\hat q$. For $q = 1$ it is $B\bF$, so
+$\rho q = \rho$ is kept; it is skew in $q$ (central) or dissipative (upwind). The pressure gradient
+uses its adjoint, so the energy exchange stays exact, and the horizontal advection of $w$ is DG in
+advective form for the same reason. In the one-layer thermal shallow-water test (Williamson case~2,
+random $\theta' = 10^{-8}$) $\theta'$ now stays at $10^{-8}$ on all three meshes, instead of
+overflowing within a day on hexagons and triangles.
+
+\subsection{Supercritical flow}\label{sec:supercritical}
+With the DG transport of $\theta$ the steady thermal wind still grows in 3D, on all three meshes and
+faster on triangles. Ablations show that the growth needs neither shear nor vertical advection nor
+rotation, but more than one layer: one layer in solid-body rotation stays at rest, five layers grow.
+The internal gravity waves of vertical mode $m$ in an atmosphere of depth $H$ and buoyancy frequency
+$N$ travel at about $c_m = NH/(m\pi)\approx 105/m$\,m/s for $H = 30$\,km, so the higher modes are
+slower than the jet. This is reproduced by one layer with a uniform flow $(1, 0.3)$ on the periodic
+unit square and the shallow-water equation of state with wave speed $c$: it is stable for $c > |\bu|$
+and grows for $c < |\bu|$, at a rate roughly proportional to $c$. At $c = 0.5$:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+max $\mathrm{Re}\,\lambda\,\Delta x/|\bu|$ & full & momentum ($\rho$ frozen) & continuity ($\bu$ frozen) \\
+\midrule
+quadrilaterals & 3.49 & 0.77 & 0.77 \\
+triangles & 6.08 & 5.48 & 5.49 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Both transports of \eqref{eq:vi} are unstable on their own, the vector-invariant momentum transport
+(PV flux and $\nabla K$) and the projected continuity $B\,\Pi_U(\rho\bu)$. In subcritical flow the fast
+gravity-wave coupling and the conserved energy keep the coupled system neutral; this is why all 2D
+tests and the one-layer 3D tests pass. In supercritical flow the perturbations can draw energy from
+the mean flow. In the energy norm $E = \mathrm{diag}(H M_u, g M_h)$ the symmetric part of $EJ$ is
+35\,\% of its skew part, almost all of it in the momentum block; the continuity block contributes
+0.3\,\%. Both blocks must be skew-symmetric.
+
+\paragraph{DG transport of momentum and density.} With \code{horizontal\_advection=:dg}, $\rho$,
+$\rho\theta$ and the tracers are transported by \eqref{eq:dg-theta} with the pointwise velocity
+$\bF = \bu$ and $\hat q$ the density trace, and the momentum equation is solved in advective form
+with the density-weighted velocity mass:
+\begin{multline}\label{eq:dg-u}
+  \int \rho\,\dot\bu\cdot\bv = -\frac1a N(\bu;\bv) - \int\rho f\,(\rhat\times\bu)\cdot\bv
+   - \frac{c_p}{a}\Bigl(\sum_K\int_K\rho\theta\,\bv\cdot\nabla\pi - \sum_{F\in\Fc_p}\int_F\widehat{\rho\theta}\,(\bv\cdot\bn_K)\jump{\pi}\Bigr)\\
+   - \sum_{j = k,k+1}\frac{\Delta z^h_j}{2\Delta z_k}\int \rho\,w_j\,\partial_z\bu_j\cdot\bv ,
+\end{multline}
+\[
+  N(\bu;\bv) = \sum_K\int_K \rho\,\bv\cdot(\bu\cdot\nabla)\bu
+  - \sum_{F\in\Fc}\int_F \hat\rho\,\avg{\bu\cdot\bn}\,\jump{\bu}\cdot\avg{\bv}
+  + \alpha\sum_{F\in\Fc}\int_F \hat\rho\,\frac{|\bu\cdot\bn|}{2}\,\jump{\bu}\cdot\jump{\bv},
+\]
+over all four faces $\Fc$ of every kite (across primal faces only the tangential component jumps,
+across dual faces the whole velocity), $\hat\rho$ the mean of the two traces and $\alpha = 1$ for
+upwinding. The pressure term is the adjoint of the DG $\rho\theta$ transport, so the exchange with the
+internal energy stays exact. The volume term is metric free except for the derivative of the Piola
+factor, $(\bu\cdot\nabla)\bu\,dA = \sum_k\hat u_k\,\partial_{\xi_k}(P\hat\bu)\,d\xi$ with
+$P = J/\det J$, $\partial_{\xi_k}(P\hat\bu) = (\partial_{\xi_k}P)\hat\bu + P\partial_{\xi_k}\hat\bu$, and
+$\partial_{\xi_k}P$ from a Richardson extrapolation of central differences of the cell map. The
+density-weighted mass $\int\rho\,\bv_a\cdot\bv_b$ is assembled with the rule of the nonlinear terms
+and factorized per dual cell (Cholesky), so it stays local. For uniform $\rho$ and divergence-free
+$\bu$ the central part of $N$ is skew; the upwind penalty only removes energy. Since the kinetic energy
+of the advective form is not exactly the $K$ of the pressure term (the projection of $K$ into $H_2$),
+the scheme no longer conserves energy exactly; the upwind term supplies the dissipation.
+
+Figure~\ref{fig:spectra} shows the spectra of the one-layer test at $c = 0.5$. The vector-invariant
+form has growing modes up to $3.49\,|\bu|/\Delta x$ on quadrilaterals and $6.08\,|\bu|/\Delta x$ on
+triangles. The DG form with the central trace is neutral on quadrilaterals and nearly so on triangles
+(0.014, from the quadrature on non-affine kites); with the upwind trace max $\mathrm{Re}\,\lambda = 0$
+on both. The DG advection has the explicit limit of DG with RK3, about 0.1 in the advective Courant
+number per kite; the 3D runs below are at about 0.02. It costs about 20\,\% more per step than
+\eqref{eq:vi}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/kite_spectra.pdf}
+\caption{Spectra of the linearized one-layer tendency in a uniform supercritical flow
+($|\bu| = 1.04$, wave speed $c = 0.5$, periodic $6\times6$ mesh), in units of $|\bu|/\Delta x$:
+vector-invariant form \eqref{eq:vi} and DG form \eqref{eq:dg-theta}--\eqref{eq:dg-u} with central and
+upwind traces, on quadrilaterals (top) and triangles (bottom).}
+\label{fig:spectra}
+\end{figure}
+
+%==============================================================================
+\section{3D results}\label{sec:3d-results}
+
+All runs use $\mathrm{RT}_1\times Q_2$ horizontally, 30 equidistant layers up to 30\,km, Rayleigh
+damping of $w$ above 22\,km, the DG transport with upwind traces for $\theta$, $\rho$, $\bu$ and $w$, and
+no explicit diffusion. They are serial CPU runs.
+
+\subsection{Thermal wind}
+A steady rotating wind in exact gradient-wind balance, $1/T = (1 + \varepsilon\sin^2\varphi\,
+\mathrm{sech}^2(z/z_s))/T_0$ with $T_0 = 300$\,K, $\varepsilon = 0.1$, $z_s = 12$\,km and the same surface
+pressure everywhere; the westerly reaches about 24\,m/s. A good model keeps it at rest in the
+rotating frame. Figure~\ref{fig:thermal} compares the kite variants with TRiSK on a finer mesh. With the
+vector-invariant momentum, max\,$|w|$ grows on all meshes, to $3\cdot10^{-2}$ (hexagons), 0.20
+(cubed sphere) and NaN (triangles, day~2.5). With the DG momentum it stays at about $10^{-4}$\,m/s on
+all three meshes, max $|\theta'|$ at $2\cdot10^{-2}$\,K and max $|\Delta p_s|$ at $5\cdot10^{-2}$\,hPa,
+an order of magnitude below TRiSK on hexagon~4.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/kite3d_thermal_wind.pdf}
+\caption{Thermal wind: max $|w|$ of TRiSK (hexagon 4, 40\,962 cells) and of the kite model on hexagons 3
+(23\,682 columns), the cubed sphere 12 (21\,600) and triangles 3 (24\,320), with the upwind $\theta$
+trace (grey), the DG $\theta$ transport with the vector-invariant momentum (dashed) and the DG transport
+of $\theta$, $\rho$ and $\bu$ (solid).}
+\label{fig:thermal}
+\end{figure}
+
+\subsection{Baroclinic wave in an $f$-plane channel}
+The channel of Ullrich, Reed and Jablonowski \cite{Ullrich2015} is 40\,000\,km long and 6000\,km wide,
+with a jet of 35\,m/s, $f_0 = 1.0313\cdot10^{-4}$\,s$^{-1}$, flat ground and a Gaussian perturbation of
+$u$ (1\,m/s, 600\,km). The kite model has no walls, so we use a doubly periodic box of twice the width
+with the mirrored channel and the easterly jet; $v = 0$ at the walls then holds by symmetry, and the
+unperturbed state is an exact steady state. For this setup linear quasi-geostrophic theory gives the
+most unstable wave at zonal wavenumber 10 (4000\,km) with the growth rate $6.59\cdot10^{-6}$\,s$^{-1}$
+\cite{Ullrich2015}. Figure~\ref{fig:channel} shows the amplitude of this wave in the surface pressure on
+$60\times18$ cells (667\,km), dt = 200\,s. After an adjustment of two days it grows at
+$5.9$--$6.6\cdot10^{-6}$\,s$^{-1}$, reaching $6.58\cdot10^{-6}$ at day~11, and saturates after day~12.
+The triangles follow the quadrilaterals to plotting accuracy; with the vector-invariant momentum the
+triangle run is dominated by a grid-scale mode from day~1.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/kite3d_channel_growth.pdf}
+\caption{Baroclinic channel: amplitude of zonal wavenumber 10 of the surface pressure on $60\times18$
+quadrilaterals (27\,000 columns) and triangles (41\,040 columns), and the growth rate of linear QG theory.}
+\label{fig:channel}
+\end{figure}
+
+\subsection{Baroclinic wave on the sphere}
+The baroclinic wave of Ullrich et al.\ \cite{Ullrich2014} with the perturbation of DCMIP 2016, on
+hexagons 3, the cubed sphere 12 and triangles 3 (about 23\,000 columns, roughly 130\,km between
+height nodes), dt = 150\,s. Minimum surface pressure (hPa):
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+day & 6 & 7 & 8 & 9 & 10 \\
+\midrule
+kite, hexagons (23\,682 columns) & 993.5 & 984.3 & 968.3 & 941.6 & 925.8 \\
+kite, cubed sphere (21\,600) & 993.4 & 984.1 & 966.9 & 942.7 & 926.3 \\
+kite, triangles (24\,320) & 993.4 & 984.7 & 967.3 & 936.0 & 925.4 \\
+TRiSK, hexagon 6 (40\,962 cells) & 991.7 & 982.3 & 963.1 & 940.4 & 925.1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The three meshes agree to 1\,hPa at day~10 and with TRiSK at a similar resolution
+(Figures~\ref{fig:bw-ps} and~\ref{fig:bw-T}); mass is conserved to $10^{-15}$. The maps show the $Q_2$
+fields evaluated inside the kites, not the nodal values. The earlier lowest-order kite run
+($Q_1$ heights) on hexagon~3 reached only 976.6\,hPa, with max\,$|w|$ near 1\,m/s from grid-scale noise.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{figures/kite3d_baroclinic_wave_ps.pdf}
+\caption{Baroclinic wave, surface pressure at days 8 and 10 on the three kite meshes (contour interval
+6\,hPa).}
+\label{fig:bw-ps}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{figures/kite3d_baroclinic_wave_T.pdf}
+\caption{Baroclinic wave, temperature of the lowest layer (500\,m) at days 8 and 10 on the three kite
+meshes (contour interval 4\,K).}
+\label{fig:bw-T}
+\end{figure}
+
+%==============================================================================
+\section{Conclusions}
+
+The kite spaces give compatible finite elements on arbitrary polygonal meshes with diagonal height
+and block-diagonal velocity mass matrices. In shallow water the scheme conserves mass and energy
+exactly, converges at second order on hexagonal, triangular and quadrilateral meshes and runs on GPUs
+and with MPI. The direct product with the layers of a vertical grid keeps the column structure of HEVI
+schemes, but its horizontal transport must be built with care: the velocity mass must use the rule of
+the projections, scalars must be transported by DG with the kite mass flux, and in supercritical flow,
+which the higher vertical modes of a stratified atmosphere always are, the energy-conserving
+vector-invariant momentum transport is unstable. A DG transport of momentum and density with the
+pointwise velocity and upwind traces removes this instability on all meshes. With it the model is quiet
+on the thermal wind, reproduces the linear baroclinic growth rate in a channel and gives the same
+baroclinic wave on three different meshes.
+
+Open points: the DG momentum form is not energy conserving, because the kinetic energy of the
+advective form differs from the projected $K$ of the pressure term; whether an energy-conserving
+skew-symmetric form with the same stability exists is open. The DG terms are serial CPU loops so far,
+so the 3D model has not been run at high resolution or on GPUs. Higher vertical order and the
+reconstruction of $\theta$ inside the layers are still to do.
+
+{\sloppy
+\paragraph{Code.} \code{dmplex.jl} (\url{https://github.com/OsKnoth/dmplex}), the models
+\code{NonlinearKiteShallowWater} and \code{KiteNonhydrostatic}. The examples \code{galewsky.jl},
+\code{bickley.jl}, \code{thermal\_wind.jl} and \code{baroclinic\_channel.jl} run the test cases; the
+figure scripts are in \code{docs/paper/scripts}.\par}
+
+%==============================================================================
+\begin{thebibliography}{99}
+\bibitem{CotterShipton2012} C.~J. Cotter and J.~Shipton, Mixed finite elements for numerical weather
+  prediction, \emph{J. Comput. Phys.} 231 (2012) 7076--7091.
+\bibitem{Galewsky2004} J.~Galewsky, R.~K. Scott and L.~M. Polvani, An initial-value problem for testing
+  numerical models of the global shallow-water equations, \emph{Tellus A} 56 (2004) 429--440.
+\bibitem{McRaeCotter2014} A.~T.~T. McRae and C.~J. Cotter, Energy- and enstrophy-conserving schemes for
+  the shallow-water equations, based on mimetic finite elements, \emph{Q. J. R. Meteorol. Soc.} 140 (2014)
+  2223--2234.
+\bibitem{NataleShiptonCotter2016} A.~Natale, J.~Shipton and C.~J. Cotter, Compatible finite element spaces
+  for geophysical fluid dynamics, \emph{Dyn. Stat. Clim. Syst.} 1 (2016) dzw005.
+\bibitem{Ringler2010} T.~D. Ringler, J.~Thuburn, J.~B. Klemp and W.~C. Skamarock, A unified approach to
+  energy conservation and potential vorticity dynamics for arbitrarily-structured C-grids,
+  \emph{J. Comput. Phys.} 229 (2010) 3065--3090.
+\bibitem{Thuburn2009} J.~Thuburn, T.~D. Ringler, W.~C. Skamarock and J.~B. Klemp, Numerical representation
+  of geostrophic modes on arbitrarily structured C-grids, \emph{J. Comput. Phys.} 228 (2009) 8321--8335.
+\bibitem{Ullrich2014} P.~A. Ullrich, T.~Melvin, C.~Jablonowski and A.~Staniforth, A proposed baroclinic wave
+  test case for deep- and shallow-atmosphere dynamical cores, \emph{Q. J. R. Meteorol. Soc.} 140 (2014)
+  1590--1602.
+\bibitem{Ullrich2015} P.~A. Ullrich, K.~A. Reed and C.~Jablonowski, Analytical initial conditions and an
+  analysis of baroclinic instability waves in $f$- and $\beta$-plane 3D channel models,
+  \emph{Q. J. R. Meteorol. Soc.} 141 (2015) 2972--2988.
+\bibitem{Wess2024} M.~Wess, B.~Kapidani, L.~Codecasa and J.~Sch\"oberl, The dual cell method with mass
+  lumping to arbitrary polynomial degree (2024). % TODO: journal / arXiv number
+\bibitem{WickerSkamarock2002} L.~J. Wicker and W.~C. Skamarock, Time-splitting methods for elastic models
+  using forward time schemes, \emph{Mon. Wea. Rev.} 130 (2002) 2088--2097.
+\bibitem{Williamson1992} D.~L. Williamson, J.~B. Drake, J.~J. Hack, R.~Jakob and P.~N. Swarztrauber, A standard
+  test set for numerical approximations to the shallow water equations in spherical geometry,
+  \emph{J. Comput. Phys.} 102 (1992) 211--224.
+\bibitem{Zaengl2015} G.~Z\"angl, D.~Reinert, P.~R\'ipodas and M.~Baldauf, The ICON (ICOsahedral
+  Non-hydrostatic) modelling framework of DWD and MPI-M: description of the non-hydrostatic dynamical core,
+  \emph{Q. J. R. Meteorol. Soc.} 141 (2015) 563--579.
+\end{thebibliography}
+
+\end{document}

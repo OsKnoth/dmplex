@@ -109,7 +109,7 @@ the local cell area. It writes the relative vorticity.
 ```sh
 mpiexec -n 6 julia --project examples/galewsky.jl hexagon 5 6
 mpiexec -n 4 julia --project=examples/gpu examples/galewsky.jl hexagon 6 6 --gpu --adios
-julia --project docs/galewsky_figure.jl hexagon 4 6      # draws docs/images/galewsky.svg
+julia --project docs/galewsky_figure.jl hexagon 4 6      # draws docs/images/galewsky.svg (globe view)
 ```
 
 The staggered kite discretization: every primal cell is split into kites, one per corner. The
@@ -127,6 +127,7 @@ conserved exactly, and the example prints both. The figure in the README is hexa
 ```sh
 julia --project examples/bickley.jl quadrilateral 32 40
 julia --project docs/bickley_figure.jl quadrilateral 32 40   # draws docs/images/bickley.svg
+# the high-resolution PNGs (hexagon 5, 64 × 64) of the README: docs/paper/scripts
 ```
 
 A Bickley jet u = sech²(y − 2π) on the doubly periodic plane [0, 4π)² at Froude number 0.2, without

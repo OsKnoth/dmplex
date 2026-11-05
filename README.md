@@ -130,11 +130,15 @@ conserves mass and energy exactly; the poster form is available with
 `flux=:pointwise, vorticity=:absolute`. Metric terms are precomputed at one
 3 × 3 quadrature rule per kite and a time step does not allocate.
 
-![Galewsky jet after 6 days on the kite grid of a hexagonal mesh](docs/images/galewsky.svg)
+![Galewsky jet after 6 days on the kite grid of 10 242 hexagons](docs/images/kite_galewsky.png)
 
 The same model runs on doubly periodic planes (`create_periodic_plane`):
 
-![Bickley jet vortex street on a periodic plane](docs/images/bickley.svg)
+![Bickley jet vortex street on a periodic plane of 64 × 64 quadrilaterals](docs/images/kite_bickley.png)
+
+The 3D compressible extension (`KiteNonhydrostatic`) and the whole method are written up in the
+paper draft [docs/paper/kite.pdf](docs/paper/kite.pdf); the dycore page is
+[docs/dycores/Kite.md](docs/dycores/Kite.md).
 
 ## Direction
 

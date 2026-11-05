@@ -28,9 +28,22 @@ solver of the TRiSK dycore, one column per Radau node. Wicker–Skamarock RK3, H
 | baroclinic channel, 40 × 12 triangles, `:dg` | as the quadrilaterals to 1 hPa (980.7 hPa at day 12); the vector-invariant form had a grid-scale mode from day 1 |
 | baroclinic wave on the sphere, RT1 × Q2, `:dg` | min p_s 925.4–926.3 hPa at day 10 on hexagon 3, cubed sphere 12, triangles 3 (TRiSK hexagon 6: 925.1) |
 
+![Spectra of the one-layer tendency in supercritical flow, vector-invariant and DG forms](../images/kite_spectra.png)
+
+![max |w| on the thermal wind: TRiSK and the kite variants on three meshes](../images/kite3d_thermal_wind.png)
+
+![Growth of wavenumber 10 in the baroclinic channel against linear QG theory](../images/kite3d_channel_growth.png)
+
+![Baroclinic wave, surface pressure at days 8 and 10 on hexagons, cubed sphere and triangles](../images/kite3d_baroclinic_wave_ps.png)
+
+![Baroclinic wave, temperature at 500 m at days 8 and 10](../images/kite3d_baroclinic_wave_T.png)
+
+Earlier stage, the upwind θ trace on the steady jet:
+
 ![max |w| on the steady jet](../images/kite3d_jet_growth.png)
 
-![max |w| and θ′ on the thermal wind](../images/kite3d_thermal_wind.png)
+The whole method, from shallow water to the compressible model, is written up in the paper draft
+[docs/paper/kite.pdf](../paper/kite.pdf).
 
 **Supercritical flow:** with the vector-invariant momentum and the projected continuity, the
 horizontal transport is unstable once the wind is faster than the gravity waves. The eigenvalues of
