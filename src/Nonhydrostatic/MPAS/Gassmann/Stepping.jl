@@ -41,7 +41,7 @@ function stage!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
             τ, nlev, m.vertical_theta > 0)
     launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
             ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, τ, m.beta, nlev,
-            m.vertical_theta == 2)
+            m.vertical_theta == 2, false)
     return y
 end
 

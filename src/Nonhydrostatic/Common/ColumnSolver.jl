@@ -126,7 +126,8 @@ end
 Vertically implicit step of one column: `w`, `ρ`, `ρθ` at `t + τ` from the
 explicit parts, with `θ` at the interfaces from `theta_interface_kernel!` in
 the `ρθ` flux (and with `iap_theta` in the pressure gradient, else `θ` of the
-stage state linearly interpolated), `ρ` there from the stage state and the
+stage state linearly interpolated), `ρ` there from the stage state (or, with
+`rho_interface`, `ρs` already at the interfaces, `nc × (nlev + 1)`) and the
 linearization of `π` around the base state (`π0`, `γ0` of
 `base_exner_kernel!`). `wmass[:, j]` is row `j` of the vertical mass matrix of
 `w` divided by `dzh[j]` (lower, diagonal, upper): `(0, 1, 0)` lumped, pointwise
@@ -137,11 +138,11 @@ the cells and interfaces next to interface `j` are carried along the sweep.
 @kernel function vertical_solve_kernel!(w, ρ, ρθ, cp_, dp_, @Const(w0), @Const(ρθ0), @Const(π0), @Const(γ0),
                                         @Const(θs), @Const(θi), @Const(ρs), @Const(tw), @Const(ρexpl),
                                         @Const(ρθexpl), @Const(dz), @Const(dzh), @Const(wlow), @Const(rayleigh),
-                                        @Const(wmass), τ, β, nlev, iap_theta)
+                                        @Const(wmass), τ, β, nlev, iap_theta, rho_interface)
     i = @index(Global)
     @inbounds begin
         θh(j) = iap_theta ? θi[i, j] : wlow[j] * θs[i, j - 1] + (1 - wlow[j]) * θs[i, j]
-        ρh(j) = wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]
+        ρh(j) = rho_interface ? ρs[i, j] : wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]
         # interface j couples to j - 1 and j + 1 through M = b w + c (zero at the boundaries), in the ρθ flux
         # with θ_j: B = θ_j b, C = θ_j c
         B(j) = 2 <= j <= nlev ? θi[i, j] * ρh(j) * β : 0.0

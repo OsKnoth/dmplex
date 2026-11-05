@@ -26,6 +26,5 @@ src/Nonhydrostatic/
 Test cases: `baroclinic_wave`, `thermal_wind`, `baroclinic_channel` (`Common/TestCases.jl`).
 
 Planned: ICON closer to the standard code (prognostic Exner pressure and `θ_v` with ICON's own
-vertical solve, reference state, substeps, `divdamp_order = 24`, `mo_nh_diffusion`, with the
-predictor–corrector as default and the RK3 as an option), the ICON-IAP time stepper for
-MPAS-Gassmann, and MPAS-Orig.
+vertical solve and reference state, checked against one step of the Fortran ICON), the ICON-IAP
+time stepper for MPAS-Gassmann, and MPAS-Orig.

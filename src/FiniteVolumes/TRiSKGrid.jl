@@ -282,6 +282,40 @@ function rbf_coefficients(g::TRiSKGrid; scale::Real=0.5)
 end
 
 """
+    rbf_vertex_coefficients(g::TRiSKGrid; scale=0.5) -> (edges, cx, cy, cz)
+
+Coefficients of the velocity vector at the vertices by vector radial basis
+functions, as in ICON (`rbf_vec_compute_coeff_vertex`, `rbf_vec_kern_v = 1`):
+the stencil of vertex `v` are its edges (six on a triangle mesh, five at the
+pentagon points), the kernel is the Gaussian `exp(-(r/scale)²)` of the
+great-circle distance times the dot product of the normals, solved for the
+eastward and northward components at the vertex, each normalized to
+reproduce a constant vector in its direction. The Cartesian velocity is
+
+    u_v ≈ Σ_k (cx, cy, cz)[k, v] u_{edges[k, v]}.
+
+`scale` is in units of the sphere radius (ICON: 0.5 down to 2 km).
+"""
+function rbf_vertex_coefficients(g::TRiSKGrid; scale::Real=0.5)
+    n, x = g.edge_normals, g.edge_points
+    kernel(a, b) = exp(-(arc_length(a, b) / scale)^2)
+    columns = map(1:num_vertices(g)) do v
+        stencil = Int[g.vertex_edges[k, v] for k in axes(g.vertex_edges, 1) if g.vertex_signs[k, v] != 0]
+        A = cholesky(Symmetric([dot(n[i], n[j]) * kernel(x[i], x[j]) for i in stencil, j in stencil]))
+        p = g.vertices[v]
+        east = abs(p[3]) < 1 - 1e-12 ? normalize(cross(SVector(0.0, 0.0, 1.0), p)) : SVector(0.0, 1.0, 0.0)
+        north = cross(p, east)
+        c = map((east, north)) do b
+            c = A \ [dot(b, n[j]) * kernel(p, x[j]) for j in stencil]
+            return c ./ sum(c[k] * dot(b, n[stencil[k]]) for k in eachindex(stencil))
+        end
+        return stencil, [c[1][k] * east + c[2][k] * north for k in eachindex(stencil)]
+    end
+    vectors = last.(columns)
+    return (padded(first.(columns), 1), ntuple(i -> padded([getindex.(c, i) for c in vectors], 0.0), 3)...)
+end
+
+"""
     trisk_pv_edges(g::TRiSKGrid) -> pv_edges
 
 PV usage of ICON-IAP `i_cori_method = 4` (the default of ICON-IAP, "TRSK but

@@ -330,6 +330,57 @@ end
     @test abs(NH.total_mass(m, y) / m0 - 1) < 1e-14
     @test maximum(abs, y.w) < 0.05
     @test maximum(abs, y.ρθ ./ y.ρ .- θ0) < 1.0
+    # ICON's profile of the fourth-order divergence damping: fac below z, fac2 at z2, fac3 at z3, fac4 above z4
+    # (layer centres 50 m from z2 and z3)
+    vt = VerticalGrid(1000, 100000.0)
+    k4 = NH.height_profile(vt, 0.0025, 0.004, 0.005, 0.006, 32500.0, 40000.0, 60000.0, 80000.0)
+    zf = (vt.z_half[1:(end - 1)] .+ vt.z_half[2:end]) ./ 2
+    at(z) = k4[argmin(abs.(zf .- z))]
+    @test at(10000.0) == 0.0025 && at(95000.0) ≈ 0.006
+    @test at(40000.0) ≈ 0.004 rtol = 1e-2
+    @test at(60000.0) ≈ 0.005 rtol = 1e-2
+    @test_throws ArgumentError ICONNonhydrostatic(create_spherical_mesh(1), v; itime_scheme=5)
+    @test_throws ArgumentError ICONNonhydrostatic(create_spherical_mesh(1), v; divdamp_order=3)
+    # the recomputed predictor tendencies and second-order 2D damping keep the column at rest as well
+    m6 = ICONNonhydrostatic(create_spherical_mesh(2), v; itime_scheme=6, divdamp_order=2, divdamp_type=2,
+                            divdamp_fac_o2=0.01)
+    y = initial_state(m6, rest)
+    for _ in 1:5
+        step!(m6, y, 300.0, ys)
+    end
+    @test maximum(abs, y.vn) < 1e-10 && maximum(abs, y.w) < 1e-10
+    # mo_nh_diffusion: the vertex RBF reproduces a solid-body rotation, which has no deformation where the
+    # quadrilateral of the edge is nearly a rhombus, and ∇²u = -2u/a² for it
+    g = TRiSKGrid(create_spherical_mesh(4))
+    md = ICONNonhydrostatic(g, VerticalGrid(1, 1000.0))
+    edges, cx, cy, cz = rbf_vertex_coefficients(g)
+    U(x) = cross(SVector(0.0, 0.0, 1.0), x)
+    vn = reshape([dot(U(g.edge_points[e]), g.edge_normals[e]) for e in 1:num_edges(g)], :, 1)
+    @test maximum(1:num_vertices(g)) do v
+        norm(sum(SVector(cx[k, v], cy[k, v], cz[k, v]) * vn[edges[k, v]] for k in axes(edges, 1)) - U(g.vertices[v]))
+    end < 2e-3
+    d, wk, a = md.diffusion, md.work, md.radius
+    NH.launch!(md, NH.icon_vertex_velocity_kernel!, (num_vertices(g), 1), wk.uvert..., vn, d.rbf_edges, d.rbf...)
+    NH.launch!(md, NH.icon_smagorinsky_kernel!, (num_edges(g), 1), wk.kh, wk.n2e, vn, wk.uvert..., d.quad,
+               d.quad_vectors, d.inverse_vv, md.inverse_primal, [1.0], 1.0, 0.0, [Inf])
+    q = d.quad
+    rhombus = [abs(dot(normalize(g.vertices[q[4, e]] - g.vertices[q[3, e]]), g.edge_normals[e])) > 1 - 1e-4
+               for e in 1:num_edges(g)]
+    @test count(rhombus) > 1000 && maximum(wk.kh[rhombus, 1]) * a < 0.02
+    @test sort(abs.(wk.n2e[:, 1] .* a^2 .+ 2 .* vn[:, 1]))[end ÷ 2] < 0.3
+    # the diffusion of w (∇⁴ and the ∇² above damping_height) damps a random field at every interface
+    nl = 10
+    mw = ICONNonhydrostatic(g, VerticalGrid(nl, 30000.0); damping_height=20000.0)
+    nc = num_cells(g)
+    x = randn(MersenneTwister(1), nc, nl + 1); x[:, 1] .= 0; x[:, end] .= 0
+    x0, L = copy(x), similar(x)
+    for _ in 1:200
+        NH.launch!(mw, NH.icon_cell_laplacian_kernel!, (nc, nl + 1), L, x, mw.cell_edges, mw.edge_cells,
+                   mw.divergence, mw.inverse_dual, 2, nl)
+        NH.launch!(mw, NH.icon_w_diffusion_kernel!, (nc, nl + 1), x, L, mw.cell_edges, mw.edge_cells,
+                   mw.divergence, mw.inverse_dual, mw.cell_areas, mw.diffusion.k4w, mw.diffusion.n2w, nl)
+    end
+    @test all(j -> maximum(abs, x[:, j]) < maximum(abs, x0[:, j]), 2:nl)
 end
 
 @testset "kite nonhydrostatic: one layer is kite shallow water" begin

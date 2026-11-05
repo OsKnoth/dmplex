@@ -23,7 +23,7 @@ import ..ShallowWater: velocity_dofs, height_dofs, global_velocity_dofs, global_
 export init_edge_velocity, init_tracer, compute_advection_rhs!
 export TRiSKGrid, TRiSKDistribution, TRiSKShallowWater, ICONShallowWater, gassmann_coefficients, trisk_pv_edges,
        iap_trisk_weights,
-       rbf_coefficients,
+       rbf_coefficients, rbf_vertex_coefficients,
        vertex_edge_areas,
        relative_vorticity, tangential_velocity
 

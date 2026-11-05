@@ -47,7 +47,8 @@ function main(args)
     dm = hilbert_order(USE_ICON ? create_spherical_mesh(resolution) : create_hexagon_mesh(resolution))
     v = VerticalGrid(levels, 30000.0)
     m = if USE_ICON
-        # fourth-order diffusion of vn scaled as ICON's (∝ A²/Δt ∝ Δx³), 5e14 m⁴/s at 79 km (R2B5)
+        # fourth-order diffusion of vn scaled as ICON's (∝ A²/Δt ∝ Δx³), 5e14 m⁴/s at 79 km (R2B5);
+        # ICON's own diffusion (hdiff_order=5) is not yet stable on this mesh
         Δx = sqrt(4π / num_cells(dm)) * 6.37122e6
         ICONNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05,
                            hyperdiffusion=5e14 * (Δx / 79e3)^3, backend)
