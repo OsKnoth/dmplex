@@ -23,5 +23,6 @@ values.
 | `kite_spectra` | `eig_spectra.jl` | `plot_series.jl` |
 | `kite3d_thermal_wind` | `examples/thermal_wind.jl kite 3 3 150 rt dg_upwind <mesh> dg` and `... vector_invariant` | `plot_series.jl` |
 | `kite3d_channel_growth` | `examples/baroclinic_channel.jl 60 14 200 <cells> dg_upwind true dg` | `plot_series.jl` |
+| `kite3d_channel_quadrilateral`, `_triangle` | `channel_run.jl 60 14 200 <cells>` (snapshots at days 8–14) | `fig_channel.jl` |
 | `kite3d_baroclinic_wave_ps`, `_T` | `baroclinic_wave_run.jl <mesh> <res> 10 150` on hexagon 3, cubed 12, triangles 3 (7 h each) | `fig_bw.jl`, `plot_bw.jl` |
 | `kite3d_jet_growth`, `kite3d_jet_w` | steady-jet runs of KITE3D_PLAN.md | `fig_jet.jl` |

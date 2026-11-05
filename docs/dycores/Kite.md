@@ -34,6 +34,10 @@ solver of the TRiSK dycore, one column per Radau node. Wicker–Skamarock RK3, H
 
 ![Growth of wavenumber 10 in the baroclinic channel against linear QG theory](../images/kite3d_channel_growth.png)
 
+![Baroclinic channel, surface pressure and temperature at 500 m at days 8–14 on 60 × 18 quadrilaterals](../images/kite3d_channel_quadrilateral.png)
+
+![The same on 60 × 18 triangles](../images/kite3d_channel_triangle.png)
+
 ![Baroclinic wave, surface pressure at days 8 and 10 on hexagons, cubed sphere and triangles](../images/kite3d_baroclinic_wave_ps.png)
 
 ![Baroclinic wave, temperature at 500 m at days 8 and 10](../images/kite3d_baroclinic_wave_T.png)
