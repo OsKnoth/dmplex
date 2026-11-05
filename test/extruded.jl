@@ -21,10 +21,11 @@
     end
 end
 
-@testset "nonhydrostatic TRiSK" begin
+@testset "nonhydrostatic MPAS-Gassmann" begin
     g = TRiSKGrid(create_hexagon_mesh(3))
     v = VerticalGrid(10, 30000.0; stretch=3)
-    m = TRiSKNonhydrostatic(g, v; damping_height=22000.0, damping_rate=0.05)
+    m = MPASGassmannNonhydrostatic(g, v; damping_height=22000.0, damping_rate=0.05)
+    @test TRiSKNonhydrostatic === MPASGassmannNonhydrostatic   # former name
     mass(y) = dmplex.Nonhydrostatic.total_mass(m, y)
     # a horizontally homogeneous column in discrete hydrostatic balance stays at rest
     rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
@@ -73,7 +74,7 @@ end
         ρh[:, j] .= v.wlow[j] .* ρ[:, j - 1] .+ (1 - v.wlow[j]) .* ρ[:, j]
     end
     for (pv_flux, vertical_advection) in ((:iap, :iap), (:trisk, :vector_invariant))
-        m = TRiSKNonhydrostatic(g, v; radius=1.0, pv_flux, vertical_advection, trisk_weights=:exact)
+        m = MPASGassmannNonhydrostatic(g, v; radius=1.0, pv_flux, vertical_advection, trisk_weights=:exact)
         W, mw = m.work, vertical_advection == :iap
         fill!(W.K, 0)
         fill!(W.π, 0)
@@ -107,7 +108,7 @@ end
     g = TRiSKGrid(create_hexagon_mesh(3))
     v = VerticalGrid(4, 10000.0)
     a = 6.37122e6
-    m = TRiSKNonhydrostatic(g, v)
+    m = MPASGassmannNonhydrostatic(g, v)
     ne, nc, nl = num_edges(g), num_cells(g), 4
     y = zero_state(m)
     y.vn .= randn(rng, ne, nl)
@@ -133,7 +134,7 @@ end
     Random.seed!(3)
     g = TRiSKGrid(create_hexagon_mesh(1))
     v = VerticalGrid(12, 30000.0; stretch=3)
-    m = TRiSKNonhydrostatic(g, v)
+    m = MPASGassmannNonhydrostatic(g, v)
     nc, nl = length(g.centers), 12
     ρ = 1 .+ rand(nc, nl)
     w = randn(nc, nl + 1)

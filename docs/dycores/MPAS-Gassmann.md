@@ -1,7 +1,15 @@
-# TRiSK dycore: hexagonal C grid, ICON-IAP and MPAS forms (`TRiSKNonhydrostatic`)
+# MPAS-Gassmann dycore: hexagonal C grid, ICON-IAP form (`MPASGassmannNonhydrostatic`)
 
-Source: [src/Nonhydrostatic/TRiSK/](../../src/Nonhydrostatic/TRiSK/). Shared with the other
-dycores: the vertical grid, the column solver and the test cases (`src/Nonhydrostatic/`).
+Source: [src/Nonhydrostatic/MPAS/Gassmann/](../../src/Nonhydrostatic/MPAS/Gassmann/), with the TRiSK
+operators of [src/Nonhydrostatic/MPAS/Operators.jl](../../src/Nonhydrostatic/MPAS/Operators.jl).
+Shared with the other dycores: the vertical grid, the column solver, the C-grid operators, the RK3
+driver and the test cases ([src/Nonhydrostatic/Common/](../../src/Nonhydrostatic/Common/)). Formerly
+`TRiSKNonhydrostatic` (still an alias).
+
+The ICON-IAP model of Gassmann (2013) on the Voronoi meshes of MPAS. The time stepping is still
+the Wicker–Skamarock RK3 of the other dycores; ICON-IAP's own predictor–corrector with its
+vertical solve (Gassmann and Herzog 2008) is planned as an option, as is the standard MPAS-A dycore
+(MPAS-Orig, split-explicit) as a separate model.
 
 ## Discretization
 
@@ -21,9 +29,9 @@ interfaces, `ρ`, `ρθ` at the cells × layers (Gassmann 2013).
 - **Time stepping:** Wicker–Skamarock RK3 with a HEVI split, horizontal mass fluxes forward–backward.
 - **Diffusion:** Smagorinsky (ICON-IAP `diff_diss_hori`, with heating), optional hyperdiffusion.
 
-### ICON-IAP and MPAS forms
+### ICON-IAP and MPAS horizontal operators
 
-The two forms are options of the same model, not separate dycores:
+The horizontal operators of MPAS are options of the same model:
 
 | option | ICON-IAP (default) | MPAS-like |
 |---|---|---|
@@ -32,7 +40,7 @@ The two forms are options of the same model, not separate dycores:
 | `kinetic_energy` | `:cell` | `:mixed` (3/8 cell + 5/8 vertex, Skamarock et al. 2012) |
 
 Only the horizontal operators correspond to MPAS. MPAS-A itself uses a split-explicit acoustic
-step, APVM and terrain-following coordinates; here all forms use the same HEVI RK3 step.
+step, flux-form transport, APVM and terrain-following coordinates; that is the planned MPAS-Orig.
 
 ## Results
 

@@ -22,11 +22,11 @@ Lorenz staggering:
 The Radau nodes of the height space are its dofs and quadrature points, so its
 mass matrix is diagonal and every height dof carries an independent column for
 the vertically implicit terms (`num_columns`) at `column_points`. They are
-solved by the kernels of `TRiSKNonhydrostatic` (`theta_interface_kernel!`,
+solved by the kernels of `MPASGassmannNonhydrostatic` (`theta_interface_kernel!`,
 `vertical_solve_kernel!`, off-centring `beta`, Rayleigh damping of `w` above
 `damping_height`, `vertical_theta` as there) with the consistent CG1 mass of `w`
 in the vertical (`vertical_mass=:consistent`, tridiagonal) or the lumped one
-(`:lumped`, pointwise at the interfaces as in `TRiSKNonhydrostatic`).
+(`:lumped`, pointwise at the interfaces as in `MPASGassmannNonhydrostatic`).
 `velocity` is the velocity space as in `NonlinearKiteShallowWater`: `:rt`
 (`KiteBrokenRT(k)`, default) or `:dual_radau` (`KiteDualRadau(k)`, the equal
 order pair of Wess et al. with `height_order = k`), always with the exact mass in
@@ -214,7 +214,7 @@ end
 """
     initial_state(m::KiteNonhydrostatic, profile; tracer=(λ, φ, z) -> 1.0)
 
-State from `profile(λ, φ, z) = (T, p, u, v)` as for `TRiSKNonhydrostatic`
+State from `profile(λ, φ, z) = (T, p, u, v)` as for `MPASGassmannNonhydrostatic`
 (on a plane `profile(x, y, z)` and `tracer(x, y, z)` with `u`, `v` along x and y):
 every column in the discrete hydrostatic balance of the column solver at its
 Radau node (`balanced_column`), the velocity `u east + v north` projected
@@ -851,9 +851,5 @@ function step!(m::KiteNonhydrostatic, y, dt, ys=zero_state(m))
     y0 = m.work.y0
     foreach(copyto!, y0, y)
     base_exner!(m, y0)
-    stage!(m, ys, y0, y0, dt / 3)
-    stage!(m, y, y0, ys, dt / 2)
-    foreach(copyto!, ys, y)
-    stage!(m, y, y0, ys, dt)
-    return y
+    return wicker_skamarock!(m, y, y0, ys, dt)
 end

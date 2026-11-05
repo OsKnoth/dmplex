@@ -1,7 +1,8 @@
 # ICON dycore: triangular C grid, predictor–corrector (`ICONNonhydrostatic`)
 
 Source: [src/Nonhydrostatic/ICON/](../../src/Nonhydrostatic/ICON/). Shared with the other
-dycores: the vertical grid, the column solver and the test cases (`src/Nonhydrostatic/`).
+dycores: the vertical grid, the column solver, the C-grid operators and the test cases
+([src/Nonhydrostatic/Common/](../../src/Nonhydrostatic/Common/)).
 
 ## Discretization
 

@@ -14,8 +14,8 @@ top of each script.
 | `trisk_galewsky.jl` | `TRiSKShallowWater`, `ICONShallowWater` | Galewsky jet | C-grid finite volumes | CPU, MPI, GPU |
 | `galewsky.jl` | `NonlinearKiteShallowWater` | Galewsky jet | kite elements RT1 × Q2 × CG2 | CPU, MPI, GPU |
 | `bickley.jl` | `NonlinearKiteShallowWater` | Bickley jet on a periodic plane | kite elements | CPU |
-| `baroclinic_wave.jl` | `TRiSKNonhydrostatic`, `ICONNonhydrostatic` (`--icon`) | baroclinic wave (Ullrich et al. 2014) | 3D TRiSK, HEVI; ICON triangles, predictor–corrector | CPU, GPU |
-| `thermal_wind.jl` | `TRiSKNonhydrostatic`, `ICONNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D TRiSK, 3D kite elements, HEVI | CPU |
+| `baroclinic_wave.jl` | `MPASGassmannNonhydrostatic`, `ICONNonhydrostatic` (`--icon`) | baroclinic wave (Ullrich et al. 2014) | 3D MPAS-Gassmann (TRiSK), HEVI; ICON triangles, predictor–corrector | CPU, GPU |
+| `thermal_wind.jl` | `MPASGassmannNonhydrostatic`, `ICONNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D MPAS-Gassmann, 3D kite elements, HEVI | CPU |
 | `baroclinic_channel.jl` | `KiteNonhydrostatic` | baroclinic wave in an f-plane channel (Ullrich, Reed and Jablonowski 2015) | 3D kite elements on a periodic plane, HEVI | CPU |
 | `gpu/cudss_mass.jl` | mass matrices | solves against a known solution | RT_k, DG_k, CG_{k+1} | GPU, multi-GPU |
 
@@ -142,7 +142,7 @@ sbatch --account=bb1143 examples/gpu/baroclinic_wave.sbatch     # hexagon 6 and 
 ```
 
 The baroclinic wave of Ullrich et al. (2014), shallow atmosphere over flat ground in height
-coordinates, with `TRiSKNonhydrostatic` on the extruded hexagon mesh (Lorenz staggering: θ with ρ
+coordinates, with `MPASGassmannNonhydrostatic` on the extruded hexagon mesh (Lorenz staggering: θ with ρ
 at the layer centres, w at the interfaces). The vertical grid has 30 equidistant layers up
 to 30 km, with Rayleigh damping of w above 22 km. The model follows the ICON-IAP standard:
 - PV usage as in ICON-IAP;

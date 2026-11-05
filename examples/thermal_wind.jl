@@ -34,7 +34,7 @@ function main(args)
     dt = length(args) >= 4 ? parse(Float64, args[4]) : (model == "kite" ? 150.0 : 300.0)
     v = VerticalGrid(30, 30000.0)
     if model == "trisk"
-        m = TRiSKNonhydrostatic(TRiSKGrid(hilbert_order(create_hexagon_mesh(resolution))), v;
+        m = MPASGassmannNonhydrostatic(TRiSKGrid(hilbert_order(create_hexagon_mesh(resolution))), v;
                                 damping_height=22000.0, damping_rate=0.05)
     elseif model == "icon"
         m = ICONNonhydrostatic(TRiSKGrid(hilbert_order(create_spherical_mesh(resolution))), v;

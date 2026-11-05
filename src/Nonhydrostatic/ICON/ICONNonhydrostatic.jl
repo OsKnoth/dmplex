@@ -9,7 +9,7 @@ Dry compressible Euler equations on the extruded triangular C grid of ICON
 atmosphere, flat ground. `grid` is the `TRiSKGrid` of a triangle mesh with
 circumcentres. Lorenz staggering: `vn` at the edges × layers, `w` at the cells
 × interfaces, `ρ`, `ρθ` at the cells × layers (state `(vn, w, ρ, ρθ)` as for
-`TRiSKNonhydrostatic`).
+`MPASGassmannNonhydrostatic`).
 
 **Velocity tendencies** (`mo_velocity_advection`), horizontal operators of
 `ICONShallowWater` per layer:
@@ -33,7 +33,7 @@ the backtrajectory point `x_e - (Δt/2)(vn n_e + vt t_e)` (ICON
 `upwind_hflux_miura` with `iadv_rhotheta = 2`). The vertical terms are
 implicit per column with the off-centring `beta` (`0.5 + vwind_offctr`),
 centred θ and ρ at the interfaces, linearized around the Exner pressure of
-the old state: the column solver of `TRiSKNonhydrostatic` with
+the old state: the column solver of `MPASGassmannNonhydrostatic` with
 `vertical_theta = :centred` and the lumped vertical mass.
 
 **Time stepping** (`step!`): the two-time-level predictor–corrector of ICON.
@@ -54,7 +54,7 @@ the linearized equation); no reference state (with flat ground its horizontal
 gradient vanishes); no dynamics substeps, tracer or physics coupling; the
 horizontal diffusion is an optional `hyperdiffusion` `-ν₄ L(L(vn))` in place of
 ICON's `mo_nh_diffusion`; the Rayleigh damping of `w` as in
-`TRiSKNonhydrostatic`. Serial.
+`MPASGassmannNonhydrostatic`. Serial.
 """
 struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
     grid::TRiSKGrid
@@ -157,240 +157,3 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
 end
 
 ICONNonhydrostatic(dm::Plex, vgrid::VerticalGrid; kwargs...) = ICONNonhydrostatic(TRiSKGrid(dm), vgrid; kwargs...)
-
-# --- kernels -------------------------------------------------------------------
-
-"θ and the Exner pressure at the cells."
-@kernel function icon_thermo_kernel!(θ, πe, @Const(ρ), @Const(ρθ))
-    i, k = @index(Global, NTuple)
-    @inbounds θ[i, k] = ρθ[i, k] / ρ[i, k]
-    @inbounds πe[i, k] = (Rd * ρθ[i, k] / P0)^(Rd / Cvd)
-end
-
-"Tangential velocity (RBF) and kinetic energy at the edges."
-@kernel function icon_edge_kinetic_kernel!(vt, Ke, @Const(vn), @Const(rbf_edges), @Const(rbf))
-    e, k = @index(Global, NTuple)
-    s = 0.0
-    @inbounds for j in axes(rbf_edges, 1)
-        s += rbf[j, e] * vn[rbf_edges[j, e], k]
-    end
-    @inbounds vt[e, k] = s
-    @inbounds Ke[e, k] = (vn[e, k]^2 + s^2) / 2
-end
-
-"Cell sum `Σ_j c_{j,i} x_{e_j}` of an edge field (bilinear cell average, divergence)."
-@kernel function icon_cell_sum_kernel!(y, @Const(x), @Const(cell_edges), @Const(c))
-    i, k = @index(Global, NTuple)
-    s = 0.0
-    @inbounds for j in axes(cell_edges, 1)
-        s += c[j, i] * x[cell_edges[j, i], k]
-    end
-    @inbounds y[i, k] = s
-end
-
-"Velocity tendency of `vn`: vorticity flux, kinetic-energy gradient (`coeff_gradekin`), vertical advection."
-@kernel function icon_vn_tendency_kernel!(tvn, @Const(vn), @Const(vt), @Const(Ke), @Const(K), @Const(ζv), @Const(w),
-                                          @Const(edge_cells), @Const(edge_vertices), @Const(edge_height),
-                                          @Const(gradient), @Const(edge_coriolis), @Const(dz), @Const(wlow), nlev)
-    e, k = @index(Global, NTuple)
-    @inbounds begin
-        l, r = edge_cells[1, e], edge_cells[2, e]
-        ζ = (ζv[edge_vertices[1, e], k] + ζv[edge_vertices[2, e], k]) / 2
-        g1, g2 = gradient[1, e], gradient[2, e]
-        grad_K = Ke[e, k] * (g1 - g2) + g2 * K[r, k] - g1 * K[l, k]
-        we = (edge_height[1, e] * (w[l, k] + w[l, k + 1]) + edge_height[2, e] * (w[r, k] + w[r, k + 1])) / 2
-        vlow = k > 1 ? wlow[k] * vn[e, k - 1] + (1 - wlow[k]) * vn[e, k] : vn[e, k]
-        vup = k < nlev ? wlow[k + 1] * vn[e, k] + (1 - wlow[k + 1]) * vn[e, k + 1] : vn[e, k]
-        tvn[e, k] = (edge_coriolis[e] + ζ) * vt[e, k] - grad_K - we * (vup - vlow) / dz[k]
-    end
-end
-
-"`w` at the vertices (area weights of the cells)."
-@kernel function icon_vertex_w_kernel!(wv, @Const(w), @Const(vertex_cells), @Const(weight))
-    v, j = @index(Global, NTuple)
-    s = 0.0
-    @inbounds for n in axes(vertex_cells, 1)
-        c = vertex_cells[n, v]
-        c > 0 && (s += weight[n, v] * w[c, j])
-    end
-    @inbounds wv[v, j] = s
-end
-
-"`vn_ie ∂w/∂n + vt_ie ∂w/∂t` at the edges of the interior interfaces."
-@kernel function icon_edge_w_gradient_kernel!(gw, @Const(vn), @Const(vt), @Const(w), @Const(wv), @Const(edge_cells),
-                                              @Const(edge_vertices), @Const(inverse_dual), @Const(inverse_primal),
-                                              @Const(tangent_sign), @Const(wlow), nlev)
-    e, j = @index(Global, NTuple)
-    @inbounds if 2 <= j <= nlev
-        vni = wlow[j] * vn[e, j - 1] + (1 - wlow[j]) * vn[e, j]
-        vti = wlow[j] * vt[e, j - 1] + (1 - wlow[j]) * vt[e, j]
-        dn = (w[edge_cells[2, e], j] - w[edge_cells[1, e], j]) * inverse_dual[e]
-        dt = tangent_sign[e] * (wv[edge_vertices[2, e], j] - wv[edge_vertices[1, e], j]) * inverse_primal[e]
-        gw[e, j] = vni * dn + vti * dt
-    else
-        gw[e, j] = 0.0
-    end
-end
-
-"Advection of `w` at the interior interfaces: `-Σ_e b_{i,e} gw_e - w ∂w/∂z`."
-@kernel function icon_w_tendency_kernel!(tw, @Const(gw), @Const(w), @Const(cell_edges), @Const(bilinear), @Const(dz),
-                                         nlev)
-    i, j = @index(Global, NTuple)
-    @inbounds if 2 <= j <= nlev
-        s = 0.0
-        for n in axes(cell_edges, 1)
-            s += bilinear[n, i] * gw[cell_edges[n, i], j]
-        end
-        tw[i, j] = -s - w[i, j] * (w[i, j + 1] - w[i, j - 1]) / (dz[j - 1] + dz[j])
-    else
-        tw[i, j] = 0.0
-    end
-end
-
-"Green–Gauss gradients of `ρ` and `θ` at the cells (edge values by `c_lin_e`), unit sphere."
-@kernel function icon_cell_gradient_kernel!(g1, g2, g3, h1, h2, h3, @Const(ρ), @Const(θ), @Const(cell_edges),
-                                            @Const(edge_cells), @Const(edge_height), @Const(gx), @Const(gy),
-                                            @Const(gz))
-    i, k = @index(Global, NTuple)
-    a1 = a2 = a3 = b1 = b2 = b3 = 0.0
-    @inbounds for n in axes(cell_edges, 1)
-        e = cell_edges[n, i]
-        l, r = edge_cells[1, e], edge_cells[2, e]
-        ρe = edge_height[1, e] * ρ[l, k] + edge_height[2, e] * ρ[r, k]
-        θe = edge_height[1, e] * θ[l, k] + edge_height[2, e] * θ[r, k]
-        a1 += gx[n, i] * ρe; a2 += gy[n, i] * ρe; a3 += gz[n, i] * ρe
-        b1 += gx[n, i] * θe; b2 += gy[n, i] * θe; b3 += gz[n, i] * θe
-    end
-    @inbounds g1[i, k], g2[i, k], g3[i, k] = a1, a2, a3
-    @inbounds h1[i, k], h2[i, k], h3[i, k] = b1, b2, b3
-end
-
-"""
-`ρ_e`, `θ_e` of Miura's second-order upwind reconstruction at the
-backtrajectory point of the edge over `Δt/2`, and the horizontal pressure
-gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure.
-"""
-@kernel function icon_miura_kernel!(ρe, θe, pg, @Const(vn), @Const(vt), @Const(ρ), @Const(θ), @Const(πex),
-                                    @Const(g1), @Const(g2), @Const(g3), @Const(h1), @Const(h2), @Const(h3),
-                                    @Const(edge_cells), @Const(edge_vectors), @Const(inverse_dual), half_dt_a)
-    e, k = @index(Global, NTuple)
-    @inbounds begin
-        l, r = edge_cells[1, e], edge_cells[2, e]
-        u, v = vn[e, k], vt[e, k]
-        up, o = u >= 0 ? (l, 0) : (r, 3)
-        d1 = edge_vectors[o + 1, e] - half_dt_a * (u * edge_vectors[7, e] + v * edge_vectors[10, e])
-        d2 = edge_vectors[o + 2, e] - half_dt_a * (u * edge_vectors[8, e] + v * edge_vectors[11, e])
-        d3 = edge_vectors[o + 3, e] - half_dt_a * (u * edge_vectors[9, e] + v * edge_vectors[12, e])
-        ρe[e, k] = ρ[up, k] + g1[up, k] * d1 + g2[up, k] * d2 + g3[up, k] * d3
-        t = θ[up, k] + h1[up, k] * d1 + h2[up, k] * d2 + h3[up, k] * d3
-        θe[e, k] = t
-        pg[e, k] = Cpd * t * (πex[r, k] - πex[l, k]) * inverse_dual[e]
-    end
-end
-
-"`vn = vn0 + Δt (a T_now + b T_new - pg + hd)`."
-@kernel function icon_vn_update_kernel!(vn, @Const(vn0), @Const(tnow), @Const(tnew), @Const(pg), @Const(hd), dt, a, b)
-    e, k = @index(Global, NTuple)
-    @inbounds vn[e, k] = vn0[e, k] + dt * (a * tnow[e, k] + b * tnew[e, k] - pg[e, k] + hd[e, k])
-end
-
-"Mass and `ρθ` fluxes `ρ_e vn`, `ρ_e θ_e vn`."
-@kernel function icon_flux_kernel!(F, Fθ, @Const(vn), @Const(ρe), @Const(θe))
-    e, k = @index(Global, NTuple)
-    @inbounds f = ρe[e, k] * vn[e, k]
-    @inbounds F[e, k] = f
-    @inbounds Fθ[e, k] = f * θe[e, k]
-end
-
-"`G = scale (δ_r - δ_l)/d_e`, the gradient of a cell field at the edges."
-@kernel function icon_edge_gradient_kernel!(G, @Const(δ), @Const(edge_cells), @Const(inverse_dual), scale)
-    e, k = @index(Global, NTuple)
-    @inbounds G[e, k] = scale * (δ[edge_cells[2, e], k] - δ[edge_cells[1, e], k]) * inverse_dual[e]
-end
-
-# --- time stepping ---------------------------------------------------------------
-
-"Velocity tendencies of the state `y` into `tvn`, `tw`; θ, π, `vt` of `y` stay in the work arrays."
-function velocity_tendencies!(tvn, tw, m::ICONNonhydrostatic, y)
-    w, nlev = m.work, num_layers(m.vgrid)
-    nc, ne, nv = num_cells(m.grid), num_edges(m.grid), num_vertices(m.grid)
-    launch!(m, icon_thermo_kernel!, (nc, nlev), w.θ, w.π, y.ρ, y.ρθ)
-    launch!(m, icon_edge_kinetic_kernel!, (ne, nlev), w.vt, w.Ke, y.vn, m.rbf_edges, m.rbf)
-    launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.K, w.Ke, m.cell_edges, m.bilinear)
-    launch!(m, vorticity_kernel!, (nv, nlev), w.ζv, y.vn, m.vertex_edges, m.curl)
-    launch!(m, icon_vn_tendency_kernel!, (ne, nlev), tvn, y.vn, w.vt, w.Ke, w.K, w.ζv, y.w, m.edge_cells,
-            m.edge_vertices, m.edge_height, m.gradient, m.edge_coriolis, m.dz, m.wlow, nlev)
-    launch!(m, icon_vertex_w_kernel!, (nv, nlev + 1), w.wv, y.w, m.vertex_cells, m.vertex_weight)
-    launch!(m, icon_edge_w_gradient_kernel!, (ne, nlev + 1), w.gw, y.vn, w.vt, y.w, w.wv, m.edge_cells,
-            m.edge_vertices, m.inverse_dual, m.inverse_primal, m.tangent_sign, m.wlow, nlev)
-    launch!(m, icon_w_tendency_kernel!, (nc, nlev + 1), tw, w.gw, y.w, m.cell_edges, m.bilinear, m.dz, nlev)
-    return nothing
-end
-
-"Horizontal flux divergence of `vn` with `ρ_e`, `θ_e`, then the column solve from the base state `y0` into `y`."
-function fast_waves!(m::ICONNonhydrostatic, y, y0, ys, tw, dt)
-    w, nlev = m.work, num_layers(m.vgrid)
-    nc, ne = num_cells(m.grid), num_edges(m.grid)
-    launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, w.ρe, w.θe)
-    launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
-            m.divergence, dt)
-    launch!(m, theta_interface_kernel!, nc, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ys.w, m.dz, m.dzh, m.wlow,
-            dt, nlev, false)
-    launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
-            ys.ρ, tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, dt, m.beta, nlev, false)
-    return y
-end
-
-"""
-    step!(m::ICONNonhydrostatic, y, dt, ys=zero_state(m))
-
-One predictor–corrector step of ICON (see `ICONNonhydrostatic`) in place;
-`ys` holds the predictor state.
-"""
-function step!(m::ICONNonhydrostatic, y, dt, ys=zero_state(m))
-    w, nlev = m.work, num_layers(m.vgrid)
-    nc, ne = num_cells(m.grid), num_edges(m.grid)
-    y0 = w.y0
-    foreach(copyto!, y0, y)
-    launch!(m, base_exner_kernel!, (nc, nlev), w.π0, w.γ0, y0.ρθ)
-    w.first[] && (copyto!(w.πprev, w.π0); w.first[] = false)
-    m.hyperdiffusion == 0 ? fill!(w.hd, 0.0) : icon_hyperdiffusion!(w.hd, m, y0.vn)
-    # predictor: velocity tendencies of n, ρ_e, θ_e and the pressure gradient of the extrapolated π
-    velocity_tendencies!(w.tvn_now, w.tw_now, m, y0)
-    @. w.π = (1 + m.exner_expol) * w.π0 - m.exner_expol * w.πprev
-    g = w.grad
-    launch!(m, icon_cell_gradient_kernel!, (nc, nlev), g..., y0.ρ, w.θ, m.cell_edges, m.edge_cells, m.edge_height,
-            m.green_gauss...)
-    launch!(m, icon_miura_kernel!, (ne, nlev), w.ρe, w.θe, w.pg, y0.vn, w.vt, y0.ρ, w.θ, w.π, g..., m.edge_cells,
-            m.edge_vectors, m.inverse_dual, dt / (2 * m.radius))
-    copyto!(w.πprev, w.π0)
-    launch!(m, icon_vn_update_kernel!, (ne, nlev), ys.vn, y0.vn, w.tvn_now, w.tvn_now, w.pg, w.hd, dt, 1.0, 0.0)
-    fast_waves!(m, ys, y0, y0, w.tw_now, dt)
-    # corrector: velocity tendencies of the predictor state, weighted, and the divergence damping of vn*
-    velocity_tendencies!(w.tvn_new, w.tw_new, m, ys)
-    a, b = m.weights
-    launch!(m, icon_vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn_now, w.tvn_new, w.pg, w.hd, dt, a, b)
-    if m.divdamp > 0
-        launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.δ, ys.vn, m.cell_edges, m.divergence)
-        launch!(m, icon_edge_gradient_kernel!, (ne, nlev), w.G, w.δ, m.edge_cells, m.inverse_dual, 1.0)
-        launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.δ, w.G, m.cell_edges, m.divergence)
-        launch!(m, icon_edge_gradient_kernel!, (ne, nlev), w.G, w.δ, m.edge_cells, m.inverse_dual, -m.divdamp)
-        y.vn .+= w.G
-    end
-    @. w.tw = a * w.tw_now + b * w.tw_new
-    fast_waves!(m, y, y0, ys, w.tw, dt)
-    return y
-end
-
-"Hyperdiffusion `-ν₄ L(L(vn))` with the C-grid vector Laplacian `∇δ - k × ∇ζ`."
-function icon_hyperdiffusion!(hd, m::ICONNonhydrostatic, vn)
-    w, nlev = m.work, num_layers(m.vgrid)
-    nc, ne, nv = num_cells(m.grid), num_edges(m.grid), num_vertices(m.grid)
-    for (out, x, s) in ((w.Lvn, vn, 1.0), (hd, w.Lvn, -m.hyperdiffusion))
-        launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.δ, x, m.cell_edges, m.divergence)
-        launch!(m, vorticity_kernel!, (nv, nlev), w.ζ, x, m.vertex_edges, m.curl)
-        launch!(m, vector_laplacian_kernel!, (ne, nlev), out, w.δ, w.ζ, m.edge_cells, m.edge_vertices,
-                m.inverse_dual, m.inverse_primal, s)
-    end
-    return hd
-end

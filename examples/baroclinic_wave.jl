@@ -52,7 +52,7 @@ function main(args)
         ICONNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05,
                            hyperdiffusion=5e14 * (Δx / 79e3)^3, backend)
     else
-        TRiSKNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05, backend)
+        MPASGassmannNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05, backend)
     end
     @printf("%d cells (≈ %.0f km) × %d layers on %s, dt = %.0f s\n", num_cells(dm),
             sqrt(4π / num_cells(dm)) * 6.37122e6 / 1000, levels, nameof(typeof(backend)), dt)
