@@ -42,3 +42,18 @@ function VerticalGrid(nlev::Integer, z_top::Real; stretch::Real=1)
 end
 
 num_layers(v::VerticalGrid) = length(v.dz)
+
+"""
+    icon_vertical_grid(nlev, top_height; min_lay_thckn=50, stretch_fac=1) -> VerticalGrid
+
+ICON's height levels for flat ground (`init_sleve_coord`, `itype_laydistr = 1`
+without the thickness limiter): `z = top_height (2/π arccos(((k-1)/nlev)^s))^x`
+for the interfaces `k = 1:nlev+1` from the top, the exponent `x` such that the
+lowest layer is `min_lay_thckn` thick.
+"""
+function icon_vertical_grid(nlev::Integer, top_height::Real; min_lay_thckn::Real=50.0, stretch_fac::Real=1.0)
+    x = log(min_lay_thckn / top_height) / log(2 / π * acos(((nlev - 1) / nlev)^stretch_fac))
+    z = [top_height * (2 / π * acos(((k - 1) / nlev)^stretch_fac))^x for k in 1:(nlev + 1)]
+    z[end] = 0.0
+    return VerticalGrid(reverse(z))
+end

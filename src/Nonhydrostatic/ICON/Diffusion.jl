@@ -122,15 +122,19 @@ end
     end
 end
 
-"`θ += A ∇⋅F` at constant `ρ` (ICON updates θ_v and the Exner pressure with it)."
-@kernel function icon_theta_diffusion_kernel!(ρθ, @Const(ρ), @Const(θ), @Const(F), @Const(cell_edges),
+"`θ += A ∇⋅F` at constant `ρ`, the Exner pressure linearized with it, `π (1 + R/c_v (θ_new/θ - 1))`."
+@kernel function icon_theta_diffusion_kernel!(ρθ, exner, @Const(ρ), @Const(θ), @Const(F), @Const(cell_edges),
                                               @Const(divergence), @Const(cell_areas))
     i, k = @index(Global, NTuple)
     s = 0.0
     @inbounds for n in axes(cell_edges, 1)
         s += divergence[n, i] * F[cell_edges[n, i], k]
     end
-    @inbounds ρθ[i, k] = ρ[i, k] * (θ[i, k] + cell_areas[i] * s)
+    @inbounds begin
+        θn = θ[i, k] + cell_areas[i] * s
+        ρθ[i, k] = ρ[i, k] * θn
+        exner[i, k] *= 1 + ICON_RD / ICON_CVD * (θn / θ[i, k] - 1)
+    end
 end
 
 """
@@ -161,7 +165,7 @@ function icon_diffusion!(m::ICONNonhydrostatic, y, dt)
     if d.lhdiff_temp
         @. w.θ = y.ρθ / y.ρ
         launch!(m, icon_theta_flux_kernel!, (ne, nlev), w.F, w.kh, w.θ, m.cell_edges, m.edge_cells, m.inverse_dual)
-        launch!(m, icon_theta_diffusion_kernel!, (nc, nlev), y.ρθ, y.ρ, w.θ, w.F, m.cell_edges, m.divergence,
+        launch!(m, icon_theta_diffusion_kernel!, (nc, nlev), y.ρθ, y.exner, y.ρ, w.θ, w.F, m.cell_edges, m.divergence,
                 m.cell_areas)
     end
     return y

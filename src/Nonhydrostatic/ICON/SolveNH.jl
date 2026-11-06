@@ -4,7 +4,7 @@
 @kernel function icon_thermo_kernel!(θ, πe, @Const(ρ), @Const(ρθ))
     i, k = @index(Global, NTuple)
     @inbounds θ[i, k] = ρθ[i, k] / ρ[i, k]
-    @inbounds πe[i, k] = (Rd * ρθ[i, k] / P0)^(Rd / Cvd)
+    @inbounds πe[i, k] = (ICON_RD * ρθ[i, k] / P0)^(ICON_RD / ICON_CVD)
 end
 
 "Green–Gauss gradients of `ρ` and `θ` at the cells (edge values by `c_lin_e`), unit sphere."
@@ -44,7 +44,7 @@ gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure.
         ρe[e, k] = ρ[up, k] + g1[up, k] * d1 + g2[up, k] * d2 + g3[up, k] * d3
         t = θ[up, k] + h1[up, k] * d1 + h2[up, k] * d2 + h3[up, k] * d3
         θe[e, k] = t
-        pg[e, k] = Cpd * t * (πex[r, k] - πex[l, k]) * inverse_dual[e]
+        pg[e, k] = ICON_CPD * t * (πex[r, k] - πex[l, k]) * inverse_dual[e]
     end
 end
 
@@ -54,7 +54,17 @@ end
     @inbounds vn[e, k] = vn0[e, k] + dt * (a * tnow[e, k] + b * tnew[e, k] - pg[e, k] + hd[e, k])
 end
 
-"Mass and `ρθ` fluxes `ρ_e vn`, `ρ_e θ_e vn`."
+"Averaged normal velocity `v̄_e = Σ_n w_{n,e} vn_{edges[n,e]}` of the mass flux (ICON `z_vn_avg`)."
+@kernel function icon_edge_average_kernel!(va, @Const(vn), @Const(edges), @Const(weights))
+    e, k = @index(Global, NTuple)
+    s = 0.0
+    @inbounds for n in axes(edges, 1)
+        s += weights[n, e] * vn[edges[n, e], k]
+    end
+    @inbounds va[e, k] = s
+end
+
+"Mass and `ρθ` fluxes `ρ_e vn`, `ρ_e θ_e vn` (with the averaged `vn`)."
 @kernel function icon_flux_kernel!(F, Fθ, @Const(vn), @Const(ρe), @Const(θe))
     e, k = @index(Global, NTuple)
     @inbounds f = ρe[e, k] * vn[e, k]
@@ -72,13 +82,14 @@ end
 `ρ` and `θ` at the interior interfaces for the column solve: the time average
 `a0 x^n + as x*` of the cells below and above, linearly interpolated, minus
 `(Δt/2) w* ∂x/∂z` (backtrajectory, `half_dt = Δt/2`); with `as = half_dt = 0`
-the linear interpolation of `n` (predictor).
+the linear interpolation of `n` (predictor). `θp` is the interpolated
+`θ - θ_ref` without the backtrajectory term (ICON `z_theta_v_pr_ic`).
 """
-@kernel function icon_interface_kernel!(θi, ρi, @Const(ρ0), @Const(ρθ0), @Const(ρs), @Const(ρθs), @Const(ws),
-                                        @Const(dzh), @Const(wlow), a0, as, half_dt, nlev)
+@kernel function icon_interface_kernel!(θi, ρi, θp, @Const(ρ0), @Const(ρθ0), @Const(ρs), @Const(ρθs), @Const(ws),
+                                        @Const(θref), @Const(dzh), @Const(wlow), a0, as, half_dt, nlev)
     i = @index(Global)
     @inbounds begin
-        θi[i, 1] = θi[i, nlev + 1] = ρi[i, 1] = ρi[i, nlev + 1] = 0.0
+        θi[i, 1] = θi[i, nlev + 1] = ρi[i, 1] = ρi[i, nlev + 1] = θp[i, 1] = θp[i, nlev + 1] = 0.0
         ρl = a0 * ρ0[i, 1] + as * ρs[i, 1]
         θl = a0 * ρθ0[i, 1] / ρ0[i, 1] + as * ρθs[i, 1] / ρs[i, 1]
         for j in 2:nlev
@@ -87,7 +98,67 @@ the linear interpolation of `n` (predictor).
             c = half_dt * ws[i, j] / dzh[j]
             ρi[i, j] = wlow[j] * ρl + (1 - wlow[j]) * ρu - c * (ρu - ρl)
             θi[i, j] = wlow[j] * θl + (1 - wlow[j]) * θu - c * (θu - θl)
+            θp[i, j] = wlow[j] * (θl - θref[j - 1]) + (1 - wlow[j]) * (θu - θref[j])
             ρl, θl = ρu, θu
+        end
+    end
+end
+
+"""
+ICON's vertically implicit step of one column (`solve_nh`): `w`, `ρ`, the
+Exner pressure `πn` and `ρθ` at `t + τ` from the state of `n` (`w0`, `ρ0`,
+`ρθ0`, the prognostic Exner pressure `π0`), the explicit horizontal parts
+`ρexpl`, `ρθexpl`, the advection `tw` of `w` and `ρ`, `θ` at the interfaces
+(`ρi`, `θi`, `θp = θ - θ_ref`). The vertical pressure gradient is split
+around the reference state, `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z` with the
+analytic `∂π_ref/∂z = -g/(c_p θ_ref)` (`dπref`) that balances gravity, the
+first part off-centred with `β`; `π` is linearized around `π0`,
+`π = π0 + (R/c_v) π0/ρθ0 Δ(ρθ)`, and `ρθ` follows from it, so that
+`ρθ` is conserved in flux form. Klemp's damping of `w`, `w/(1 + τ r_j)`, after the solve.
+"""
+@kernel function icon_vertical_solve_kernel!(w, ρ, ρθ, πn, cp_, dp_, @Const(w0), @Const(ρ0), @Const(ρθ0), @Const(π0),
+                                             @Const(θi), @Const(θp), @Const(ρi), @Const(tw), @Const(ρexpl),
+                                             @Const(ρθexpl), @Const(πref), @Const(dπref), @Const(dz), @Const(dzh),
+                                             @Const(rayleigh), τ, β, nlev)
+    i = @index(Global)
+    @inbounds begin
+        # explicit mass flux at the interfaces, α = β θ_j ρ_j of the implicit one (zero at the ground and the lid)
+        M(j) = 2 <= j <= nlev ? ρi[i, j] * (1 - β) * w0[i, j] : 0.0
+        α(j) = 2 <= j <= nlev ? β * θi[i, j] * ρi[i, j] : 0.0
+        # z_beta of layer k and its explicit ρ and π'
+        b(k) = τ * ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k] * dz[k])
+        ρx(k) = ρexpl[i, k] - τ / dz[k] * (M(k + 1) - M(k))
+        πx(k) = π0[i, k] - πref[k] + ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k]) * (ρθexpl[i, k] - ρθ0[i, k]) -
+                b(k) * (θi[i, k + 1] * M(k + 1) - θi[i, k] * M(k))
+        # Thomas algorithm over the interior interfaces
+        cp_[i, 1] = dp_[i, 1] = 0.0
+        bl, πl, πpl = b(1), πx(1), π0[i, 1] - πref[1]
+        for j in 2:nlev
+            bu, πu, πpu = b(j), πx(j), π0[i, j] - πref[j]
+            γ = τ * ICON_CPD * β * θi[i, j] / dzh[j]
+            lower = -γ * bl * α(j - 1)
+            upper = -γ * bu * α(j + 1)
+            diag = 1 + γ * α(j) * (bl + bu)
+            pg = (1 - β) * θi[i, j] * (πpu - πpl) / dzh[j] + θp[i, j] * dπref[j]
+            rhs = w0[i, j] + τ * (tw[i, j] - ICON_CPD * pg) - γ * (πu - πl)
+            denom = diag - lower * cp_[i, j - 1]
+            cp_[i, j] = upper / denom
+            dp_[i, j] = (rhs - lower * dp_[i, j - 1]) / denom
+            bl, πl, πpl = bu, πu, πpu
+        end
+        w[i, nlev + 1] = 0.0
+        for j in nlev:-1:2
+            w[i, j] = dp_[i, j] - cp_[i, j] * w[i, j + 1]
+        end
+        w[i, 1] = 0.0
+        for j in 2:nlev
+            w[i, j] /= 1 + τ * rayleigh[j]
+        end
+        for k in 1:nlev
+            ρ[i, k] = ρx(k) - β * τ / dz[k] * (ρi[i, k + 1] * w[i, k + 1] - ρi[i, k] * w[i, k])
+            π = πx(k) + πref[k] - b(k) * (α(k + 1) * w[i, k + 1] - α(k) * w[i, k])
+            πn[i, k] = π
+            ρθ[i, k] = ρθ0[i, k] * ((π / π0[i, k] - 1) * ICON_CVD / ICON_RD + 1)
         end
     end
 end
@@ -123,19 +194,21 @@ end
 
 """
 Horizontal flux divergence of `vn` with `ρ_e`, `θ_e`, then the column solve from
-the base state `y0` into `y`; `ρ`, `θ` at the interfaces of `y0` (predictor) or
-of the time average of `y0` and the predictor state `ys` (`corrector`).
+the base state `y0` into `y` and the Exner pressure `πn`; `ρ`, `θ` at the
+interfaces of `y0` (predictor) or of the time average of `y0` and the
+predictor state `ys` (`corrector`).
 """
-function fast_waves!(m::ICONNonhydrostatic, y, y0, ys, tw, dt, corrector::Bool)
-    w, nlev = m.work, num_layers(m.vgrid)
+function fast_waves!(m::ICONNonhydrostatic, y, πn, y0, ys, tw, dt, corrector::Bool)
+    w, v, nlev = m.work, m.vertical, num_layers(m.vgrid)
     nc, ne = num_cells(m.grid), num_edges(m.grid)
-    launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, w.ρe, w.θe)
+    launch!(m, icon_edge_average_kernel!, (ne, nlev), w.va, y.vn, m.flux_edges, m.flux_weights)
+    launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, w.va, w.ρe, w.θe)
     launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
             m.divergence, dt)
     a0, as = corrector ? m.rth_weights : (1.0, 0.0)
-    launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, m.dzh, m.wlow, a0, as,
-            corrector ? dt / 2 : 0.0, nlev)
-    launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
-            w.ρi, tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, dt, m.beta, nlev, true, true)
+    launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, w.θp, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, v.θref, m.dzh, m.wlow,
+            a0, as, corrector ? dt / 2 : 0.0, nlev)
+    launch!(m, icon_vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, πn, w.cprime, w.dprime, y0.w, y0.ρ, y0.ρθ, w.π0,
+            w.θi, w.θp, w.ρi, tw, w.ρexpl, w.ρθexpl, v.πref, v.dπref, m.dz, m.dzh, m.rayleigh, dt, m.beta, nlev)
     return y
 end

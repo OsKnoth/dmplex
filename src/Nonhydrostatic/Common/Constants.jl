@@ -15,6 +15,13 @@ const Cvd = Cpd - Rd
 const P0 = 1.0e5
 const GRAV = 9.80616
 
+# ICON's constants (mo_physical_constants), used by ICONNonhydrostatic; the analytic test cases keep the ones
+# above, as their DCMIP/JW formulas do in ICON
+const ICON_RD = 287.04
+const ICON_CPD = 1004.64
+const ICON_CVD = ICON_CPD - ICON_RD
+const ICON_GRAV = 9.80665
+
 # Work items over (points, levels) run in blocks of 32 points × 8 levels: the neighbour tables and the
 # lines of the gathered neighbours are shared by eight levels in the cache (ICON's nproma blocks).
 const BLOCK = (32, 8)

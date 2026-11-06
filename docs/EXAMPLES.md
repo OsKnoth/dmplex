@@ -15,6 +15,7 @@ top of each script.
 | `galewsky.jl` | `NonlinearKiteShallowWater` | Galewsky jet | kite elements RT1 × Q2 × CG2 | CPU, MPI, GPU |
 | `bickley.jl` | `NonlinearKiteShallowWater` | Bickley jet on a periodic plane | kite elements | CPU |
 | `baroclinic_wave.jl` | `MPASGassmannNonhydrostatic`, `ICONNonhydrostatic` (`--icon`) | baroclinic wave (Ullrich et al. 2014) | 3D MPAS-Gassmann (TRiSK), HEVI; ICON triangles, predictor–corrector | CPU, GPU |
+| `icon_jabw.jl` | `ICONNonhydrostatic` | baroclinic wave with ICON's jabw10d settings, JW or from a Fortran ICON state | ICON triangles, predictor–corrector, ICON grid files | CPU, GPU |
 | `thermal_wind.jl` | `MPASGassmannNonhydrostatic`, `ICONNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D MPAS-Gassmann, 3D kite elements, HEVI | CPU |
 | `baroclinic_channel.jl` | `KiteNonhydrostatic` | baroclinic wave in an f-plane channel (Ullrich, Reed and Jablonowski 2015) | 3D kite elements on a periodic plane, HEVI | CPU |
 | `gpu/cudss_mass.jl` | mass matrices | solves against a known solution | RT_k, DG_k, CG_{k+1} | GPU, multi-GPU |
@@ -192,6 +193,25 @@ on R2B5 and 18.8 ms on R2B6. The three dycores are compared in [dycores/](dycore
 
 In the last version, on hexagon 7, `vertical_solve` takes 5.1 ms, `vn_tendency` 4.5 ms and
 `theta_interface` 2.3 ms.
+
+## ICON's baroclinic wave and Fortran ICON: `icon_jabw.jl`
+
+`ICONNonhydrostatic` on an ICON grid file with the namelist of ICON's experiment jabw10d (R2B5,
+64 levels to 35 km by `icon_vertical_grid`, dtime 576 s with 5 dynamics substeps,
+`vwind_offctr = 0.2`, `exner_expol = 0.5`, Rayleigh damping from 25 km with 0.1,
+`hdiff_efdt_ratio = 20`, the rest at ICON's defaults, which are the defaults of the model):
+
+```sh
+julia --project examples/icon_jabw.jl grid/icon_grid_0013_R02B04_G.nc 10 1152 64 35000
+sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch GRID.nc --init=icon.nc --compare=icon.nc
+```
+
+Without `--init` the Jablonowski–Williamson state on flat ground (ICON's `jabw` has the JW
+orography, which the model does not have, so it is not ICON's test). `--init=icon.nc` starts from
+the first time of a Fortran ICON output file on the native grid (model levels, `vn`, `w`, `rho`,
+`theta_v`, `exner`, read with `read_icon_state`), e.g. ICON's flat DCMIP 2016 wave `dcmip_bw_11`
+with the same namelist; `--compare=icon.nc` compares the final surface pressure with ICON's last
+time. See [dycores/ICON.md](dycores/ICON.md) for the comparison.
 
 ## Nonhydrostatic thermal wind: `thermal_wind.jl`
 

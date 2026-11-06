@@ -21,6 +21,7 @@ module Nonhydrostatic
 
 using LinearAlgebra
 using StaticArrays
+using NCDatasets: NCDataset
 using KernelAbstractions
 using ..Topology
 import ..Topology: num_layers
@@ -33,7 +34,7 @@ using ..Parallel: num_local_kites
 import ..ShallowWater
 import ..ShallowWater: initial_state, total_mass
 
-export VerticalGrid, MPASGassmannNonhydrostatic, TRiSKNonhydrostatic, ICONNonhydrostatic, zero_state, stage!, step!, baroclinic_wave, baroclinic_channel, thermal_wind, lowest_pressure
+export VerticalGrid, MPASGassmannNonhydrostatic, TRiSKNonhydrostatic, ICONNonhydrostatic, read_icon_state, zero_state, stage!, step!, baroclinic_wave, baroclinic_channel, thermal_wind, jablonowski_williamson, icon_vertical_grid, lowest_pressure
 export KiteNonhydrostatic, num_columns, project_layers, project_velocity, mass_divergence!, column_weights,
     column_points, vertical_stage!, vertical_step!, horizontal_tendency!
 
@@ -53,6 +54,7 @@ include("ICON/VelocityAdvection.jl")
 include("ICON/SolveNH.jl")
 include("ICON/Diffusion.jl")
 include("ICON/Stepping.jl")
+include("ICON/ICONState.jl")
 include("Kite/KiteNonhydrostatic.jl")
 include("Kite/KiteAdvection.jl")
 

@@ -1,22 +1,24 @@
 """
-    ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius=6.37122e6, omega=7.292e-5,
-                       beta=0.65, damping_height=Inf, damping_rate=0, itime_scheme=4,
+    ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius=6.371229e6, omega=7.29212e-5,
+                       beta=0.65, damping_height=45000, damping_rate=0.05, itime_scheme=4,
                        divdamp_order=4, divdamp_type=3, divdamp_fac=0.0025, divdamp_fac2=0.004,
                        divdamp_fac3=0.004, divdamp_fac4=0.004, divdamp_z=32500, divdamp_z2=40000,
                        divdamp_z3=60000, divdamp_z4=80000, divdamp_fac_o2=0, veladv_offctr=0.25,
-                       rhotheta_offctr=-0.1, exner_expol=1/3, rbf_scale=0.5, hdiff_order=-1,
+                       rhotheta_offctr=-0.1, exner_expol=1/3, rbf_scale=0.5, hdiff_order=5,
                        ndyn_substeps=5, hdiff_efdt_ratio=36, hdiff_w_efdt_ratio=15, hdiff_smag_fac=0.015,
                        hdiff_smag_fac2=0.07137, hdiff_smag_fac3=0, hdiff_smag_fac4=1, hdiff_smag_z=32500,
                        hdiff_smag_z2=60686, hdiff_smag_z3=50000, hdiff_smag_z4=90000, lhdiff_vn=true,
-                       lhdiff_w=true, lhdiff_temp=true, rbf_vec_scale_v=0.5, hyperdiffusion=0,
-                       backend=CPU())
+                       lhdiff_w=true, lhdiff_temp=true, rbf_vec_scale_v=0.5, divavg_cntrwgt=0.5,
+                       hyperdiffusion=0, backend=CPU())
 
 Dry compressible Euler equations on the extruded triangular C grid of ICON
 (Zängl et al. 2015, `mo_solve_nonhydro`, `mo_velocity_advection`), shallow
 atmosphere, flat ground. `grid` is the `TRiSKGrid` of a triangle mesh with
 circumcentres. Lorenz staggering: `vn` at the edges × layers, `w` at the cells
-× interfaces, `ρ`, `ρθ` at the cells × layers (state `(vn, w, ρ, ρθ)` as for
-`MPASGassmannNonhydrostatic`).
+× interfaces, `ρ`, `ρθ` and the prognostic Exner pressure `exner` at the cells
+× layers (state `(vn, w, ρ, ρθ, exner)`). The defaults are those of ICON's
+namelists (`nonhydrostatic_nml`, `diffusion_nml`, `dynamics_nml`) and ICON's
+constants (`ICON_RD`, `ICON_CPD`, `ICON_GRAV`, earth radius and rotation).
 
 **Velocity tendencies** (`mo_velocity_advection`), horizontal operators of
 `ICONShallowWater` per layer:
@@ -33,20 +35,28 @@ at the edges (`c_lin_e`), and `∂w/∂t` along the edge from `w` at the vertice
 (area weights, `cells_aw_verts`).
 
 **Fast waves** (`solve_nh`): horizontal pressure gradient `-c_p θ_e ∂π/∂n`,
-mass flux `ρ_e vn` and `ρθ` flux `ρ_e θ_e vn` with `ρ_e`, `θ_e` from the
+mass flux `ρ_e v̄` and `ρθ` flux `ρ_e θ_e v̄` with `ρ_e`, `θ_e` from the
 second-order upwind reconstruction of Miura (2007): the value of the upwind
 cell plus its Green–Gauss gradient times the distance from the cell centre to
 the backtrajectory point `x_e - (Δt/2)(vn n_e + vt t_e)` (ICON
-`upwind_hflux_miura` with `iadv_rhotheta = 2`). The vertical terms are
-implicit per column with the off-centring `beta` (`0.5 + vwind_offctr`),
-centred θ and ρ at the interfaces, linearized around the Exner pressure of
-the old state: the column solver of `MPASGassmannNonhydrostatic` with
-`vertical_theta = :centred` and the lumped vertical mass.
+`upwind_hflux_miura` with `iadv_rhotheta = 2`). `v̄` is ICON's averaged normal
+velocity (`e_flx_avg`, see `flux_average`, centre weight `divavg_cntrwgt`):
+its divergence is the cell average of the divergence of `vn`, which damps the
+grid-scale divergence of the triangles. The vertical terms are implicit per
+column (`solve_nh`): the Exner pressure is linearized around `π^n`,
+`π = π^n + (R/c_v) π^n/(ρθ)^n Δ(ρθ)`, the vertical pressure gradient split
+around ICON's reference atmosphere (`h_scal_bg`, `t0sl_bg`, `del_t_bg`),
+`(1-β) θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z` explicit and `β θ_j ∂π'/∂z` implicit with
+the off-centring `beta` (`0.5 + vwind_offctr`), ρ and θ linearly interpolated
+to the interfaces; `θ = (ρθ)^n((π/π^n - 1) c_v/R + 1)/ρ` follows from the new
+`π`. Klemp's Rayleigh damping of `w` above `damping_height`
+(`rayleigh_type = 2`, `rayleigh_coeff = damping_rate`) after the solve.
 
 **Time stepping** (`step!`): the two-time-level predictor–corrector of ICON
 (`solve_nh`, `istep = 1, 2`). Predictor: the velocity tendencies of `n` (with
 the default `itime_scheme = 4` those of the last corrector, computed at the
-predictor state of the previous step, recomputed only in the first step;
+predictor state of the previous step, all recomputed in the first step and
+that of `vn` in the first of every `ndyn_substeps` steps, ICON `l_recompute`;
 `itime_scheme = 6` recomputes them every step), the pressure gradient of the
 Exner pressure extrapolated in time, `π^n + exner_expol (π^n - π^{n-1})`, and
 `ρ_e`, `θ_e` of `n`; `vn* = vn^n + Δt (T_vn^n - c_p θ_e ∂π/∂n)`, the fluxes of
@@ -83,20 +93,17 @@ deformation `|D|` on the quadrilateral of the edge (`s(z)` the profile of
 `vn += A_e (K ∇²vn - A_e k ∇⁴vn)` with `k = min(1/128, k₄ ndyn_substeps/3)`,
 `k₄ = 1/(64 hdiff_efdt_ratio)` (`lhdiff_vn`); `w -= k_w A² ∇⁴w` with
 `k_w = min(1/48, ndyn_substeps/(36 hdiff_w_efdt_ratio))` plus the `∇²w` of ICON
-above `damping_height`, both capped so that the factor `1 - k_w ρ² - n2w ρ`
-of the highest mode stays non-negative, `ρ = 2 max Σ l/d` (`lhdiff_w`); `θ += A ∇⋅(K ∇θ)` at constant `ρ`, with
-`K` raised over cold pools in the lowest two layers (`lhdiff_temp`).
-It is off by default (`hdiff_order = -1`): on our meshes, which are not
-spring-optimized like ICON's, it lets a grid-scale mode of `w` grow near the
-pentagons within two days at R2B4. `hyperdiffusion = ν₄` adds `-ν₄ L(L(vn))`
-to every dynamics step instead.
+above `damping_height` (`lhdiff_w`); `θ += A ∇⋅(K ∇θ)` at constant `ρ`, with
+`K` raised over cold pools in the lowest two layers, and `exner` updated with it (`lhdiff_temp`).
+`hdiff_order = -1` switches it off; `hyperdiffusion = ν₄` adds `-ν₄ L(L(vn))`
+to every dynamics step.
 
-Differences to ICON: `ρθ` is prognostic and `π` follows from the equation of
-state in every step (ICON carries `exner` and `θ_v` and updates `exner` with
-the linearized equation); no reference state (with flat ground its horizontal
-gradient vanishes); no tracer or physics coupling (`ndyn_substeps` only sets
-when the diffusion is called); no nest-boundary terms; the Rayleigh damping of `w` as in
-`MPASGassmannNonhydrostatic`. Serial.
+Differences to ICON: flat ground only (ICON's `jabw` test has the JW
+orography, `dcmip_bw_11` is flat); the vn diffusion is `itype_vn_diffu = 1`;
+no extra CFL diffusion (`lextra_diffu`); no tracer or physics coupling
+(`ndyn_substeps` only sets when the diffusion is called); no nest-boundary
+terms. Started from ICON's state, one step agrees with ICON to 0.1–1 % of
+ICON's own change of `w`, `ρ`, `θ_v` and `exner`. Serial.
 """
 struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
     grid::TRiSKGrid
@@ -113,6 +120,8 @@ struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
     tangent_sign::V      # ±1: t_e = x_e × n_e points from vertex 1 to vertex 2 (+1) or back
     rbf_edges::I
     rbf::M
+    flux_edges::I        # 5 × ne: the edge, the other edges of its first and of its second cell
+    flux_weights::M      # e_flx_avg: weights of the averaged vn of the mass flux
     vertex_edges::I
     curl::M              # t_{e,v} d_e / (a A_v)
     vertex_cells::I
@@ -124,7 +133,8 @@ struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
     dz::V
     dzh::V
     wlow::V
-    rayleigh::V
+    rayleigh::V          # Klemp's coefficient of w at the interfaces (rayleigh_w)
+    vertical::NamedTuple # reference state and vertical metric coefficients
     work::NamedTuple
     radius::Float64
     beta::Float64
@@ -143,22 +153,22 @@ struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
     backend::BE
 end
 
-function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6.37122e6, omega::Real=7.292e-5,
-                            beta::Real=0.65, damping_height::Real=Inf, damping_rate::Real=0.0,
+function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6.371229e6, omega::Real=7.29212e-5,
+                            beta::Real=0.65, damping_height::Real=45000.0, damping_rate::Real=0.05,
                             itime_scheme::Integer=4, divdamp_order::Integer=4, divdamp_type::Integer=3,
                             divdamp_fac::Real=0.0025, divdamp_fac2::Real=0.004, divdamp_fac3::Real=0.004,
                             divdamp_fac4::Real=0.004, divdamp_z::Real=32500.0, divdamp_z2::Real=40000.0,
                             divdamp_z3::Real=60000.0, divdamp_z4::Real=80000.0, divdamp_fac_o2::Real=0.0,
                             divdamp_trans_start::Real=12500.0, divdamp_trans_end::Real=17500.0,
                             veladv_offctr::Real=0.25, rhotheta_offctr::Real=-0.1, exner_expol::Real=1 / 3,
-                            rbf_scale::Real=0.5, hdiff_order::Integer=-1, ndyn_substeps::Integer=5,
+                            rbf_scale::Real=0.5, hdiff_order::Integer=5, ndyn_substeps::Integer=5,
                             hdiff_efdt_ratio::Real=36.0, hdiff_w_efdt_ratio::Real=15.0, hdiff_smag_fac::Real=0.015,
                             hdiff_smag_fac2::Real=2e-6 * (1600 + 25000 + sqrt(1600 * (1600 + 50000))),
                             hdiff_smag_fac3::Real=0.0, hdiff_smag_fac4::Real=1.0, hdiff_smag_z::Real=32500.0,
                             hdiff_smag_z2::Real=1600 + 50000 + sqrt(1600 * (1600 + 50000)),
                             hdiff_smag_z3::Real=50000.0, hdiff_smag_z4::Real=90000.0, lhdiff_vn::Bool=true,
                             lhdiff_w::Bool=true, lhdiff_temp::Bool=true, rbf_vec_scale_v::Real=0.5,
-                            hyperdiffusion::Real=0.0, backend=KernelAbstractions.CPU())
+                            divavg_cntrwgt::Real=0.5, hyperdiffusion::Real=0.0, backend=KernelAbstractions.CPU())
     size(grid.cell_edges, 1) == 3 || throw(ArgumentError("ICONNonhydrostatic needs a triangle mesh"))
     itime_scheme in (4, 6) || throw(ArgumentError("itime_scheme must be 4 or 6"))
     divdamp_order in (2, 4, 24) || throw(ArgumentError("divdamp_order must be 2, 4 or 24"))
@@ -183,6 +193,7 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
         curl[k, v] = grid.vertex_signs[k, v] * d[grid.vertex_edges[k, v]] / (a * grid.vertex_areas[v])
     end
     rbf_edges, rbf = rbf_coefficients(grid; scale=rbf_scale)
+    flux_edges, flux_weights = flux_average(grid, divergence; cntrwgt=divavg_cntrwgt)
     tangent_sign = zeros(ne)
     edge_vectors = zeros(12, ne)
     for e in 1:ne
@@ -195,9 +206,31 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
         edge_vectors[7:9, e] .= n
         edge_vectors[10:12, e] .= t
     end
-    z_top = vgrid.z_half[end]
-    rayleigh = map(vgrid.z_half) do z
-        z > damping_height ? damping_rate * sin(π / 2 * (z - damping_height) / (z_top - damping_height))^2 : 0.0
+    z_top, zh, zc, nl = vgrid.z_half[end], vgrid.z_half, vgrid.z_full, nlev
+    # Klemp et al. (2008) at the interior interfaces from damping_height up (rayleigh_type = 2)
+    rayleigh = [2 <= j <= nl && zh[j] >= damping_height ?
+                damping_rate * (1 - tanh(3.8 * (z_top - zh[j]) / max(1e-6, z_top - damping_height))) : 0.0
+                for j in 1:(nl + 1)]
+    # reference atmosphere of ICON (h_scal_bg, t0sl_bg, del_t_bg, p0sl_bg) at the layers and interfaces
+    ref_p(z) = 101325.0 * exp(-ICON_GRAV / ICON_RD * 10000.0 / 213.15 * log((exp(z / 10000.0) * 213.15 + 75.0) / 288.15))
+    ref_T(z) = 213.15 + 75.0 * exp(-z / 10000.0)
+    ref_π(z) = (ref_p(z) / P0)^(ICON_RD / ICON_CPD)
+    θref = [ref_T(z) / ref_π(z) for z in zc]
+    dπref = [-ICON_GRAV / (ICON_CPD * ref_T(z) / ref_π(z)) for z in zh]
+    # second-order ∂w/∂z at the interfaces (coeff1_dwdz, coeff2_dwdz) and the quadratic extrapolation
+    # of a layer field to the ground (wgtfacq)
+    c1dwdz, c2dwdz = zeros(nl + 1), zeros(nl + 1)
+    for j in 2:nl
+        c1dwdz[j] = vgrid.dz[j - 1] / vgrid.dz[j] / (zh[j + 1] - zh[j - 1])
+        c2dwdz[j] = vgrid.dz[j] / vgrid.dz[j - 1] / (zh[j + 1] - zh[j - 1])
+    end
+    wgtfacq = if nl >= 3
+        z1, z2, z3 = zc[1], zc[2], zc[3]
+        q3 = z1 * z2 / (z2 - z3) / (z1 - z3)
+        q2 = (z1 - q3 * (z1 - z3)) / (z1 - z2)
+        (1 - q2 - q3, q2, q3)
+    else
+        (1.0, 0.0, 0.0)
     end
     mean_area = 4π * a^2 / nc
     o4 = divdamp_order == 4 || (divdamp_order == 24 && divdamp_fac_o2 <= 4 * divdamp_fac)
@@ -218,13 +251,13 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
             vt=z(ne, nlev), ζv=z(nv, nlev), wv=z(nv, nlev + 1), gw=z(ne, nlev + 1),
             tvn_now=z(ne, nlev), tvn_new=z(ne, nlev), tw_now=z(nc, nlev + 1), tw_new=z(nc, nlev + 1),
             tw=z(nc, nlev + 1), grad=ntuple(_ -> z(nc, nlev), 6), ρe=z(ne, nlev), θe=z(ne, nlev),
-            pg=z(ne, nlev), F=z(ne, nlev), Fθ=z(ne, nlev), hρθ=z(nc, nlev), ρexpl=z(nc, nlev), ρθexpl=z(nc, nlev),
+            pg=z(ne, nlev), va=z(ne, nlev), F=z(ne, nlev), Fθ=z(ne, nlev), hρθ=z(nc, nlev), ρexpl=z(nc, nlev), ρθexpl=z(nc, nlev),
             θi=z(nc, nlev + 1), θm=z(nc, nlev), band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 2),
             cprime=z(nc, nlev + 1), dprime=z(nc, nlev + 1), wmass=dev(vertical_mass(vgrid, :lumped)),
-            ρi=z(nc, nlev + 1), π0=z(nc, nlev), γ0=z(nc, nlev), δ=z(nc, nlev), δ2=z(nc, nlev), G=z(ne, nlev),
+            ρi=z(nc, nlev + 1), θp=z(nc, nlev + 1), π0=z(nc, nlev), δ=z(nc, nlev), δ2=z(nc, nlev), G=z(ne, nlev),
             ζ=z(nv, nlev), Lvn=z(ne, nlev), uvert=ntuple(_ -> z(nv, nlev), 3), uvert2=ntuple(_ -> z(nv, nlev), 3),
             kh=z(ne, nlev), n2e=z(ne, nlev), Lw=z(nc, nlev + 1), substep=Ref(0),
-            hd=z(ne, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev)))
+            hd=z(ne, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
     # mo_nh_diffusion: vertex RBF, the quadrilateral of each edge, coefficients
     rbf_v = rbf_vertex_coefficients(grid; scale=rbf_vec_scale_v)
     quad = zeros(Int, 4, ne)
@@ -249,15 +282,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
     k4d = hdiff_efdt_ratio > 0 ? 1 / (64 * hdiff_efdt_ratio) : 0.0
     kvn = min(1 / 128, k4d * ndyn_substeps / 3)
     jb = findlast(<(damping_height), vgrid.z_half)
-    zh = vgrid.z_half
-    # the factor 1 - k4w ρ² - n2w ρ of the w diffusion for the highest mode (ρ: Gershgorin bound of the
-    # spectral radius of A∇², 10.4 for equilateral triangles) kept non-negative: a negative factor flips
-    # the checkerboard of w against ρ and θ every call and drives it up near the top. ICON's
-    # k4w = 5/540 gives k4w ρ² = 1 on equilateral triangles, so the caps are just active there
-    ρ = 2 * maximum(i -> sum(l[e] / d[e] for e in grid.cell_edges[:, i]), 1:nc)
-    k4w = hdiff_w_efdt_ratio > 0 ? min(1 / 48, ndyn_substeps / (36 * hdiff_w_efdt_ratio), 1 / ρ^2) : 0.0
-    n2w_max = max(0.0, (1 - k4w * ρ^2) / ρ)
-    n2w = [jb !== nothing && jb < j <= nlev ? min(n2w_max, ((zh[j] - zh[jb]) / (zh[nlev] - zh[jb]))^4 / 12) : 0.0
+    k4w = hdiff_w_efdt_ratio > 0 ? min(1 / 48, ndyn_substeps / (36 * hdiff_w_efdt_ratio)) : 0.0
+    n2w = [jb !== nothing && jb < j <= nlev ? ((zh[j] - zh[jb]) / (zh[nlev] - zh[jb]))^4 / 12 : 0.0
            for j in 1:(nlev + 1)]
     on = hdiff_order == 5
     diffusion = (rbf_edges=dev(rbf_v[1]), rbf=map(dev, rbf_v[2:4]), quad=dev(quad), quad_vectors=dev(quad_vectors),
@@ -271,15 +297,59 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
     return ICONNonhydrostatic(grid, vgrid, dev(grid.cell_edges), dev(divergence), dev(bilinear_weights(grid)),
                               dev(grid.edge_cells), dev(grid.edge_vertices), dev(edge_height), dev(gradient),
                               dev(1 ./ (a .* d)), dev(1 ./ (a .* l)), dev(tangent_sign), dev(rbf_edges), dev(rbf),
-                              dev(grid.vertex_edges), dev(curl), dev(grid.vertex_cells),
+                              dev(flux_edges), dev(flux_weights), dev(grid.vertex_edges), dev(curl), dev(grid.vertex_cells),
                               dev(grid.vertex_kites ./ grid.vertex_areas'), dev([2omega * x[3] for x in grid.edge_points]),
                               map(dev, green_gauss), dev(edge_vectors), dev(a^2 .* grid.cell_areas),
-                              dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work, a, Float64(beta),
+                              dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh),
+                              (θref=dev(θref), πref=dev(ref_π.(zc)), dπref=dev(dπref), c1dwdz=dev(c1dwdz),
+                               c2dwdz=dev(c2dwdz), wgtfacq=wgtfacq), work, a, Float64(beta),
                               dev(divdamp), dev(divdamp_o2), dev(divdamp_3d),
                               (0.5 - veladv_offctr, 0.5 + veladv_offctr),
                               (0.5 - rhotheta_offctr, 0.5 + rhotheta_offctr), Int(itime_scheme),
                               Float64(exner_expol), Float64(hyperdiffusion), Int(hdiff_order), Int(ndyn_substeps),
                               diffusion, 0, backend)
+end
+
+"State `(vn, w, ρ, ρθ, exner)` of the model, zero; the Exner pressure is prognostic as in ICON."
+function zero_state(m::ICONNonhydrostatic)
+    z = KernelAbstractions.zeros(m.backend, Float64, num_cells(m.grid), num_layers(m.vgrid))
+    return (; invoke(zero_state, Tuple{CGridNonhydrostatic}, m)..., exner=z)
+end
+
+"""
+    initial_state(m::ICONNonhydrostatic, profile)
+
+As for the other C-grid models, in ICON's hydrostatic balance (`balanced_column`),
+with the Exner pressure of the equation of state.
+"""
+function initial_state(m::ICONNonhydrostatic, profile)
+    y = invoke(initial_state, Tuple{CGridNonhydrostatic, Any}, m, profile)
+    return (; y..., exner=to_backend(m.backend, (ICON_RD .* Array(y.ρθ) ./ P0) .^ (ICON_RD / ICON_CVD)))
+end
+
+"""
+Column of `profile(z) -> (T, p, ...)` in ICON's discrete hydrostatic balance
+(`hydro_adjust`): `T` at the layer centres and `π` of the lowest layer kept,
+above `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z = 0` at every interface with the reference
+state of the vertical pressure gradient of `icon_vertical_solve_kernel!`.
+"""
+function balanced_column(m::ICONNonhydrostatic, profile)
+    v, nlev, κ = m.vgrid, num_layers(m.vgrid), ICON_RD / ICON_CPD
+    θref, πref, dπref = Array(m.vertical.θref), Array(m.vertical.πref), Array(m.vertical.dπref)
+    T = [profile(z)[1] for z in v.z_full]
+    πk = [(profile(z)[2] / P0)^κ for z in v.z_full]
+    for j in 2:nlev
+        πj, wl = πk[j], v.wlow[j]
+        for _ in 1:50
+            θl, θu = T[j - 1] / πk[j - 1], T[j] / πj
+            θi = wl * θl + (1 - wl) * θu
+            θp = wl * (θl - θref[j - 1]) + (1 - wl) * (θu - θref[j])
+            πj = πk[j - 1] + πref[j] - πref[j - 1] - v.dzh[j] * θp * dπref[j] / θi
+        end
+        πk[j] = πj
+    end
+    ρθ = @. P0 / ICON_RD * πk^(ICON_CVD / ICON_RD)
+    return ρθ ./ (T ./ πk), ρθ
 end
 
 """
@@ -301,6 +371,80 @@ function height_profile(vgrid::VerticalGrid, fac, fac2, fac3, fac4, z, z2, z3, z
         dl, dq = clamp(zf - z, 0, z2 - z), clamp(zf - z2, 0, z4 - z2)
         fac + dl * slope + dq * (c + dq * b)
     end
+end
+
+"""
+    flux_average(grid, divergence; cntrwgt=0.5, niter=1000) -> (edges, weights)
+
+ICON's averaged normal velocity of the mass flux (`e_flx_avg`, `z_vn_avg`):
+`v̄_e = Σ_n w_{n,e} vn_{edges[n,e]}` over the edge, the two other edges of its
+first cell and the two of its second, such that the divergence of `v̄` is the
+cell average `C` of the divergence of `vn`, `D v̄ = C D vn`, with ICON's
+averaging `C` (`c_bln_avg`): the weight `cntrwgt` of the cell and those of
+its three neighbours that reproduce linear fields in the tangent plane,
+corrected iteratively (relaxation 0.46, centre within `cntrwgt ± 0.003`) for
+the conservation of the area integral, `Σ_j A_j C_{j→i} = A_i`. `D v̄ = C D vn`
+fixes the weights of the outer edges; the central weight follows from it in
+each of the two cells and is their mean; the weights are scaled to reproduce
+a constant vector. `cntrwgt = 1` is the identity.
+"""
+function flux_average(grid::TRiSKGrid, divergence::AbstractMatrix; cntrwgt::Real=0.5, niter::Integer=1000)
+    nc, ne = num_cells(grid), num_edges(grid)
+    ce, ec = grid.cell_edges, grid.edge_cells
+    across(i, e) = ec[1, e] == i ? ec[2, e] : ec[1, e]
+    slot(i, e) = findfirst(==(e), view(ce, :, i))
+    nb = [across(i, ce[k, i]) for k in 1:3, i in 1:nc]
+    back = [slot(nb[k, i], ce[k, i]) for k in 1:3, i in 1:nc]   # position of i in the list of its neighbour k
+    # cell average: cntrwgt at the cell, the neighbours with zero first moment in the tangent plane
+    C = zeros(4, nc)
+    for i in 1:nc
+        x = grid.centers[i]
+        t1 = normalize(cross(x, abs(x[3]) < 0.9 ? SVector(0.0, 0.0, 1.0) : SVector(1.0, 0.0, 0.0)))
+        t2 = cross(x, t1)
+        p = [grid.centers[nb[k, i]] - x for k in 1:3]
+        M = SMatrix{3, 3}(1.0, dot(t1, p[1]), dot(t2, p[1]), 1.0, dot(t1, p[2]), dot(t2, p[2]),
+                          1.0, dot(t1, p[3]), dot(t2, p[3]))
+        C[1, i] = cntrwgt
+        C[2:4, i] .= M \ SVector(1 - cntrwgt, 0.0, 0.0)
+    end
+    A = grid.cell_areas
+    resid = zeros(nc)
+    for it in 1:niter
+        for i in 1:nc
+            resid[i] = (A[i] * C[1, i] + sum(A[nb[k, i]] * C[1 + back[k, i], nb[k, i]] for k in 1:3)) / A[i] - 1
+        end
+        if it < niter
+            for i in 1:nc
+                C[1, i] -= 0.46 * resid[i]
+                for k in 1:3
+                    C[1 + k, i] -= 0.46 * resid[nb[k, i]]
+                end
+                C[:, i] .-= (sum(view(C, :, i)) - 1) / 4
+                C[1, i] = clamp(C[1, i], cntrwgt - 0.003, cntrwgt + 0.003)
+            end
+        else
+            C[1, :] .-= resid
+        end
+    end
+    D(i, e) = divergence[slot(i, e), i]
+    Cn(i, j) = C[1 + findfirst(==(j), view(nb, :, i)), i]     # weight of the neighbour j in the average of i
+    others(i, e) = [f for f in view(ce, :, i) if f != e]
+    # weight of the edge g of cell i for the edge f of i (f ≠ g), from the condition at the cell across g
+    outer(g, i, f) = (j = across(i, g); Cn(j, i) * D(i, f) / D(j, g))
+    edges, weights = zeros(Int, 5, ne), zeros(5, ne)
+    for e in 1:ne
+        c1, c2 = ec[1, e], ec[2, e]
+        a, b = others(c1, e), others(c2, e)
+        edges[:, e] .= (e, a..., b...)
+        central(i, j) = (C[1, i] * D(i, e) + Cn(i, j) * D(j, e) - sum(D(i, g) * outer(g, i, e) for g in others(i, e))) /
+                        D(i, e)
+        weights[1, e] = (central(c1, c2) + central(c2, c1)) / 2
+        weights[2:3, e] .= [outer(e, c1, f) for f in a]
+        weights[4:5, e] .= [outer(e, c2, f) for f in b]
+        n = grid.edge_normals[e]
+        weights[:, e] ./= sum(weights[k, e] * dot(n, grid.edge_normals[edges[k, e]]) for k in 1:5)
+    end
+    return edges, weights
 end
 
 ICONNonhydrostatic(dm::Plex, vgrid::VerticalGrid; kwargs...) = ICONNonhydrostatic(TRiSKGrid(dm), vgrid; kwargs...)

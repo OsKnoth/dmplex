@@ -34,6 +34,52 @@ function baroclinic_wave(lon, lat, z; radius=6.37122e6, omega=7.292e-5, perturba
 end
 
 """
+    jablonowski_williamson(lon, lat, z; u0=35, T0=288, up=1, radius, omega) -> (T, p, u, v)
+
+The baroclinic wave of Jablonowski and Williamson (2006) (ICON `jabw`) in
+height coordinates: the steady state in `η = p/p_s`, `p_s = 10⁵ Pa`, with
+`η_v = (η - 0.252) π/2`, the jet `u = u0 cos^{3/2}η_v sin²2φ`, the
+temperature with the stratosphere above `η_t = 0.2` (lapse rate 0.005 K/m,
+`ΔT = 4.8e5 K`) and the balanced geopotential; `η(z)` by Newton from
+`Φ(η) = g z`. The perturbation `up exp(-(10 r)²)` of `u`, `r` the great-circle
+distance on the unit sphere from (20°E, 40°N).
+"""
+function jablonowski_williamson(lon, lat, z; u0=35.0, T0=288.0, up=1.0, radius=6.37122e6, omega=7.292e-5)
+    η0, ηt, Γ, ΔT = 0.252, 0.2, 0.005, 4.8e5
+    e = Rd * Γ / GRAV
+    s, c = sincos(lat)
+    f1 = 10 / 63 - 2 * s^6 * (c^2 + 1 / 3)
+    f2 = (8 / 5 * c^3 * (s^2 + 2 / 3) - π / 4) * radius * omega
+    function state(η)
+        sv, cv = sincos((η - η0) * π / 2)
+        T = T0 * η^e
+        Φ = T0 * GRAV / Γ * (1 - η^e)
+        if η < ηt
+            T += ΔT * (ηt - η)^5
+            Φ -= Rd * ΔT * ((log(η / ηt) + 137 / 60) * ηt^5 - 5ηt^4 * η + 5ηt^3 * η^2 - 10 / 3 * ηt^2 * η^3 +
+                            5 / 4 * ηt * η^4 - η^5 / 5)
+        end
+        Φ += u0 * cv^1.5 * (f1 * u0 * cv^1.5 + f2)
+        T += 3 / 4 * η * π * u0 / Rd * sv * sqrt(cv) * (2u0 * f1 * cv^1.5 + f2)
+        return T, Φ, cv
+    end
+    η = exp(-GRAV * z / (Rd * T0))
+    for _ in 1:100
+        T, Φ, _ = state(η)
+        δ = (Φ - GRAV * z) / (-Rd * T / η)
+        η -= δ
+        abs(δ) < 1e-14 && break
+    end
+    T, _, cv = state(η)
+    u = u0 * cv^1.5 * sin(2lat)^2
+    if up > 0
+        d = acos(clamp(sin(2π / 9) * s + cos(2π / 9) * c * cos(lon - π / 9), -1, 1))
+        u += up * exp(-(10d)^2)
+    end
+    return T, 1e5 * η, u, 0.0
+end
+
+"""
     thermal_wind(lon, lat, z; T0=300, epsilon=0.1, zs=12000, ps=1e5, radius, omega) -> (T, p, u, v)
 
 A steady rotating wind in thermal-wind balance, shallow atmosphere, height
@@ -149,6 +195,9 @@ function balanced_column(profile, v::VerticalGrid, iap_theta::Bool)
     return ρθ ./ (T ./ πk), ρθ
 end
 
+"Column of `profile` in the discrete hydrostatic balance of the model `m`."
+balanced_column(m::CGridNonhydrostatic, profile) = balanced_column(profile, m.vgrid, m.vertical_theta == 2)
+
 """
     initial_state(m::CGridNonhydrostatic, profile)
 
@@ -166,7 +215,7 @@ function initial_state(m::CGridNonhydrostatic, profile)
     ρ, ρθ = zeros(nc, nlev), zeros(nc, nlev)
     for i in 1:nc
         λ, φ = lonlat(g.centers[i])
-        ρ[i, :], ρθ[i, :] = balanced_column(z -> profile(λ, φ, z), v, m.vertical_theta == 2)
+        ρ[i, :], ρθ[i, :] = balanced_column(m, z -> profile(λ, φ, z))
     end
     vn = zeros(ne, nlev)
     for e in 1:ne

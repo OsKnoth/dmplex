@@ -8,7 +8,12 @@ dycores: the vertical grid, the column solver, the C-grid operators and the test
 
 Dry compressible Euler equations, shallow atmosphere, flat ground, on the extruded triangular C grid
 of ICON (Zängl et al. 2015): `vn` at the edges × layers, `w` at the cells (circumcentres) ×
-interfaces, `ρ`, `ρθ` at the cells × layers.
+interfaces, `ρ`, `ρθ` and the prognostic Exner pressure `exner` at the cells × layers. The
+defaults of `ICONNonhydrostatic` are those of ICON's namelists (`nonhydrostatic_nml`,
+`diffusion_nml`, `dynamics_nml`), and the model uses ICON's constants (`mo_physical_constants`:
+`ICON_RD = 287.04`, `ICON_CPD = 1004.64`, `ICON_GRAV = 9.80665`, radius 6.371229e6 m,
+Ω = 7.29212e-5 s⁻¹); the analytic test cases keep those of dmplex (Rd = 287, g = 9.80616), as
+the DCMIP and JW formulas do inside ICON.
 
 **Velocity tendencies** (`mo_velocity_advection`), per layer with the operators of
 `ICONShallowWater`:
@@ -17,28 +22,45 @@ interfaces, `ρ`, `ρθ` at the cells × layers.
   kinetic energy with the bilinear weights `e_bln_c_s`;
 - `∂vn/∂t = (f + ζ_e) vt − [K_e(a₁ − a₂) + a₂K_r − a₁K_l] − w_e ∂vn/∂z`, the kinetic-energy gradient
   of ICON (`coeff_gradekin`), ζ_e the mean of the two vertex vorticities, `vn` at the interfaces by
-  `wgtfac_e`;
-- `∂w/∂t = −Σ_e b_{i,e}(vn ∂w/∂n + vt ∂w/∂t)_e − w ∂w/∂z`, `w` at the vertices by area weights.
+  `wgtfac_e`, at the ground by the quadratic extrapolation `wgtfacq_e`;
+- `∂w/∂t = −Σ_e b_{i,e}(vn ∂w/∂n + vt ∂w/∂t)_e − w ∂w/∂z` with ICON's second-order `∂w/∂z` on
+  unequal layers (`coeff1_dwdz`, `coeff2_dwdz`), `w` at the vertices by area weights.
 
 **Fast waves** (`solve_nh`):
 
-- horizontal pressure gradient `−c_p θ_e ∂π/∂n`;
-- mass flux `ρ_e vn` and `ρθ` flux `ρ_e θ_e vn`, with `ρ_e`, `θ_e` from Miura's second-order upwind
+- horizontal pressure gradient `−c_p θ_e ∂π/∂n` of the Exner pressure extrapolated in time;
+- mass flux `ρ_e v̄` and `ρθ` flux `ρ_e θ_e v̄`, with `ρ_e`, `θ_e` from Miura's second-order upwind
   reconstruction (upwind cell plus its Green–Gauss gradient at the backtrajectory point
   `x_e − (Δt/2)(vn n + vt t)`);
-- vertically implicit per column (off-centring 0.65 = 0.5 + `vwind_offctr`), linearized Exner
-  pressure: the column solver shared with the other dycores, with ρ and θ at the interfaces from
-  ICON (below).
+- `v̄` is ICON's averaged normal velocity (`e_flx_avg`, `z_vn_avg`, `flux_average`): five weights
+  per edge (the edge and the other two edges of each of its cells) such that the divergence of
+  `v̄` is the cell average `C` of the divergence of `vn`. `C` (`c_bln_avg`) gives the cell
+  `divavg_cntrwgt = 0.5` and its three neighbours the weights that reproduce linear fields,
+  iteratively corrected to conserve the area integral. `D v̄ = C D vn` fixes the outer weights;
+  the central one follows in each of the two cells, and ICON takes the mean; finally the weights
+  are scaled to reproduce a constant vector. It damps the grid-scale divergence of the triangles
+  (that of a random field to 41 % on R2B4) and keeps smooth winds (solid-body rotation to 1e-4).
+  Without it the model was unstable at ICON's time steps (see below);
+- vertically implicit per column, as `solve_nh`: the Exner pressure linearized around `π^n`,
+  `Δπ = −z_beta Δ_z(θ_j ρ_j w_j)` per layer with `z_beta = Δt R π^n/(c_v (ρθ)^n Δz)`; the vertical
+  pressure gradient split around ICON's reference atmosphere (`h_scal_bg = 10 km`,
+  `t0sl_bg = 288.15 K`, `del_t_bg = 75 K`), `(1 − β) θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z` explicit with
+  the analytic `∂π_ref/∂z = −g/(c_p θ_ref)` and `β θ_j ∂π'/∂z` implicit, `β = 0.5 + vwind_offctr`;
+  ρ and θ linearly interpolated to the interfaces (`wgtfac_c`); then
+  `θ = (ρθ)^n((π/π^n − 1) c_v/R + 1)/ρ`. Klemp's Rayleigh damping of w above `damping_height`
+  (`rayleigh_type = 2`, `rayleigh_w = rayleigh_coeff (1 − tanh(3.8 (z_top − z)/(z_top − z_damp)))`)
+  after the solve.
 
 **Time stepping** (`step!`), the two-time-level predictor–corrector of ICON (`solve_nh`,
 `istep = 1, 2`), the only time stepper of this dycore:
 
 1. *Predictor:* velocity tendencies at n: with the default `itime_scheme = 4` those of the last
-   corrector (computed at the predictor state of the previous step; recomputed only in the first
-   step), with `itime_scheme = 6` recomputed every step; pressure gradient of the Exner pressure
+   corrector (computed at the predictor state of the previous step), all recomputed in the first
+   step and that of vn in the first of every `ndyn_substeps` steps (ICON `l_recompute`); with
+   `itime_scheme = 6` recomputed every step; pressure gradient of the Exner pressure
    extrapolated in time, `π^n + exner_expol (π^n − π^{n−1})` (`exner_expol = 1/3`); `ρ_e`, `θ_e`
    at n; `vn* = vn^n + Δt (T^n − c_p θ_e ∂π/∂n)`; fluxes of `vn*` and the column solve with ρ, θ of
-   n linearly interpolated to the interfaces give `w*, ρ*, ρθ*`.
+   n give `w*, ρ*, π*, ρθ*`.
 2. *Corrector:* velocity tendencies at the predictor state, weighted 0.25 / 0.75
    (`veladv_offctr = 0.25`); the same pressure gradient and `ρ_e`, `θ_e`;
    `vn^{n+1} = vn^n + Δt (0.25 T^n + 0.75 T* − c_p θ_e ∂π/∂n)` plus the divergence damping of the
@@ -54,9 +76,9 @@ profile `k₄(z)`: `divdamp_fac = 0.0025` up to 32.5 km, linear to 0.004 at 40 k
 `divdamp_order = 2` or `24` adds the second-order term `divdamp_fac_o2 Ā ∇D` (ICON uses it only in
 the spin-up of real-data runs; in test cases `divdamp_fac_o2 = 0`).
 
-**Diffusion** (`mo_nh_diffusion`, `hdiff_order = 5`, ICON defaults; implemented but not yet
-the default, see below), after every `ndyn_substeps = 5`
-dynamics steps over the advective time step `5 Δt`, as ICON calls it after the dynamics substeps:
+**Diffusion** (`mo_nh_diffusion`, ICON's default `hdiff_order = 5`), after every
+`ndyn_substeps = 5` dynamics steps over the advective time step `Δt_a = 5 Δt`, as ICON calls it
+after the dynamics substeps:
 
 - velocity vectors at the vertices by vector RBF (Gaussian kernel, `rbf_vec_scale_v = 0.5`), the
   edge normal and tangent projected onto the vertex planes;
@@ -65,42 +87,77 @@ dynamics steps over the advective time step `5 Δt`, as ICON calls it after the 
   limited by `1/8 − 4k`, with the height profile `s(z)` of `hdiff_smag_fac…fac4` (0.015 below 32.5
   km);
 - `vn += A_e (K ∇²vn − A_e k ∇⁴vn)` with the background coefficient
-  `k = min(1/128, ndyn_substeps/(3·64·hdiff_efdt_ratio))`, `hdiff_efdt_ratio = 36`;
+  `k = min(1/128, ndyn_substeps/(3·64·hdiff_efdt_ratio))`, `hdiff_efdt_ratio = 36`
+  (`itype_vn_diffu = 1`);
 - `w −= k_w A² ∇⁴w`, `k_w = min(1/48, ndyn_substeps/(36·hdiff_w_efdt_ratio))`, plus ICON's `∇²w`
-  above `damping_height`, `n2w ≤ 1/12`. For the highest mode, a checkerboard of `A∇²` with
-  eigenvalue −ρ, one call multiplies w by `1 − k_w ρ² − n2w ρ`. ICON's `k_w = 5/540` makes
-  `k_w ρ² = 1` on equilateral triangles (ρ = 10.4): the mode is removed without overshoot. On
-  `create_spherical_mesh` ρ ≈ 11.45 and the factor is −0.2 to −0.74 near the top; a negative
-  factor flips w against ρ and θ every call, and this drove the checkerboard of w up within a
-  day (R2B4, w only: NaN after 365 steps). So `k_w ≤ 1/ρ²` and `n2w ≤ (1 − k_w ρ²)/ρ`, with the
-  Gershgorin bound `ρ = 2 max Σ l/d`; on R2B4 `k_w` drops from 0.0093 to 0.0073 and the `∇²w`
-  term vanishes;
+  between the lowest interface above `damping_height` and the top;
 - `θ += A ∇⋅(K ∇θ)` at constant ρ, with `K` raised over grid-point cold pools in the lowest two
-  layers.
+  layers, and the Exner pressure updated with it, `π ← π (1 + R/c_v (θ_new/θ − 1))`.
 
-`hdiff_order = −1`, the default for now, switches it off. `hyperdiffusion = ν₄` adds the former
-`−ν₄ L(L(vn))` with the C-grid vector Laplacian to every dynamics step; the example uses it.
-
-**Open problem:** with ICON's diffusion the baroclinic wave on R2B4 (dt 150 s) blows up by day 2,
-also with the jww settings (`hdiff_efdt_ratio = 10`, `hdiff_smag_fac = 0.15`). The growing mode is
-grid scale (`A|∇²w|/|w| ≈ 4–6`) and starts at 26–30° latitude in both hemispheres, around the
-pentagons of the icosahedron, in the mid troposphere; without any diffusion a slower mode grows
-near the ground under the jet. `divdamp_type = 2` stabilizes the w-only diffusion, `divdamp_type
-= 32`, `itime_scheme = 6`, `ndyn_substeps = 1` or a smaller `k_w` do not. Likely causes, not yet
-separated: the irregular cells around the pentagons (ICON's grids are spring optimized), and ρθ
-instead of ICON's prognostic Exner pressure and θ_v.
+`hdiff_order = −1` switches it off. `hyperdiffusion = ν₄` adds `−ν₄ L(L(vn))` with the C-grid
+vector Laplacian to every dynamics step.
 
 The quadrilateral stencils (deformation, `∇²vn`) are exact only where the quadrilateral is a
 rhombus. On the icosahedral meshes of `create_spherical_mesh`, which are not spring optimized as
 ICON's grids, a solid-body rotation shows a deformation of up to 0.17/a at the most distorted edges
-and below 0.01/a where the quadrilateral is a rhombus (tested).
+and below 0.01/a where the quadrilateral is a rhombus (tested). The ICON grid files
+(`icon_grid_00xx_R02Byy_G.nc`) are read with `read_grid` and give exactly ICON's geometry.
 
-**Differences to ICON:** ρθ is prognostic and π follows from the equation of state (ICON carries
-`exner` and `θ_v` and updates `exner` with the linearized equation); no reference state (with flat
-ground its horizontal gradient vanishes); no tracers or physics (`ndyn_substeps` only sets when the
-diffusion is called); no nest boundaries; serial.
+**Differences to ICON:** flat ground only (ICON's `jabw` test has the JW orography with
+terrain-following levels; `dcmip_bw_11` is flat); the vn diffusion `itype_vn_diffu = 1` (ICON's
+jabw10d uses 2); no extra CFL diffusion (`lextra_diffu`); no tracers or physics (`ndyn_substeps`
+only sets when the diffusion is called); no nest boundaries; serial.
 
-## Results
+## Comparison with Fortran ICON
+
+Fortran ICON 2026.10 (GPU build on Levante) with the namelist of its jabw10d experiment on the
+flat DCMIP 2016 baroclinic wave `dcmip_bw_11` (R2B5 `icon_grid_0051_R02B05_G.nc`, 64 SLEVE levels
+to 35 km, `icon_vertical_grid`), with the separate vn tendencies `ddt_vn_*` in the output; our
+model started from ICON's state (`read_icon_state`, cells and edges matched by position).
+
+One step from ICON's state, the difference to ICON relative to ICON's own change in the step:
+
+| | dtime 120 s, `ndyn_substeps = 1` | dtime 576 s, 5 substeps |
+|---|---|---|
+| w | 0.1 % | 0.1 % |
+| ρ | 0.08 % | 0.4 % |
+| θ_v | 0.1 % | 0.6 % |
+| exner | 0.16 % | 0.9 % |
+| vn | 1.6 % | 12 % (the vn diffusion, `itype_vn_diffu`) |
+
+The tendencies of vn on ICON's state: pressure gradient to 3e-5, advection and Coriolis to 0.9 %
+(ICON's mixes in the corrector), divergence damping to 5 % of ICON's `ddt_vn_*`. Two
+differences to ICON were found this way and removed: the flux averaging `e_flx_avg`, missing
+before, and the constants. ICON's DCMIP initial state is hydrostatic with the constants of the
+DCMIP routine (Rd = 287, g = 9.80616); with ICON's g = 9.80665 it keeps a vertical force of
+0.87e-3 m/s², with g = 9.80616 one of 1.36e-3 m/s², which made our w 1.5 times ICON's.
+
+Ten days of `dcmip_bw_11` with the jabw10d namelist (R2B5, 64 levels, dtime 576 s), our model
+started from ICON's initial state, `examples/icon_jabw.jl --init --compare` on one A100:
+
+| | Fortran ICON | ICONNonhydrostatic |
+|---|---|---|
+| minimum p_s at day 10 | 936.86 hPa | 936.84 hPa |
+| max \|w\| at day 10 | 0.077 m/s | 0.078 m/s |
+| p_s difference at day 10 | | rms 0.10 hPa, max 1.84 hPa |
+| time for 10 days, 1 A100 | 81.2 s (time loop 79.6 s, 10.6 ms per dynamics step) | 112 s (14.9 ms per dynamics step) |
+| time for 10 days, 4 A100 | 33.5 s | |
+
+Fortran ICON on 1 A100 (one compute and one I/O process, `exp.dcmip10d_1gpu.run`) gives the same
+result as on 4 A100, bit for bit.
+
+The minimum surface pressure of our model by day: 999.67, 999.58, 999.41, 999.00, 998.19,
+996.48, 992.74, 983.99, 961.83, 936.84 hPa (days 1 to 10).
+
+Without the flux averaging the model was unstable at ICON's time steps: on R2B4 (dtime 1152 s)
+within 50–80 steps, at 480 s after 800 steps with the w diffusion and the 3D divergence damping;
+more divergence damping only delayed it. With it both run stably (600 and 1500 steps, max |w|
+below 1e-3 m/s).
+
+## Earlier results
+
+With the scheme before ICON's numerics (ρθ prognostic, the column solver of MPAS-Gassmann, no flux
+averaging), the constants of dmplex and `create_spherical_mesh`:
 
 Rest state at rest (w ~ 1e-14), steady jet and thermal wind steady (triangles 4: max |w| 1.7e-3 and
 8e-4 m/s over 2 and 3 days), mass to round-off (tested). Time step about ICON's dynamics substep:
@@ -136,4 +193,7 @@ per simulated day it is slower because its time step is four times smaller.
 julia --project examples/baroclinic_wave.jl 5 10 150 30 --icon
 sbatch --account=bb1143 examples/gpu/dycores.sbatch      # ICON and TRiSK on one A100
 julia --project examples/thermal_wind.jl icon 4 5 300
+# ICON's jabw10d settings; from a Fortran ICON state and compared with it at the end
+julia --project examples/icon_jabw.jl grid/icon_grid_0013_R02B04_G.nc 10 1152 64 35000
+sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch icon_grid_0051_R02B05_G.nc --init=icon.nc --compare=icon.nc
 ```
