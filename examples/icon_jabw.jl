@@ -5,7 +5,7 @@
 # comparison with Fortran ICON.
 #
 #   julia --project examples/icon_jabw.jl grid.nc [days] [dtime] [nlev] [top_height] [--gpu]
-#         [--init=icon.nc] [--compare=icon.nc]
+#         [--init=icon.nc] [--compare=icon.nc] [--timer]
 #
 # Without --init the Jablonowski–Williamson state on flat ground (ICON's `jabw` has the JW orography,
 # which the model does not have). --init=icon.nc starts from the first time of an ICON output file
@@ -13,7 +13,8 @@
 # `dcmip_bw_11`; --compare=icon.nc compares the final state with the last time of an ICON output file.
 # dtime is ICON's advective time step, the dynamics steps are dtime/5. Prints the minimum surface
 # pressure, max |w| and the time per step once a day and writes the surface pressure (Pa) and the
-# temperature of the lowest layer (K) to icon_jabw_<grid>.vtkhdf.
+# temperature of the lowest layer (K) to icon_jabw_<grid>.vtkhdf. --timer (with TimerOutputs in the
+# environment) prints the time in ICON's sections (`section_timer!`) after the first advective step.
 using KernelAbstractions
 using Printf
 using Statistics
@@ -23,6 +24,10 @@ using NCDatasets: NCDataset
 const USE_GPU = "--gpu" in ARGS
 if USE_GPU
     using CUDA
+end
+const USE_TIMER = "--timer" in ARGS
+if USE_TIMER
+    using TimerOutputs
 end
 
 const NH = dmplex.Nonhydrostatic
@@ -61,11 +66,14 @@ function main(args)
         println("initial state from ", init)
     end
     ys = zero_state(m)
+    timer = USE_TIMER ? TimerOutput() : nothing
+    section_timer!(timer)
     nsteps = round(Int, days * 86400 / dt)
     perday = round(Int, 86400 / dt)
     t0 = time()
     for n in 1:nsteps
-        step!(m, y, dt, ys)
+        NH.section(() -> step!(m, y, dt, ys), m, "integrate_nh")
+        n == nsub && timer !== nothing && reset_timer!(timer)   # without the compilation
         if n % perday == 0 || n == nsteps
             ps, _ = surface(m, y)
             @printf("day %5.2f  p_s min %7.2f hPa  max|w| %.3e  %.1f ms per step\n", n * dt / 86400,
@@ -73,6 +81,11 @@ function main(args)
             flush(stdout)
             any(isnan, ps) && break
         end
+    end
+    if timer !== nothing
+        TimerOutputs.complement!(timer)
+        show(timer; title="ICONNonhydrostatic, dynamics steps $(nsub + 1) to $nsteps")
+        println()
     end
     ps, T = surface(m, y)
     name = "icon_jabw_$(splitext(basename(grid))[1]).vtkhdf"

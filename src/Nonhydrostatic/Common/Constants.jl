@@ -32,3 +32,20 @@ function launch!(m, kernel, ndrange, args...)   # a model with a `backend`
     KernelAbstractions.synchronize(m.backend)
     return nothing
 end
+
+# The timer of the sections of a step (`section_timer!`), `nothing` when they are not timed
+const SECTION_TIMER = Ref{Any}(nothing)
+
+"""
+    section_timer!(t)
+
+Times the sections of the steps of the models (ICONNonhydrostatic: ICON's timers
+nh_solve, veltend, cellcomp, vnupd, edgecomp, vimpl, nh_hdiff) in the
+`TimerOutput` `t` (with `using TimerOutputs`; the backend synchronized at the
+start and end of each section), or not with `nothing` (the default).
+"""
+section_timer!(t) = (SECTION_TIMER[] = t; nothing)
+
+"`f()` as the section `name` of model `m`; timed by the extension for TimerOutputs."
+section(f, m, name) = section(f, SECTION_TIMER[], m, name)
+section(f, ::Nothing, m, name) = f()

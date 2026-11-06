@@ -204,6 +204,7 @@ In the last version, on hexagon 7, `vertical_solve` takes 5.1 ms, `vn_tendency` 
 ```sh
 julia --project examples/icon_jabw.jl grid/icon_grid_0013_R02B04_G.nc 10 1152 64 35000
 sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch GRID.nc --init=icon.nc --compare=icon.nc
+sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch GRID.nc --timer   # time per section (TimerOutputs)
 ```
 
 Without `--init` the Jablonowski–Williamson state on flat ground (ICON's `jabw` has the JW

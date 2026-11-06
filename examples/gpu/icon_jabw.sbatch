@@ -1,7 +1,7 @@
 #!/bin/bash
 # ICON's jabw experiment (jabw10d: R2B5, 64 levels, dtime 576 s) with ICONNonhydrostatic on one A100 of
 # Levante (DKRZ), for the comparison with Fortran ICON. Submit from the repository root:
-#   sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch [grid file] [--init=icon.nc] [--compare=icon.nc]
+#   sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch [grid file] [--init=icon.nc] [--compare=icon.nc] [--timer]
 # (see examples/icon_jabw.jl; --init/--compare with ICON's output of the flat dcmip_bw_11 wave)
 # Setup (once): see docs/levante.md.
 #SBATCH --job-name=dmplex-jabw

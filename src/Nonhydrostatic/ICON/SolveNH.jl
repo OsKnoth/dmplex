@@ -201,14 +201,18 @@ predictor state `ys` (`corrector`).
 function fast_waves!(m::ICONNonhydrostatic, y, πn, y0, ys, tw, dt, corrector::Bool)
     w, v, nlev = m.work, m.vertical, num_layers(m.vgrid)
     nc, ne = num_cells(m.grid), num_edges(m.grid)
-    launch!(m, icon_edge_average_kernel!, (ne, nlev), w.va, y.vn, m.flux_edges, m.flux_weights)
-    launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, w.va, w.ρe, w.θe)
-    launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
-            m.divergence, dt)
-    a0, as = corrector ? m.rth_weights : (1.0, 0.0)
-    launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, w.θp, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, v.θref, m.dzh, m.wlow,
-            a0, as, corrector ? dt / 2 : 0.0, nlev)
-    launch!(m, icon_vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, πn, w.cprime, w.dprime, y0.w, y0.ρ, y0.ρθ, w.π0,
-            w.θi, w.θp, w.ρi, tw, w.ρexpl, w.ρθexpl, v.πref, v.dπref, m.dz, m.dzh, m.rayleigh, dt, m.beta, nlev)
+    section(m, "edgecomp") do
+        launch!(m, icon_edge_average_kernel!, (ne, nlev), w.va, y.vn, m.flux_edges, m.flux_weights)
+        launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, w.va, w.ρe, w.θe)
+    end
+    section(m, "vimpl") do
+        launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
+                m.divergence, dt)
+        a0, as = corrector ? m.rth_weights : (1.0, 0.0)
+        launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, w.θp, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, v.θref, m.dzh, m.wlow,
+                a0, as, corrector ? dt / 2 : 0.0, nlev)
+        launch!(m, icon_vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, πn, w.cprime, w.dprime, y0.w, y0.ρ, y0.ρθ, w.π0,
+                w.θi, w.θp, w.ρi, tw, w.ρexpl, w.ρθexpl, v.πref, v.dπref, m.dz, m.dzh, m.rayleigh, dt, m.beta, nlev)
+    end
     return y
 end

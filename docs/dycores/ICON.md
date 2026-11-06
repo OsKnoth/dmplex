@@ -140,11 +140,40 @@ started from ICON's initial state, `examples/icon_jabw.jl --init --compare` on o
 | minimum p_s at day 10 | 936.86 hPa | 936.84 hPa |
 | max \|w\| at day 10 | 0.077 m/s | 0.078 m/s |
 | p_s difference at day 10 | | rms 0.10 hPa, max 1.84 hPa |
-| time for 10 days, 1 A100 | 81.2 s (time loop 79.6 s, 10.6 ms per dynamics step) | 112 s (14.9 ms per dynamics step) |
+| time for 10 days, 1 A100 | 81.2 s (time loop 79.6 s, 10.6 ms per dynamics step) | 112 s (14.9 ms per dynamics step with the compilation, 13.5 ms without) |
 | time for 10 days, 4 A100 | 33.5 s | |
 
 Fortran ICON on 1 A100 (one compute and one I/O process, `exp.dcmip10d_1gpu.run`) gives the same
 result as on 4 A100, bit for bit.
+
+### Time per section
+
+Both models timed in ICON's sections of `solve_nh` on one A100, with the GPU synchronized at
+the start and end of each section: Fortran ICON with `timers_level = 11` (`!$ACC WAIT` in the
+timers, 1.6 % slower than with 10), ours with `--timer` (`section_timer!`, TimerOutputs), after
+the first advective step. The sections are grouped as in ICON: veltend the velocity tendencies;
+cellcomp θ, π and the extrapolated π; vnupd ρ_e, θ_e, the pressure gradient, the vn update and
+the divergence damping; edgecomp the averaged vn and the fluxes; vimpl the flux divergence and
+the column solve (in ICON the boundaries of cellcomp, vnupd and edgecomp lie somewhat
+differently: the interface values are in cellcomp, part of the divergence damping in edgecomp).
+Time per dynamics step, 10 days of the R2B5 wave (7500 steps):
+
+| section | Fortran ICON | ICONNonhydrostatic |
+|---|---|---|
+| veltend | 1.84 ms | 1.57 ms |
+| cellcomp | 1.14 ms | 0.39 ms |
+| vnupd | 1.99 ms | 2.15 ms |
+| edgecomp | 1.51 ms | 0.76 ms |
+| vimpl | 3.40 ms | 6.99 ms (column solve 5.98, divergence 0.55, interfaces 0.48) |
+| rest of nh_solve | 0.17 ms | 0.62 ms (copies of the state and tendencies) |
+| nh_hdiff | 0.48 ms | 0.99 ms |
+| step | 10.8 ms | 13.5 ms |
+
+The difference is the column solve, `icon_vertical_solve_kernel!` with one thread per
+column (20480 threads on R2B5) that does all of the column sequentially: the explicit ρ and π,
+the coefficients, the Thomas sweeps, the update of ρ, π, ρθ. ICON computes all but the
+sweeps in kernels over cells × levels. The workgroup size is not the cause (32, 64, 128 instead
+of the default: 3.96 ms per call instead of 2.99 ms).
 
 The minimum surface pressure of our model by day: 999.67, 999.58, 999.41, 999.00, 998.19,
 996.48, 992.74, 983.99, 961.83, 936.84 hPa (days 1 to 10).
@@ -196,4 +225,5 @@ julia --project examples/thermal_wind.jl icon 4 5 300
 # ICON's jabw10d settings; from a Fortran ICON state and compared with it at the end
 julia --project examples/icon_jabw.jl grid/icon_grid_0013_R02B04_G.nc 10 1152 64 35000
 sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch icon_grid_0051_R02B05_G.nc --init=icon.nc --compare=icon.nc
+sbatch --account=bb1143 examples/gpu/icon_jabw.sbatch icon_grid_0051_R02B05_G.nc --timer   # time per section
 ```

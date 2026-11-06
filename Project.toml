@@ -18,14 +18,17 @@ VTKHDF = "45d8cf6f-ab5f-45bc-ab92-77e36ab192e6"
 [weakdeps]
 ADIOS2 = "e0ce9d3b-0dbd-416f-8264-ccca772f60ec"
 CUDSS = "45b445bb-4962-46a0-9369-b4df9d0f772e"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
 [extensions]
 dmplexADIOS2Ext = "ADIOS2"
 dmplexCUDSSExt = "CUDSS"
+dmplexTimerOutputsExt = "TimerOutputs"
 
 [compat]
 ADIOS2 = "1.5"
 CUDSS = "0.8"
+TimerOutputs = "0.5"
 Atomix = "1.6.0"
 HDF5 = "0.17.4"
 KernelAbstractions = "0.10.0"
