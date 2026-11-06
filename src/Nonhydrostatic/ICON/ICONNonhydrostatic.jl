@@ -252,8 +252,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
             tvn_now=z(ne, nlev), tvn_new=z(ne, nlev), tw_now=z(nc, nlev + 1), tw_new=z(nc, nlev + 1),
             tw=z(nc, nlev + 1), grad=ntuple(_ -> z(nc, nlev), 6), ρe=z(ne, nlev), θe=z(ne, nlev),
             pg=z(ne, nlev), va=z(ne, nlev), F=z(ne, nlev), Fθ=z(ne, nlev), hρθ=z(nc, nlev), ρexpl=z(nc, nlev), ρθexpl=z(nc, nlev),
-            θi=z(nc, nlev + 1), θm=z(nc, nlev), band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 2),
-            cprime=z(nc, nlev + 1), dprime=z(nc, nlev + 1), wmass=dev(vertical_mass(vgrid, :lumped)),
+            θi=z(nc, nlev + 1), zβ=z(nc, nlev), ρx=z(nc, nlev), πx=z(nc, nlev), lower=z(nc, nlev + 1),
+            diag=z(nc, nlev + 1), cprime=z(nc, nlev + 1), dprime=z(nc, nlev + 1), wmass=dev(vertical_mass(vgrid, :lumped)),
             ρi=z(nc, nlev + 1), θp=z(nc, nlev + 1), π0=z(nc, nlev), δ=z(nc, nlev), δ2=z(nc, nlev), G=z(ne, nlev),
             ζ=z(nv, nlev), Lvn=z(ne, nlev), uvert=ntuple(_ -> z(nv, nlev), 3), uvert2=ntuple(_ -> z(nv, nlev), 3),
             kh=z(ne, nlev), n2e=z(ne, nlev), Lw=z(nc, nlev + 1), substep=Ref(0),
@@ -331,7 +331,7 @@ end
 Column of `profile(z) -> (T, p, ...)` in ICON's discrete hydrostatic balance
 (`hydro_adjust`): `T` at the layer centres and `π` of the lowest layer kept,
 above `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z = 0` at every interface with the reference
-state of the vertical pressure gradient of `icon_vertical_solve_kernel!`.
+state of the vertical pressure gradient of the column solve (`icon_column_matrix_kernel!`).
 """
 function balanced_column(m::ICONNonhydrostatic, profile)
     v, nlev, κ = m.vgrid, num_layers(m.vgrid), ICON_RD / ICON_CPD

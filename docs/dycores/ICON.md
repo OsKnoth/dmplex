@@ -140,7 +140,7 @@ started from ICON's initial state, `examples/icon_jabw.jl --init --compare` on o
 | minimum p_s at day 10 | 936.86 hPa | 936.84 hPa |
 | max \|w\| at day 10 | 0.077 m/s | 0.078 m/s |
 | p_s difference at day 10 | | rms 0.10 hPa, max 1.84 hPa |
-| time for 10 days, 1 A100 | 81.2 s (time loop 79.6 s, 10.6 ms per dynamics step) | 112 s (14.9 ms per dynamics step with the compilation, 13.5 ms without) |
+| time for 10 days, 1 A100 | 81.2 s (time loop 79.6 s, 10.6 ms per dynamics step) | 89 s (11.9 ms per dynamics step with the compilation, 10.0 ms without) |
 | time for 10 days, 4 A100 | 33.5 s | |
 
 Fortran ICON on 1 A100 (one compute and one I/O process, `exp.dcmip10d_1gpu.run`) gives the same
@@ -158,22 +158,25 @@ the column solve (in ICON the boundaries of cellcomp, vnupd and edgecomp lie som
 differently: the interface values are in cellcomp, part of the divergence damping in edgecomp).
 Time per dynamics step, 10 days of the R2B5 wave (7500 steps):
 
-| section | Fortran ICON | ICONNonhydrostatic |
-|---|---|---|
-| veltend | 1.84 ms | 1.57 ms |
-| cellcomp | 1.14 ms | 0.39 ms |
-| vnupd | 1.99 ms | 2.15 ms |
-| edgecomp | 1.51 ms | 0.76 ms |
-| vimpl | 3.40 ms | 6.99 ms (column solve 5.98, divergence 0.55, interfaces 0.48) |
-| rest of nh_solve | 0.17 ms | 0.62 ms (copies of the state and tendencies) |
-| nh_hdiff | 0.48 ms | 0.99 ms |
-| step | 10.8 ms | 13.5 ms |
+| section | Fortran ICON | ICONNonhydrostatic | before: one kernel per column |
+|---|---|---|---|
+| veltend | 1.84 ms | 1.55 ms | 1.57 ms |
+| cellcomp | 1.14 ms | 0.38 ms | 0.39 ms |
+| vnupd | 1.99 ms | 2.15 ms | 2.15 ms |
+| edgecomp | 1.51 ms | 0.75 ms | 0.76 ms |
+| vimpl | 3.40 ms | 3.55 ms | 6.99 ms (column solve 5.98, divergence 0.55, interfaces 0.48) |
+| rest of nh_solve | 0.17 ms | 0.63 ms (copies of the state and tendencies) | 0.62 ms |
+| nh_hdiff | 0.48 ms | 0.98 ms | 0.99 ms |
+| step | 10.8 ms | 10.0 ms | 13.5 ms |
 
-The difference is the column solve, `icon_vertical_solve_kernel!` with one thread per
-column (20480 threads on R2B5) that does all of the column sequentially: the explicit ρ and π,
-the coefficients, the Thomas sweeps, the update of ρ, π, ρθ. ICON computes all but the
-sweeps in kernels over cells × levels. The workgroup size is not the cause (32, 64, 128 instead
-of the default: 3.96 ms per call instead of 2.99 ms).
+The column solve was first one kernel with one thread per column (20480 threads on R2B5) that
+did all of the column sequentially: the explicit ρ and π, the coefficients, the Thomas sweeps,
+the update of ρ, π, ρθ; it took 6 ms of 13.5 ms per step. The workgroup size was not the cause
+(32, 64, 128 instead of the default: 3.96 ms per call instead of 2.99 ms). As in ICON all but
+the sweeps now run over cells × levels (`icon_column_explicit_kernel!`,
+`icon_column_matrix_kernel!`, `icon_column_sweep_kernel!`, `icon_column_update_kernel!`), the
+same arithmetic (after 100 steps the state differs by 1e-13 relative, the contraction to FMAs
+of the GPU compiler). What is left against ICON: the diffusion (twice ICON's) and the copies.
 
 The minimum surface pressure of our model by day: 999.67, 999.58, 999.41, 999.00, 998.19,
 996.48, 992.74, 983.99, 961.83, 936.84 hPa (days 1 to 10).

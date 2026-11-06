@@ -104,62 +104,89 @@ the linear interpolation of `n` (predictor). `θp` is the interpolated
     end
 end
 
-"""
-ICON's vertically implicit step of one column (`solve_nh`): `w`, `ρ`, the
-Exner pressure `πn` and `ρθ` at `t + τ` from the state of `n` (`w0`, `ρ0`,
-`ρθ0`, the prognostic Exner pressure `π0`), the explicit horizontal parts
-`ρexpl`, `ρθexpl`, the advection `tw` of `w` and `ρ`, `θ` at the interfaces
-(`ρi`, `θi`, `θp = θ - θ_ref`). The vertical pressure gradient is split
-around the reference state, `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z` with the
-analytic `∂π_ref/∂z = -g/(c_p θ_ref)` (`dπref`) that balances gravity, the
-first part off-centred with `β`; `π` is linearized around `π0`,
-`π = π0 + (R/c_v) π0/ρθ0 Δ(ρθ)`, and `ρθ` follows from it, so that
-`ρθ` is conserved in flux form. Klemp's damping of `w`, `w/(1 + τ r_j)`, after the solve.
-"""
-@kernel function icon_vertical_solve_kernel!(w, ρ, ρθ, πn, cp_, dp_, @Const(w0), @Const(ρ0), @Const(ρθ0), @Const(π0),
-                                             @Const(θi), @Const(θp), @Const(ρi), @Const(tw), @Const(ρexpl),
-                                             @Const(ρθexpl), @Const(πref), @Const(dπref), @Const(dz), @Const(dzh),
-                                             @Const(rayleigh), τ, β, nlev)
+# ICON's vertically implicit step (`solve_nh`): `w`, `ρ`, the Exner pressure `πn` and `ρθ` at `t + τ`
+# from the state of `n` (`w0`, `ρ0`, `ρθ0`, the prognostic Exner pressure `π0`), the explicit horizontal
+# parts `ρexpl`, `ρθexpl`, the advection `tw` of `w` and `ρ`, `θ` at the interfaces (`ρi`, `θi`,
+# `θp = θ - θ_ref`). The vertical pressure gradient is split around the reference state,
+# `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z` with the analytic `∂π_ref/∂z = -g/(c_p θ_ref)` (`dπref`) that balances
+# gravity, the first part off-centred with `β`; `π` is linearized around `π0`,
+# `π = π0 + (R/c_v) π0/ρθ0 Δ(ρθ)`, and `ρθ` follows from it, so that `ρθ` is conserved in flux form.
+# Klemp's damping of `w`, `w/(1 + τ r_j)`, after the solve. As in ICON all but the Thomas sweeps run
+# over cells × levels: the explicit parts of the layers, the tridiagonal system of the interfaces, the
+# sweeps of the columns, the update of the layers.
+
+"Explicit mass flux `(1 - β) ρ_j w0_j` at interface `j` (zero at the ground and the lid)."
+@inline icon_explicit_flux(ρi, w0, β, i, j, nlev) = 2 <= j <= nlev ? ρi[i, j] * (1 - β) * w0[i, j] : 0.0
+
+"`α = β θ_j ρ_j` of the implicit mass flux at interface `j` (zero at the ground and the lid)."
+@inline icon_implicit_weight(θi, ρi, β, i, j, nlev) = 2 <= j <= nlev ? β * θi[i, j] * ρi[i, j] : 0.0
+
+"ICON's `z_beta` of layer `k` (`zβ`), its explicit `ρ` (`ρx`) and `π'` (`πx`)."
+@kernel function icon_column_explicit_kernel!(zβ, ρx, πx, @Const(w0), @Const(ρθ0), @Const(π0), @Const(θi),
+                                              @Const(ρi), @Const(ρexpl), @Const(ρθexpl), @Const(πref), @Const(dz),
+                                              τ, β, nlev)
+    i, k = @index(Global, NTuple)
+    @inbounds begin
+        Ml, Mu = icon_explicit_flux(ρi, w0, β, i, k, nlev), icon_explicit_flux(ρi, w0, β, i, k + 1, nlev)
+        b = τ * ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k] * dz[k])
+        zβ[i, k] = b
+        ρx[i, k] = ρexpl[i, k] - τ / dz[k] * (Mu - Ml)
+        πx[i, k] = π0[i, k] - πref[k] + ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k]) * (ρθexpl[i, k] - ρθ0[i, k]) -
+                   b * (θi[i, k + 1] * Mu - θi[i, k] * Ml)
+    end
+end
+
+"The tridiagonal system for `w` at interface `j`: `lower`, `diag`, the upper diagonal in `cp_`, the right side in `dp_`."
+@kernel function icon_column_matrix_kernel!(lower, diag, cp_, dp_, @Const(zβ), @Const(πx), @Const(w0), @Const(π0),
+                                            @Const(θi), @Const(θp), @Const(ρi), @Const(tw), @Const(πref),
+                                            @Const(dπref), @Const(dzh), τ, β, nlev)
+    i, j = @index(Global, NTuple)
+    @inbounds if 2 <= j <= nlev
+        bl, bu = zβ[i, j - 1], zβ[i, j]
+        γ = τ * ICON_CPD * β * θi[i, j] / dzh[j]
+        lower[i, j] = -γ * bl * icon_implicit_weight(θi, ρi, β, i, j - 1, nlev)
+        cp_[i, j] = -γ * bu * icon_implicit_weight(θi, ρi, β, i, j + 1, nlev)
+        diag[i, j] = 1 + γ * icon_implicit_weight(θi, ρi, β, i, j, nlev) * (bl + bu)
+        pg = (1 - β) * θi[i, j] * ((π0[i, j] - πref[j]) - (π0[i, j - 1] - πref[j - 1])) / dzh[j] + θp[i, j] * dπref[j]
+        dp_[i, j] = w0[i, j] + τ * (tw[i, j] - ICON_CPD * pg) - γ * (πx[i, j] - πx[i, j - 1])
+    else
+        lower[i, j] = cp_[i, j] = dp_[i, j] = 0.0
+        diag[i, j] = 1.0
+    end
+end
+
+"The Thomas sweeps of a column for `w` over the interior interfaces, then Klemp's damping."
+@kernel function icon_column_sweep_kernel!(w, cp_, dp_, @Const(lower), @Const(diag), @Const(rayleigh), τ, nlev)
     i = @index(Global)
     @inbounds begin
-        # explicit mass flux at the interfaces, α = β θ_j ρ_j of the implicit one (zero at the ground and the lid)
-        M(j) = 2 <= j <= nlev ? ρi[i, j] * (1 - β) * w0[i, j] : 0.0
-        α(j) = 2 <= j <= nlev ? β * θi[i, j] * ρi[i, j] : 0.0
-        # z_beta of layer k and its explicit ρ and π'
-        b(k) = τ * ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k] * dz[k])
-        ρx(k) = ρexpl[i, k] - τ / dz[k] * (M(k + 1) - M(k))
-        πx(k) = π0[i, k] - πref[k] + ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k]) * (ρθexpl[i, k] - ρθ0[i, k]) -
-                b(k) * (θi[i, k + 1] * M(k + 1) - θi[i, k] * M(k))
-        # Thomas algorithm over the interior interfaces
-        cp_[i, 1] = dp_[i, 1] = 0.0
-        bl, πl, πpl = b(1), πx(1), π0[i, 1] - πref[1]
         for j in 2:nlev
-            bu, πu, πpu = b(j), πx(j), π0[i, j] - πref[j]
-            γ = τ * ICON_CPD * β * θi[i, j] / dzh[j]
-            lower = -γ * bl * α(j - 1)
-            upper = -γ * bu * α(j + 1)
-            diag = 1 + γ * α(j) * (bl + bu)
-            pg = (1 - β) * θi[i, j] * (πpu - πpl) / dzh[j] + θp[i, j] * dπref[j]
-            rhs = w0[i, j] + τ * (tw[i, j] - ICON_CPD * pg) - γ * (πu - πl)
-            denom = diag - lower * cp_[i, j - 1]
-            cp_[i, j] = upper / denom
-            dp_[i, j] = (rhs - lower * dp_[i, j - 1]) / denom
-            bl, πl, πpl = bu, πu, πpu
+            l = lower[i, j]
+            denom = diag[i, j] - l * cp_[i, j - 1]
+            cp_[i, j] = cp_[i, j] / denom
+            dp_[i, j] = (dp_[i, j] - l * dp_[i, j - 1]) / denom
         end
         w[i, nlev + 1] = 0.0
+        wu = 0.0
         for j in nlev:-1:2
-            w[i, j] = dp_[i, j] - cp_[i, j] * w[i, j + 1]
+            wj = dp_[i, j] - cp_[i, j] * wu
+            w[i, j] = wj / (1 + τ * rayleigh[j])
+            wu = wj
         end
         w[i, 1] = 0.0
-        for j in 2:nlev
-            w[i, j] /= 1 + τ * rayleigh[j]
-        end
-        for k in 1:nlev
-            ρ[i, k] = ρx(k) - β * τ / dz[k] * (ρi[i, k + 1] * w[i, k + 1] - ρi[i, k] * w[i, k])
-            π = πx(k) + πref[k] - b(k) * (α(k + 1) * w[i, k + 1] - α(k) * w[i, k])
-            πn[i, k] = π
-            ρθ[i, k] = ρθ0[i, k] * ((π / π0[i, k] - 1) * ICON_CVD / ICON_RD + 1)
-        end
+    end
+end
+
+"`ρ`, `πn` and `ρθ` of layer `k` from `w`."
+@kernel function icon_column_update_kernel!(ρ, ρθ, πn, @Const(w), @Const(zβ), @Const(ρx), @Const(πx), @Const(ρθ0),
+                                            @Const(π0), @Const(θi), @Const(ρi), @Const(πref), @Const(dz), τ, β, nlev)
+    i, k = @index(Global, NTuple)
+    @inbounds begin
+        wl, wu = w[i, k], w[i, k + 1]
+        ρ[i, k] = ρx[i, k] - β * τ / dz[k] * (ρi[i, k + 1] * wu - ρi[i, k] * wl)
+        π = πx[i, k] + πref[k] - zβ[i, k] * (icon_implicit_weight(θi, ρi, β, i, k + 1, nlev) * wu -
+                                             icon_implicit_weight(θi, ρi, β, i, k, nlev) * wl)
+        πn[i, k] = π
+        ρθ[i, k] = ρθ0[i, k] * ((π / π0[i, k] - 1) * ICON_CVD / ICON_RD + 1)
     end
 end
 
@@ -211,8 +238,13 @@ function fast_waves!(m::ICONNonhydrostatic, y, πn, y0, ys, tw, dt, corrector::B
         a0, as = corrector ? m.rth_weights : (1.0, 0.0)
         launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, w.θp, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, v.θref, m.dzh, m.wlow,
                 a0, as, corrector ? dt / 2 : 0.0, nlev)
-        launch!(m, icon_vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, πn, w.cprime, w.dprime, y0.w, y0.ρ, y0.ρθ, w.π0,
-                w.θi, w.θp, w.ρi, tw, w.ρexpl, w.ρθexpl, v.πref, v.dπref, m.dz, m.dzh, m.rayleigh, dt, m.beta, nlev)
+        launch!(m, icon_column_explicit_kernel!, (nc, nlev), w.zβ, w.ρx, w.πx, y0.w, y0.ρθ, w.π0, w.θi, w.ρi,
+                w.ρexpl, w.ρθexpl, v.πref, m.dz, dt, m.beta, nlev)
+        launch!(m, icon_column_matrix_kernel!, (nc, nlev + 1), w.lower, w.diag, w.cprime, w.dprime, w.zβ, w.πx,
+                y0.w, w.π0, w.θi, w.θp, w.ρi, tw, v.πref, v.dπref, m.dzh, dt, m.beta, nlev)
+        launch!(m, icon_column_sweep_kernel!, nc, y.w, w.cprime, w.dprime, w.lower, w.diag, m.rayleigh, dt, nlev)
+        launch!(m, icon_column_update_kernel!, (nc, nlev), y.ρ, y.ρθ, πn, y.w, w.zβ, w.ρx, w.πx, y0.ρθ, w.π0, w.θi,
+                w.ρi, v.πref, m.dz, dt, m.beta, nlev)
     end
     return y
 end
