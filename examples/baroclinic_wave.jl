@@ -4,7 +4,7 @@
 # on the extruded triangle mesh (predictor–corrector, Miura fluxes, divergence
 # damping, fourth-order diffusion of vn), on one CPU or one GPU.
 #
-#   julia --project examples/baroclinic_wave.jl [resolution] [days] [dt] [levels] [--icon] [--hdiff]
+#   julia --project examples/baroclinic_wave.jl [resolution] [days] [dt] [levels] [--icon] [--hdiff] [--rk3]
 #   julia --project examples/baroclinic_wave.jl grid/icon_grid_0013_R02B04_G.nc 10 150 30 --icon --hdiff
 #   julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu
 #
@@ -12,7 +12,8 @@
 # the triangle mesh (20·4ⁿ triangles: 5 ≈ 160 km, 6 ≈ 80 km, 7 ≈ 40 km, for ICON with
 # dt ≈ 150, 75, 37.5 s), or an ICON or MPAS grid file (ICON's triangles for --icon,
 # their hexagonal dual for TRiSK; the Delaunay triangles of an MPAS grid for --icon);
-# --hdiff uses ICON's diffusion (hdiff_order = 5) instead of the fourth-order diffusion
+# --rk3 steps MPAS-Gassmann with Wicker–Skamarock RK3 instead of the predictor–corrector of
+# ICON-IAP; --hdiff uses ICON's diffusion (hdiff_order = 5) instead of the fourth-order diffusion
 # of vn (on the meshes of create_spherical_mesh it is not stable); dt in seconds; 30 equidistant layers up to 30 km, Rayleigh
 # damping of w above 22 km.
 # --gpu runs on the CUDA GPU (environment examples/gpu). Prints the minimum surface
@@ -26,6 +27,7 @@ using dmplex
 const USE_GPU = "--gpu" in ARGS
 const USE_ICON = "--icon" in ARGS
 const USE_HDIFF = "--hdiff" in ARGS
+const USE_RK3 = "--rk3" in ARGS
 if USE_GPU
     using CUDA
 end
@@ -65,7 +67,8 @@ function main(args)
                            hdiff_order=USE_HDIFF ? 5 : -1, hyperdiffusion=USE_HDIFF ? 0.0 : 5e14 * (Δx / 79e3)^3,
                            backend)
     else
-        MPASGassmannNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05, backend)
+        MPASGassmannNonhydrostatic(TRiSKGrid(dm), v; damping_height=22000.0, damping_rate=0.05,
+                                   time_stepping=USE_RK3 ? :wicker_skamarock : :iap, backend)
     end
     @printf("%d cells (≈ %.0f km) × %d layers on %s, dt = %.0f s\n", num_cells(dm),
             sqrt(4π / num_cells(dm)) * 6.37122e6 / 1000, levels, nameof(typeof(backend)), dt)

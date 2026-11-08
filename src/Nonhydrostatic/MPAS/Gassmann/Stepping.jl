@@ -1,4 +1,4 @@
-# HEVI stage and Wicker–Skamarock RK3 step of MPAS-Gassmann.
+# HEVI stage, the ICON-IAP predictor–corrector step and the Wicker–Skamarock RK3 step of MPAS-Gassmann.
 
 """
     stage!(m, y, y0, ys, τ)
@@ -8,6 +8,18 @@ stage state `ys` and the vertical acoustic and buoyancy terms implicit,
 linearized around the Exner pressure of `y0` in the work arrays (`base_exner!`).
 """
 function stage!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
+    slow_tendencies!(m, ys, 1.0)
+    return fast_update!(m, y, y0, ys, τ)
+end
+
+"""
+    slow_tendencies!(m, ys, pressure)
+
+The explicit tendencies of the stage state `ys`: `θ`, `π`, `K` in the work
+arrays, the `vn` tendency `w.tvn` (PV flux, `-∂_n K`, vertical coupling, and
+`pressure` times the pressure gradient) and the explicit `w` tendency `w.tw`.
+"""
+function slow_tendencies!(m::MPASGassmannNonhydrostatic, ys, pressure)
     w, nlev = m.work, num_layers(m.vgrid)
     nc, ne, nv = num_cells(m.grid), num_edges(m.grid), num_vertices(m.grid)
     launch!(m, diagnose_kernel!, (nc, nlev), w.θ, w.π, w.K, ys.vn, ys.ρ, ys.ρθ, m.cell_edges, m.kinetic)
@@ -32,7 +44,19 @@ function stage!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
     end
     launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η,
             m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, m.dz, m.dzh, m.wlow, nlev,
-            m.vertical)
+            m.vertical, pressure)
+    return nothing
+end
+
+"""
+    fast_update!(m, y, y0, ys, τ)
+
+`vn = vn0 + τ (w.tvn + hd)`, the horizontal fluxes with the new `vn`, `ρ` of `ys` and
+`θ = w.θ`, and the vertically implicit `w`, `ρ`, `ρθ` from `y0` (`y = y0 + τ T`).
+"""
+function fast_update!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
+    w, nlev = m.work, num_layers(m.vgrid)
+    nc, ne = num_cells(m.grid), num_edges(m.grid)
     launch!(m, vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn, w.hd, τ)
     launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight)
     launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
@@ -48,9 +72,10 @@ end
 """
     step!(m, y, dt, ys=zero_state(m))
 
-One Wicker–Skamarock RK3 step of length `dt` (stages `dt/3`, `dt/2`, `dt`),
-in place; `ys` is work space for the stage state, the base state is kept in
-the work arrays (no allocation on the device).
+One step of length `dt` in place, with `time_stepping = :iap` the predictor–corrector
+of ICON-IAP (`iap_step!`), with `:wicker_skamarock` the RK3 of Wicker and Skamarock
+(stages `dt/3`, `dt/2`, `dt`); `ys` is work space for the stage state, the base state
+is kept in the work arrays (no allocation on the device).
 """
 function step!(m::MPASGassmannNonhydrostatic, y, dt, ys=zero_state(m))
     y0 = m.work.y0
@@ -58,7 +83,41 @@ function step!(m::MPASGassmannNonhydrostatic, y, dt, ys=zero_state(m))
     hyperdiffusion!(m.work.hd, m, y0.vn)
     smagorinsky!(m.work.hd, m.work.hρθ, m, y0)
     base_exner!(m, y0)
-    return wicker_skamarock!(m, y, y0, ys, dt)
+    return m.iap_stepping ? iap_step!(m, y, y0, ys, dt) : wicker_skamarock!(m, y, y0, ys, dt)
+end
+
+"""
+    iap_step!(m, y, y0, ys, dt)
+
+The two-stage predictor–corrector of ICON-IAP (`dynamics_integration` with
+`slow_modes` and `divergent_modes`), both stages from `y0` over the whole `dt`:
+
+1. the slow tendencies `S(y0)` (PV flux, `-∂_n K`, vertical coupling, explicit
+   `w` tendency), `vn* = vn0 + dt (S(y0) - c_p θ_e(θ0) ∂_n π_m)`, the fluxes with
+   `vn*` and the vertically implicit `w*`, `ρ*`, `ρθ*` (the predictor `ys`);
+2. the same with the mean `(S(y0) + S(ys))/2` and `θ = (θ0 + θ*)/2` in the pressure
+   gradient and the `ρθ` flux, `ρ` of the predictor in the mass flux, into `y`.
+
+The horizontal pressure gradient takes the Exner pressure off-centred in time,
+`π_m = (R/c_p - 1/2) π^{n-1} + (3/2 - R/c_p) π^n` (`π^{n-1} = π^n` in the first step).
+"""
+function iap_step!(m::MPASGassmannNonhydrostatic, y, y0, ys, dt)
+    w, nlev = m.work, num_layers(m.vgrid)
+    nc, ne = num_cells(m.grid), num_edges(m.grid)
+    w.started[] || (copyto!(w.πold, w.π0); w.started[] = true)
+    launch!(m, exner_mean_kernel!, (nc, nlev), w.πm, w.πold, w.π0)
+    # predictor
+    slow_tendencies!(m, y0, 0.0)
+    copyto!(w.tvn1, w.tvn); copyto!(w.tw1, w.tw); copyto!(w.θs, w.θ)
+    launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, w.πm, m.edge_cells, m.edge_weight, m.inverse_dual)
+    fast_update!(m, ys, y0, y0, dt)
+    # corrector
+    slow_tendencies!(m, ys, 0.0)
+    launch!(m, mean_kernel!, (ne, nlev), w.tvn, w.tvn1)
+    launch!(m, mean_kernel!, (nc, nlev + 1), w.tw, w.tw1)
+    launch!(m, mean_kernel!, (nc, nlev), w.θ, w.θs)
+    launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, w.πm, m.edge_cells, m.edge_weight, m.inverse_dual)
+    return fast_update!(m, y, y0, ys, dt)
 end
 
 "Exner pressure of the base state `y0` and its derivative by `ρθ` into the work arrays, for `stage!`."
