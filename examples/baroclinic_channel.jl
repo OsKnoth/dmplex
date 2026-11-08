@@ -23,8 +23,8 @@ const NH = dmplex.Nonhydrostatic
 "Surface pressure (Pa) from the lowest layer, extrapolated hydrostatically."
 function surface_pressure(m, y)
     ρ, ρθ = Array(y.ρ), Array(y.ρθ)
-    π1 = (NH.Rd .* ρθ[:, 1] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
-    T1 = π1 .* ρθ[:, 1] ./ ρ[:, 1]
+    π1 = (NH.Rd .* ρθ[1, :] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
+    T1 = π1 .* ρθ[1, :] ./ ρ[1, :]
     return NH.P0 .* π1 .^ (NH.Cpd / NH.Rd) .* exp.(NH.GRAV * m.vgrid.z_full[1] ./ (NH.Rd .* T1))
 end
 
@@ -55,7 +55,7 @@ function main(args)
     y = initial_state(m, (x, yy, z) -> baroclinic_channel(x, yy, z; Ly, f0, perturbation))
     ys = zero_state(m)
     W = column_weights(m)
-    mass(y) = sum(W' * y.ρ .* m.vgrid.dz')
+    mass(y) = sum((y.ρ * W) .* m.vgrid.dz)
     m0 = mass(y)
     x = column_points(m)
     A0 = wave_amplitude(surface_pressure(m, y), x, W, Lx, Ly, 10)

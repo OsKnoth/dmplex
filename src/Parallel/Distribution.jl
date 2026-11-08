@@ -217,7 +217,7 @@ otherwise `libcudss_commlayer_openmpi.so` next to `libcudss`). Needs
 """
 function distributed_cudss_solver end
 
-exchange!(x::AbstractVector, d::DofDistribution, comm) = exchange!(x, d.halo, comm)
+exchange!(x::AbstractVecOrMat, d::DofDistribution, comm) = exchange!(x, d.halo, comm)
 
 "Sum of `x` over all ranks (identity in serial)."
 global_sum(d::KiteDistribution, x::Real) = is_distributed(d) ? MPI.Allreduce(x, +, d.comm) : x

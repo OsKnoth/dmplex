@@ -162,25 +162,25 @@ end
     for level in (2, 3)
         m = KiteNonhydrostatic(create_hexagon_mesh(level), VerticalGrid(6, 12000.0; stretch=2))
         y, v = zero_state(m), m.vgrid
-        nh, nu, nl = num_columns(m), size(y.u, 1), num_layers(v)
-        @test size(y.w) == (nh, nl + 1) && size(y.ρ) == (nh, nl) && size(y.ρθ) == (nh, nl)
+        nh, nu, nl = num_columns(m), size(y.u, 2), num_layers(v)
+        @test size(y.w) == (nl + 1, nh) && size(y.ρ) == (nl, nh) && size(y.ρθ) == (nl, nh)
         @test nh == num_dofs(m.horizontal.H) && nu == num_dofs(m.horizontal.U)
         # the total mass is conserved with W = 0 at the ground and the top
         rng = MersenneTwister(level)
-        F, W = randn(rng, nu, nl), randn(rng, nh, nl + 1)
-        W[:, 1] .= 0
-        W[:, end] .= 0
+        F, W = randn(rng, nl, nu), randn(rng, nl + 1, nh)
+        W[1, :] .= 0
+        W[end, :] .= 0
         dρ = similar(y.ρ)
         mass_divergence!(dρ, m, F, W)
         M = column_weights(m)
-        @test abs(sum((M' * dρ) .* v.dz')) < 1e-14 * sum(abs, M .* dρ .* v.dz')
+        @test abs(sum((dρ * M) .* v.dz)) < 1e-14 * sum(abs, M' .* dρ .* v.dz)
         # a vertical flux changes every column by its boundary fluxes
-        W .= randn(rng, nh, nl + 1)
+        W .= randn(rng, nl + 1, nh)
         mass_divergence!(dρ, m, zero(F), W)
-        @test dρ * v.dz ≈ W[:, 1] .- W[:, end]
+        @test vec(v.dz' * dρ) ≈ W[1, :] .- W[end, :]
         # fields linear in z are exact at the layer centres; a solid-body rotation has a small divergence
-        @test project_layers(m, (x, z) -> 1.2 - 1e-4z) ≈ repeat((1.2 .- 1e-4 .* v.z_full)', nh)
-        @test size(project_layers(m, (x, z) -> z; levels=:half)) == (nh, nl + 1)
+        @test project_layers(m, (x, z) -> 1.2 - 1e-4z) ≈ repeat(1.2 .- 1e-4 .* v.z_full, 1, nh)
+        @test size(project_layers(m, (x, z) -> z; levels=:half)) == (nl + 1, nh)
         U = project_velocity(m, (x, z) -> 20.0 * SVector(-x[2], x[1], 0.0))
         mass_divergence!(dρ, m, U, zero(W))
         @test maximum(abs, dρ) < 0.1 * 20.0 / m.radius
@@ -193,7 +193,7 @@ end
     # the columns sit at the Radau nodes of the height dofs
     x = column_points(m)
     @test length(x) == num_columns(m) && all(p -> norm(p) ≈ 1, x)
-    @test maximum(abs, project_layers(m, (x, z) -> x[3])[:, 1] .- getindex.(x, 3)) < 1e-4
+    @test maximum(abs, project_layers(m, (x, z) -> x[3])[1, :] .- getindex.(x, 3)) < 1e-4
     # a column in discrete hydrostatic balance stays at rest
     rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
     y = initial_state(m, rest)
@@ -204,13 +204,28 @@ end
     @test maximum(abs, y.w) < 1e-12
     @test y.ρ ≈ ρ0 rtol = 1e-14
     # a warm layer rises, every column keeps its mass
-    y.ρθ .*= 1 .+ (m.vgrid.z_full' .< 3000) ./ 300
-    column = y.ρ * m.vgrid.dz
+    y.ρθ .*= 1 .+ (m.vgrid.z_full .< 3000) ./ 300
+    column = m.vgrid.dz' * y.ρ
     for _ in 1:5
         vertical_step!(m, y, 300.0, ys)
     end
     @test maximum(y.w) > 0.01
-    @test y.ρ * m.vgrid.dz ≈ column rtol = 1e-14
+    @test m.vgrid.dz' * y.ρ ≈ column rtol = 1e-14
+    # the vertical terms exchange energy without loss: with F_j = ρ̄_j w_j (the kinetic energy
+    # Σ_j dzh_j ρ̄_j w_j²/2 of the trapezoidal rule) Σ_j dzh_j F_j ẇ_j + Σ_k dz_k (c_p π_k (ρθ)˙_k + g z_k ρ̇_k) = 0
+    NH, v = dmplex.Nonhydrostatic, m.vgrid
+    y.w .= randn(MersenneTwister(7), size(y.w))
+    y.w[1, :] .= 0
+    y.w[end, :] .= 0
+    dw, dρ, dρθ = similar(y.w), similar(y.ρ), similar(y.ρθ)
+    vertical_tendency!(dw, dρ, dρθ, m, y)
+    a = NH.interface_weights(v)
+    F = [j in 2:num_layers(v) ? (a[j] * y.ρ[j - 1, i] + (1 - a[j]) * y.ρ[j, i]) * y.w[j, i] : 0.0
+         for j in axes(y.w, 1), i in axes(y.w, 2)]
+    π = @. (NH.Rd * y.ρθ / NH.P0)^(NH.Rd / NH.Cvd)
+    p = [vec(sum(F .* dw .* v.dzh; dims=1)); vec(sum(NH.Cpd .* π .* dρθ .* v.dz; dims=1));
+         vec(sum(NH.GRAV .* v.z_full .* dρ .* v.dz; dims=1))]
+    @test abs(sum(p)) < 1e-13 * sum(abs, p)
 end
 
 @testset "kite nonhydrostatic: horizontal terms" begin
@@ -223,38 +238,38 @@ end
     # kinetic energy, PV and pressure terms exchange energy without loss, mass is conserved
     rate = scale = 0.0
     for k in 1:num_layers(v)
-        F, rhs_K = similar(y.u[:, k]), zeros(length(Mh))
-        NH.weighted_projection!(F, m, y.u[:, k], y.ρ[:, k]; kinetic=rhs_K)
-        π = (NH.Rd .* y.ρθ[:, k] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
-        p = [F .* (m.horizontal.Mu * dy.u[:, k]); (rhs_K .+ NH.GRAV * v.z_full[k] .* Mh) .* dy.ρ[:, k];
-             NH.Cpd .* π .* Mh .* dy.ρθ[:, k]]
+        F, rhs_K = similar(y.u[k, :]), zeros(length(Mh))
+        NH.weighted_projection!(F, m, y.u[k, :], y.ρ[k, :]; kinetic=rhs_K)
+        π = (NH.Rd .* y.ρθ[k, :] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
+        p = [F .* (m.horizontal.Mu * dy.u[k, :]); (rhs_K .+ NH.GRAV * v.z_full[k] .* Mh) .* dy.ρ[k, :];
+             NH.Cpd .* π .* Mh .* dy.ρθ[k, :]]
         rate += v.dz[k] * sum(p)
         scale += v.dz[k] * sum(abs, p)
     end
     @test abs(rate) < 1e-14 * scale
     # the velocity mass uses the rule of the projections: Π_U(c v) = c v on the non-affine kites,
     # so the ρθ flux Π_U(θ̄ F) of a layer with constant θ̄ is θ̄ F and creates no θ′
-    u = randn(MersenneTwister(3), size(y.u, 1))
+    u = randn(MersenneTwister(3), size(y.u, 2))
     Πu = similar(u)
     NH.weighted_projection!(Πu, m, u, fill(300.0, num_columns(m)))
     @test Πu ≈ 300 .* u rtol = 1e-13
     # the two vertical coupling terms are adjoint: Σ_k dz_k u_kᵀ M_u (η w)_k = Σ_j dzh_j w_jᵀ M_h (η ⋅ ṽ)_j
     y.w .= randn(MersenneTwister(4), size(y.w))
-    y.w[:, 1] .= 0
-    y.w[:, end] .= 0
+    y.w[1, :] .= 0
+    y.w[end, :] .= 0
     horizontal_tendency!(dy, m, y)
     W, nl = m.work, num_layers(v)
     lhs = rhs = 0.0
-    p, d = similar(y.u[:, 1]), zeros(num_columns(m))
+    p, d = similar(y.u[1, :]), zeros(num_columns(m))
     for j in 2:nl
-        NH.weighted_projection!(p, m, W.η[:, j], y.w[:, j])
-        lhs += v.dzh[j] / 2 * dot(y.u[:, j - 1] .+ y.u[:, j], m.horizontal.Mu * p)
-        ṽ = (y.u[:, j - 1] .+ y.u[:, j]) ./ 2
-        NH.dot_product!(d, m, W.η[:, j] .+ ṽ, W.η[:, j] .- ṽ)
-        rhs += v.dzh[j] * dot(y.w[:, j], Mh .* d)
+        NH.weighted_projection!(p, m, W.η[j, :], y.w[j, :])
+        lhs += v.dzh[j] / 2 * dot(y.u[j - 1, :] .+ y.u[j, :], m.horizontal.Mu * p)
+        ṽ = (y.u[j - 1, :] .+ y.u[j, :]) ./ 2
+        NH.dot_product!(d, m, W.η[j, :] .+ ṽ, W.η[j, :] .- ṽ)
+        rhs += v.dzh[j] * dot(y.w[j, :], Mh .* d)
     end
     @test lhs ≈ rhs rtol = 1e-10
-    @test abs(sum((Mh' * dy.ρ) .* v.dz')) < 1e-14 * sum(abs, Mh .* dy.ρ .* v.dz')
+    @test abs(sum((dy.ρ * Mh) .* v.dz)) < 1e-14 * sum(abs, Mh' .* dy.ρ .* v.dz)
     # a horizontally homogeneous column in balance stays at rest
     rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
     y = initial_state(m, rest)
@@ -395,13 +410,13 @@ end
                                 equation_of_state=:shallow_water, gravity=1.0)
         y2 = initial_state(m2, velocity, height) .+ 1e-3 .* randn(MersenneTwister(3), num_dofs(m2.U) + num_dofs(m2.H))
         y3 = zero_state(m3)
-        y3.u[:, 1] .= y2[velocity_dofs(m2)]
-        y3.ρ[:, 1] .= y2[height_dofs(m2)]
+        y3.u[1, :] .= y2[velocity_dofs(m2)]
+        y3.ρ[1, :] .= y2[height_dofs(m2)]
         y3.ρθ .= y3.ρ
         d2 = tendency!(similar(y2), y2, m2)
         d3 = horizontal_tendency!(m3.work.dy, m3, y3)
-        @test d3.u[:, 1] ≈ d2[velocity_dofs(m2)] rtol = 1e-12
-        @test d3.ρ[:, 1] ≈ d2[height_dofs(m2)] rtol = 1e-12
+        @test d3.u[1, :] ≈ d2[velocity_dofs(m2)] rtol = 1e-12
+        @test d3.ρ[1, :] ≈ d2[height_dofs(m2)] rtol = 1e-12
         @test d3.ρθ ≈ d3.ρ rtol = 1e-13
     end
 end
@@ -463,7 +478,7 @@ end
     primal = create_periodic_plane(10, 3; Lx=4e7, Ly=1.2e7)
     m = KiteNonhydrostatic(primal, VerticalGrid(4, 30000.0), 1; radius=1.0, coriolis=x -> f0, horizontal_theta=:dg_upwind)
     y = initial_state(m, (x, yy, z) -> baroclinic_channel(x, yy, z; perturbation=false)); ys = zero_state(m)
-    W = column_weights(m); mass(y) = sum(W' * y.ρ .* m.vgrid.dz')
+    W = column_weights(m); mass(y) = sum((y.ρ * W) .* m.vgrid.dz)
     m0 = mass(y)
     step!(m, y, 300.0, ys)
     @test all(isfinite, y.ρ)
@@ -476,25 +491,28 @@ end
     primal = create_periodic_plane(4, 4)
     m = KiteNonhydrostatic(primal, VerticalGrid(1, 1.0), 1; radius=1.0, coriolis=x -> 0.0,
                            horizontal_theta=:dg, horizontal_advection=:dg)
-    sw, T = m.horizontal, m.advection.tables
+    sw = m.horizontal
     nu, nh = NH.num_velocity_dofs(m), NH.num_columns(m)
     m2 = NonlinearKiteShallowWater(primal, 1)
     U = initial_state(m2, x -> SVector(1.0, 0.3, 0.0), x -> 1.0)[velocity_dofs(m2)]
     ρ = ones(nh)
     u, v = randn(nu), randn(nu)
-    N(x, α) = NH.momentum_advection!(zeros(nu), sw, T, x, ρ, α; a=U)
+    N(x, α) = NH.momentum_advection!(zeros(nu), m, x, ρ, α; a=U)
     @test dot(v, N(u, 0.0)) ≈ -dot(u, N(v, 0.0)) rtol = 1e-8
     @test dot(u, N(u, 1.0)) > 0                                     # the upwind penalty removes energy
-    @test norm(NH.momentum_advection!(zeros(nu), sw, T, U, ρ, 1.0)) < 1e-10   # a uniform flow is not advected
+    @test norm(NH.momentum_advection!(zeros(nu), m, U, ρ, 1.0)) < 1e-10   # a uniform flow is not advected
     # the density-weighted mass with ρ = 1 is the velocity mass
     rhs = randn(nu)
-    @test NH.weighted_mass_solve!(zeros(nu), sw, m.advection.mass, ρ, rhs) ≈ sw.Mu \ rhs rtol = 1e-10
+    @test NH.weighted_mass_solve!(zeros(nu), m, ρ, rhs) ≈ sw.Mu \ rhs rtol = 1e-10
+    # the sparse Cholesky factors of the velocity blocks solve with the velocity mass
+    @test ldiv!(zeros(nu), m.velocity_solver, rhs) ≈ sw.Mu \ rhs rtol = 1e-12
+    @test ldiv!(zeros(3, nu), m.velocity_solver, repeat(rhs', 3)) ≈ repeat((sw.Mu \ rhs)', 3) rtol = 1e-12
     # 3D: mass and ρq = ρ on the sphere
     for primal in (create_hexagon_mesh(1), create_spherical_mesh(1), create_cubed_sphere_mesh(3))
         m = KiteNonhydrostatic(primal, VerticalGrid(6, 30000.0), 1; damping_height=22000.0, damping_rate=0.05,
                                tracer=true, horizontal_theta=:dg_upwind, horizontal_advection=:dg)
         y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z)); ys = zero_state(m)
-        W = column_weights(m); mass(y) = sum(W' * y.ρ .* m.vgrid.dz')
+        W = column_weights(m); mass(y) = sum((y.ρ * W) .* m.vgrid.dz)
         m0 = mass(y)
         for _ in 1:4
             step!(m, y, 150.0, ys)

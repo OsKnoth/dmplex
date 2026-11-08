@@ -9,8 +9,10 @@ Source: [src/Nonhydrostatic/Kite/](../../src/Nonhydrostatic/Kite/). Discretizati
 A direct product of the 2D kite spaces of `NonlinearKiteShallowWater` with the layers: ρ and ρθ in
 `KiteRadau(2)` ⊗ DG0 (37 columns per hexagon), w in `KiteRadau(2)` ⊗ CG1, u_h in `KiteBrokenRT(1)`
 ⊗ DG0 (or the dual Radau pair of Wess et al.). Per layer the horizontal terms are those of the
-energy-conserving kite shallow-water model with ρ in place of h; the vertical terms use the column
-solver of the TRiSK dycore, one column per Radau node. Wicker–Skamarock RK3, HEVI.
+energy-conserving kite shallow-water model with ρ in place of h; the vertical terms are the Galerkin
+terms of DG0 × CG1 with the trapezoidal rule (exact vertical energy exchange, upwind penalty of the
+vertical ρθ flux with `vertical_theta=:upwind`), implicit in one column per Radau node
+(`KiteColumn.jl`). Wicker–Skamarock RK3, HEVI.
 
 ## Status
 

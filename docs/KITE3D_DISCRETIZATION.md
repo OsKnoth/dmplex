@@ -70,12 +70,10 @@ and $w$.
   the $\rho\theta$ flux of a layer at rest creates $\theta'$, which caused the sub-cell instability.
 - $M_Z$: GLL lumped, diagonal.
 - Vertical, $\rho$ and $\rho\theta$ ($DG_0$): $\mathrm{diag}(\Delta z_k)$, exact.
-- Vertical, $w$ ($CG_1$): **consistent** by default (`vertical_mass=:consistent`), tridiagonal, with
-  row $j$ equal to $(\Delta z_{j-1}, 2(\Delta z_{j-1}+\Delta z_j), \Delta z_j)/6$. Its bandwidth is
-  that of the coupling through $\rho$ and $\rho\theta$, so the column system stays tridiagonal.
-  `:lumped` gives $\mathrm{diag}(\Delta z_j^h)$, pointwise at the interfaces as in
-  `TRiSKNonhydrostatic`. The rows sum to $\Delta z^h_j$ in both cases, so gravity and the rest state
-  are the same.
+- Vertical, $w$ ($CG_1$): **lumped** by the trapezoidal rule of every layer (the Gauss–Lobatto rule
+  of $CG_1$), $\mathrm{diag}(\Delta z^h_j)$ with $\Delta z^h_j = (\Delta z_{j-1} + \Delta z_j)/2$. All
+  vertical inner products use this rule, so the vertical mass flux and the kinetic energy of $w$ use
+  the same weights (see the vertical terms).
 
 The 3D mass matrices are the tensor products: $M_H\otimes\mathrm{diag}(\Delta z)$ for $\rho$ and
 $\rho\theta$, $M_H\otimes\mathrm{diag}(\Delta z^h)$ for $w$, and $M_U\otimes\mathrm{diag}(\Delta z)$
@@ -176,25 +174,41 @@ $\mathbf 1^TB = 0$. The pressure pair cancels through
 $\pi^TBM_U^{-1}\Theta F - F^T\Theta M_U^{-1}B^T\pi = 0$, where $\Theta = (\int\theta\,\phi_i\cdot\phi_j)$
 is symmetric. This is tested to 1e-14 of the summed products.
 
-## Vertical terms (per column $i$, the kernels of `TRiSKNonhydrostatic`)
+## Vertical terms (per column $i$, `KiteColumn.jl`)
+
+Galerkin terms of $\rho, \rho\theta \in DG_0$ and $w \in CG_1$, tested with the layer indicators
+$\chi_k$ and the hat functions $\phi_j$, every vertical integral by the trapezoidal rule of each
+layer. The horizontal mass $M_{H,ii}$ is a common factor of all of them and cancels. With this rule the
+projection of a $DG_0$ field $\rho$ times $w$ into $CG_1$ is $\bar\rho_j w_j$, with the
+thickness-weighted interface mean
+$$
+\bar\rho_j = \frac{\Delta z_{j-1}\rho_{j-1} + \Delta z_j\rho_j}{\Delta z_{j-1} + \Delta z_j}
+$$
+(`interface_weights`; not the linear interpolation to the interface, which weights the layers the
+other way round on stretched grids). The terms:
 
 $$
-\dot w_j = -c_p\,\theta_j\,\frac{\pi_j - \pi_{j-1}}{\Delta z^h_j} - g - r_j w_j,\qquad j = 2..n,
+F_j = \bar\rho_j w_j,\qquad G_j = \bar\theta_j F_j,\qquad
+\Delta z_k\dot\rho_k = -(F_{k+1} - F_k),\qquad \Delta z_k\dot{(\rho\theta)}_k = -(G_{k+1} - G_k),
 $$
 
 $$
-\dot\rho_k = -\frac{M_{k+1} - M_k}{\Delta z_k},\qquad
-\dot{(\rho\theta)}_k = -\frac{\tilde\theta_{k+1}M_{k+1} - \tilde\theta_kM_k}{\Delta z_k},\qquad M_j = \rho_j w_j .
+\Delta z^h_j\,\dot w_j = -c_p\,\bar\theta_j\,(\pi_j - \pi_{j-1}) - g\,\Delta z^h_j - \Delta z^h_j r_j w_j,
+\qquad j = 2..n,\quad w_1 = w_{n+1} = 0 .
 $$
 
-- $\rho_j$ is the linear interpolation of $\rho$ of the stage state.
-- $\theta_j$ in the pressure gradient is the linear interpolation of $\theta$ of the stage state.
-- $\tilde\theta_j$ in the flux depends on `vertical_theta`:
-  - `:upwind` (default): the third-order upwind interface value of $\theta$ after a Crank–Nicolson
-    implicit vertical advection of $\theta$ of the base state over $\tau/2$ (ICON-IAP
-    `ltheta_up_vert`; one pentadiagonal system per column);
-  - `:centred`: $\theta_j$;
-  - `:iap`: the upwind value also in the pressure gradient.
+$F$ is $\Pi_{CG_1}(\rho w)$ and $G$ is $\Pi_{CG_1}(\theta F)$, as $F = \Pi_U(\rho u)$ and
+$\Pi_U(\theta F)$ horizontally; the pressure gradient is $\bar\theta$ times the adjoint of the vertical
+divergence. With the kinetic energy $\sum_j \Delta z^h_j\bar\rho_j w_j^2/2$ of the same rule the exchange
+with the internal and potential energy is exact (summation by parts, $\Delta z^h_j = z_j - z_{j-1}$):
+$$
+\sum_j \Delta z^h_j F_j\dot w_j + \sum_k \Delta z_k\bigl(c_p\pi_k\dot{(\rho\theta)}_k + g z_k\dot\rho_k\bigr) = 0
+$$
+(`vertical_tendency!`, tested). `vertical_theta = :upwind` (default) adds the upwind penalty of the
+stage state, $P_j = |F_j|(\theta_{j-1} - \theta_j)/2$, to $G_j$: the upwind flux of $DG_0$, which
+damps the variance of $\theta$; `:central` leaves it out. The pressure gradient keeps $\bar\theta_j$ in
+both cases, so the penalty is the only non-conservative part. The passive tracer has the same flux
+and penalty, so $q = 1$ gives the equation of $\rho$.
 
 ## Time stepping
 
@@ -206,18 +220,18 @@ Each stage computes $y = y^0 + \tau\,T(y^s)$ (`stage!`):
    $\theta^s$, take $F = \Pi_U(\rho^s u)$ and $F_\theta = \Pi_U(\theta^sF)$. Then
    $\rho^{ex} = \rho^0 + \tau M_H^{-1}BF/a$ and $(\rho\theta)^{ex} = (\rho\theta)^0 + \tau M_H^{-1}BF_\theta/a$.
 3. **Vertical, implicit per column:**
-   - $M_j = \rho^s_j(\beta w_j + (1-\beta)w^0_j)$ with $\beta = 0.65$;
-   - $\rho = \rho^{ex} - \tau\delta_z M$ and $\rho\theta = (\rho\theta)^{ex} - \tau\delta_z(\tilde\theta M)$;
+   - $F_j = \bar\rho^s_j(\beta w_j + (1-\beta)w^0_j)$ with $\beta = 0.65$, $\bar\rho^s$ and $\bar\theta^s$ the interface means of the stage state;
+   - $\rho = \rho^{ex} - \tau\delta_z F$ and $\rho\theta = (\rho\theta)^{ex} - \tau\delta_z(\bar\theta F + P)$;
    - $\pi$ linearized around the base state: $\pi \approx \pi^0 + \gamma^0(\rho\theta - (\rho\theta)^0)$
      with $\gamma^0 = \kappa\pi^0/(\rho\theta)^0$ and $\kappa = R/c_v$;
    - the $w$ equation:
 
 $$
-\textstyle\sum_m m_{jm}(w_m - w^0_m) + \tau r_j w_j = - \tau g - \tau c_p\theta_j\,\frac{(1-\beta)(\pi^0_j - \pi^0_{j-1}) + \beta(\pi_j - \pi_{j-1})}{\Delta z^h_j}.
+(1 + \tau r_j)\,w_j = w^0_j + \tau\,\dot w^{ex}_j - \tau g - \tau c_p\bar\theta_j\,\frac{(1-\beta)(\pi^0_j - \pi^0_{j-1}) + \beta(\pi_j - \pi_{j-1})}{\Delta z^h_j}.
 $$
 
-   Here $m_{jm}$ is the vertical mass row $j$ divided by $\Delta z^h_j$. Eliminating $\rho$ and
-   $\rho\theta$ gives one tridiagonal system in $w$ per column.
+   Eliminating $\rho$ and $\rho\theta$ gives one tridiagonal system in $w$ per column
+   (`kite_column_kernel!`).
 
 The explicit horizontal time-step limit on hexagon 3 is between 250 and 300 s.
 
@@ -225,7 +239,6 @@ The explicit horizontal time-step limit on hexagon 3 is between 250 and 300 s.
 
 - Solved: the velocity mass and the projections must use the same rule (see $M_U$). $B$ and $R$
   have no metric (contravariant Piola) and are exact.
-- The vertical $w$ mass: the consistent and the lumped $CG_1$ mass give the same growth.
 - $\theta$ at the quadrature points is the $Q_2$ interpolation of the nodal $\theta$, used in
   $F_\theta$ and in the pressure gradient. With `horizontal_theta=:central` it is never upwinded
   horizontally; `:upwind` adds the face term above.

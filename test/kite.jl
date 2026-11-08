@@ -186,6 +186,19 @@ end
     @test abs(stats1[2]) < 1e-10
 end
 
+@testset "Distributed 3D kite model (MPI)" begin
+    script, project = joinpath(@__DIR__, "mpi_kite3d.jl"), dirname(@__DIR__)
+    for transport in ("dg", "vector_invariant")
+        y1, y3 = map((1, 3)) do n
+            file = tempname()
+            run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file $transport`)
+            parse.(Float64, readlines(file))
+        end
+        @test length(y1) == length(y3)
+        @test maximum(abs, y1 - y3) < 1e-12 * maximum(abs, y1)
+    end
+end
+
 @testset "Further velocity spaces: BDM and the Wess pair" begin
     @test num_dofs(ReferenceElement(BrezziDouglasMarini(1), Quadrilateral())) == 8
     @test num_dofs(ReferenceElement(BrezziDouglasMarini(2), Quadrilateral())) == 14

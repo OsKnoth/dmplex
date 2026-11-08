@@ -10,9 +10,9 @@ primal = mesh == "hexagon" ? create_hexagon_mesh(res) : mesh == "cubed" ? create
 m = KiteNonhydrostatic(primal, VerticalGrid(30, 30000.0), 1; height_order=2, velocity=:rt, damping_height=22000.0,
                        damping_rate=0.05, horizontal_theta=:dg_upwind, horizontal_advection=adv)
 y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z)); ys = zero_state(m)
-W = column_weights(m); mass(y) = sum(W' * y.ρ .* m.vgrid.dz')
+W = column_weights(m); mass(y) = sum((y.ρ * W) .* m.vgrid.dz)
 function ps(y)
-    π1 = (NH.Rd .* y.ρθ[:, 1] ./ NH.P0) .^ (NH.Rd / NH.Cvd); T1 = π1 .* y.ρθ[:, 1] ./ y.ρ[:, 1]
+    π1 = (NH.Rd .* y.ρθ[1, :] ./ NH.P0) .^ (NH.Rd / NH.Cvd); T1 = π1 .* y.ρθ[1, :] ./ y.ρ[1, :]
     NH.P0 .* π1 .^ (NH.Cpd / NH.Rd) .* exp.(NH.GRAV * m.vgrid.z_full[1] ./ (NH.Rd .* T1))
 end
 m0 = mass(y)
@@ -28,9 +28,9 @@ for i in 1:n
         d = i * dt / 86400
         if isapprox(d, round(d)) && round(Int, d) in (6, 8, 10)
             ll = [rad2deg.(NH.lonlat(x)) for x in column_points(m)]
-            π1 = (NH.Rd .* y.ρθ[:, 1] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
+            π1 = (NH.Rd .* y.ρθ[1, :] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
             serialize(joinpath(@__DIR__, "data", "bw_$(mesh)$(res)_$(adv)_day$(round(Int, d)).jls"),
-                      (lon=first.(ll), lat=last.(ll), ps=ps(y), T=π1 .* y.ρθ[:, 1] ./ y.ρ[:, 1]))
+                      (lon=first.(ll), lat=last.(ll), ps=ps(y), T=π1 .* y.ρθ[1, :] ./ y.ρ[1, :]))
         end
     end
 end

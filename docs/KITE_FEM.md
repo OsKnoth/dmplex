@@ -74,9 +74,11 @@ plus the vertical coupling of the vector-invariant form (−ηw in the u equatio
 w equation). The pressure pair is energy consistent: $\pi^TBM_U^{-1}\Theta F = F^T\Theta M_U^{-1}B^T\pi$
 with the symmetric $\Theta = (\int\theta\,\phi_i\cdot\phi_j)$.
 
-The vertical terms (acoustic, buoyancy, gravity, vertical ρ and ρθ fluxes) are implicit per
-column with the kernels of `TRiSKNonhydrostatic`: one tridiagonal system for w per column,
-linearized around the Exner pressure of the base state, consistent CG1 mass for w. Time stepping:
+The vertical terms (acoustic, buoyancy, gravity, vertical ρ and ρθ fluxes) are the Galerkin terms
+of DG0 × CG1 with the trapezoidal rule of every layer (lumped w mass, mass flux ρ̄ w with the
+thickness-weighted interface mean, pressure gradient θ̄ times the adjoint of the divergence, exact
+vertical energy exchange), implicit per column: one tridiagonal system for w per column, linearized
+around the Exner pressure of the base state (`KiteColumn.jl`). Time stepping:
 Wicker–Skamarock RK3 with a HEVI split, horizontal mass fluxes forward–backward.
 
 **What changes from 2D to 3D.** In shallow water no field is transported with the mass flux. In 3D,

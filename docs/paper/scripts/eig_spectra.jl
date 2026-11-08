@@ -9,10 +9,10 @@ function spectrum(cells, ht, adv; c=0.5, vy=0.3, nx=6)
     m = KiteNonhydrostatic(primal, VerticalGrid(1, 1.0), 1; radius=1.0, coriolis=x -> 0.0,
                            equation_of_state=:shallow_water, gravity=1.0, horizontal_theta=ht, horizontal_advection=adv)
     y2 = initial_state(m2, x -> SVector(1.0, vy, 0.0), x -> c^2)
-    y = zero_state(m); y.u[:, 1] .= y2[velocity_dofs(m2)]; y.ρ[:, 1] .= y2[height_dofs(m2)]; y.ρθ .= y.ρ
+    y = zero_state(m); y.u[1, :] .= y2[velocity_dofs(m2)]; y.ρ[1, :] .= y2[height_dofs(m2)]; y.ρθ .= y.ρ
     nu = size(y.u, 1)
     function tend(x)
-        s = map(copy, y); s.u[:, 1] .= x[1:nu]; s.ρ[:, 1] .= x[nu+1:end]; s.ρθ .= s.ρ
+        s = map(copy, y); s.u[1, :] .= x[1:nu]; s.ρ[1, :] .= x[nu+1:end]; s.ρθ .= s.ρ
         d = horizontal_tendency!(m.work.dy, m, s)
         return vcat(vec(d.u), vec(d.ρ))
     end

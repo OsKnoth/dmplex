@@ -22,9 +22,9 @@ for n in 1:round(Int, days * 86400 / dt)
         @printf("day %5.2f  p_s min %7.2f  k=10 %.3e Pa  max|w| %.2e\n", d, minimum(ps) / 100, rows[end].A, rows[end].wmax)
         flush(stdout)
         snap = isapprox(d, round(d)) && round(Int, d) in (8, 10, 12, 14)
-        π1 = (NH.Rd .* y.ρθ[:, 1] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
+        π1 = (NH.Rd .* y.ρθ[1, :] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
         snap && serialize(joinpath(@__DIR__, "data", "channel_$(cells)$(nx)_day$(round(Int, d)).jls"),
-                          (ps=ps, T=π1 .* y.ρθ[:, 1] ./ y.ρ[:, 1], z1=m.vgrid.z_full[1]))
+                          (ps=ps, T=π1 .* y.ρθ[1, :] ./ y.ρ[1, :], z1=m.vgrid.z_full[1]))
         serialize(joinpath(@__DIR__, "data", "channel_$(cells)$(nx)_series.jls"), rows)
     end
 end

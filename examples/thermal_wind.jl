@@ -21,9 +21,10 @@ const NH = dmplex.Nonhydrostatic
 
 "Surface pressure (Pa) from the lowest layer, extrapolated hydrostatically."
 function surface_pressure(m, y)
-    ρ, ρθ = Array(y.ρ), Array(y.ρθ)
-    π1 = (NH.Rd .* ρθ[:, 1] ./ NH.P0) .^ (NH.Rd / NH.Cvd)
-    T1 = π1 .* ρθ[:, 1] ./ ρ[:, 1]
+    lowest(x) = m isa KiteNonhydrostatic ? x[1, :] : x[:, 1]     # the kite arrays are layers first
+    ρ, ρθ = lowest(Array(y.ρ)), lowest(Array(y.ρθ))
+    π1 = (NH.Rd .* ρθ ./ NH.P0) .^ (NH.Rd / NH.Cvd)
+    T1 = π1 .* ρθ ./ ρ
     return NH.P0 .* π1 .^ (NH.Cpd / NH.Rd) .* exp.(NH.GRAV * m.vgrid.z_full[1] ./ (NH.Rd .* T1))
 end
 
