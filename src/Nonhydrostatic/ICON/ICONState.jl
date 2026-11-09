@@ -19,6 +19,31 @@ function match_points(pts, ours, h)
     return idx, dmax
 end
 
+"Unit vector of longitude and latitude."
+unit_vector(lon, lat) = SVector(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
+
+"Our cells of the cells of an ICON file, matched by position."
+function icon_cells(ds, g::TRiSKGrid)
+    ci, dc = match_points(unit_vector.(ds["clon"][:], ds["clat"][:]), g.centers, 0.3 * minimum(g.dual_lengths))
+    dc < 1e-8 && allunique(ci) || throw(ArgumentError("the cells of the file are not those of the model grid"))
+    return ci
+end
+
+"""
+    read_icon_levels(filename, grid::TRiSKGrid) -> z_half (cells × nlev+1)
+
+The heights of the interfaces (`z_ifc`) of an ICON output file on the cells of `grid`, from the
+ground up: the `z_half` of `ICONNonhydrostatic` with ICON's levels over orography.
+"""
+function read_icon_levels(filename::AbstractString, g::TRiSKGrid)
+    NCDataset(filename) do ds
+        ci, z = icon_cells(ds, g), Float64.(ds["z_ifc"][:, :])
+        zh = zeros(size(z))
+        zh[ci, :] .= z[:, end:-1:1]
+        return zh
+    end
+end
+
 """
     read_icon_state(m::ICONNonhydrostatic, filename, gridfile; step=1) -> (vn, w, ρ, ρθ, exner)
 
@@ -27,20 +52,17 @@ model-level fields `vn`, `w`, `rho`, `theta_v`, `exner` (`output_grid =
 .TRUE.`) on our grid and levels: cells and edges matched by their position,
 `vn` by the sign of ICON's edge normals (`zonal_normal_primal_edge`,
 `meridional_normal_primal_edge` of `gridfile`), ICON's levels from the top
-reversed. `m.vgrid` must be ICON's (`icon_vertical_grid`).
+reversed. The levels of `m` must be ICON's (`icon_vertical_grid`, over orography `read_icon_levels`).
 """
 function read_icon_state(m::ICONNonhydrostatic, filename::AbstractString, gridfile::AbstractString; step::Integer=1)
     g, nlev = m.grid, num_layers(m.vgrid)
-    unit(lon, lat) = SVector(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
     NCDataset(filename) do ds
-        zifc = ds["z_ifc"][1, :]
-        maximum(abs, sort(Float64.(zifc)) .- m.vgrid.z_half) < 1e-3 ||
+        ci = icon_cells(ds, g)
+        zifc = Float64.(ds["z_ifc"][:, :])
+        maximum(abs, zifc[:, end:-1:1] .- m.metric.cells.z_half[ci, :]) < 1e-3 ||
             throw(ArgumentError("the levels of $filename are not those of the model"))
-        h = 0.3 * minimum(g.dual_lengths)
-        ci, dc = match_points(unit.(ds["clon"][:], ds["clat"][:]), g.centers, h)
-        ei, de = match_points(unit.(ds["elon"][:], ds["elat"][:]), g.edge_points, h)
-        max(dc, de) < 1e-8 && allunique(ci) && allunique(ei) ||
-            throw(ArgumentError("the cells or edges of $filename are not those of the model grid"))
+        ei, de = match_points(unit_vector.(ds["elon"][:], ds["elat"][:]), g.edge_points, 0.3 * minimum(g.dual_lengths))
+        de < 1e-8 && allunique(ei) || throw(ArgumentError("the edges of $filename are not those of the model grid"))
         zn, mn = NCDataset(f -> (f["zonal_normal_primal_edge"][:], f["meridional_normal_primal_edge"][:]), gridfile)
         s = map(eachindex(ei)) do n
             lon, lat = ds["elon"][n], ds["elat"][n]

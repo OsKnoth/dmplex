@@ -13,7 +13,7 @@ standard MPAS-A dycore (MPAS-Orig, split-explicit) is planned as a separate mode
 
 ## Discretization
 
-Dry compressible Euler equations, shallow atmosphere, flat ground, on the extruded C grid of a
+Dry compressible Euler equations, shallow atmosphere, with orography, on the extruded C grid of a
 Voronoi (hexagon–pentagon) mesh. Lorenz staggering: `vn` at the edges × layers, `w` at the cells ×
 interfaces, `ρ`, `ρθ` at the cells × layers (Gassmann 2013).
 
@@ -36,6 +36,19 @@ interfaces, `ρ`, `ρθ` at the cells × layers (Gassmann 2013).
   gradient with the Exner pressure off-centred in time, `(R/c_p − ½) π^{n−1} + (3/2 − R/c_p) π^n`.
   `:wicker_skamarock`: RK3 with a HEVI split. Horizontal mass fluxes forward–backward in both.
 - **Diffusion:** Smagorinsky (ICON-IAP `diff_diss_hori`, with heating), optional hyperdiffusion.
+- **Orography** (`surface_height` or `z_half`, terrain-following levels as in ICON, `terrain_following`):
+  - horizontal fluxes times the layer thickness at the edges, divided by that of the cell;
+  - the contravariant correction `w_c = u ⋅ ∇z` (cell inner product of `vn ∂z/∂n`) in the mass flux
+    of both column solves, in θ at the interfaces and in the vertical coupling of `vn`; `w = w_c` at
+    the ground; `w_c ∂w/∂z` added to the `w` tendency;
+  - the horizontal pressure gradient `c_p θ_e (∂π'/∂n − ∂z/∂n ∂π'/∂z)` of the deviation from ICON's
+    reference atmosphere.
+
+  `∇K` and `η` stay along the levels, so the energy exchange between horizontal and vertical kinetic
+  energy is exact only for flat ground. Over the 2 km mountain of DCMIP 2012 test 2-0 (atmosphere at
+  rest, 30 Gal-Chen levels to 12 km) the spurious rms vn after one day is 0.028 m/s on hexagon 4 and
+  0.016 m/s on hexagon 5 (ICON without diffusion and divergence damping 0.022 m/s on
+  `create_spherical_mesh(4)`); mass is conserved to round-off.
 
 ### ICON-IAP and MPAS horizontal operators
 

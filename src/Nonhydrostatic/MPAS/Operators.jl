@@ -1,5 +1,6 @@
 # TRiSK operators on the extruded Voronoi C grid shared by the MPAS dycores: kinetic energy (cell and
-# vertex), horizontal vorticity η, edge density and mass flux, PV at vertices and edges, w tendencies.
+# vertex), horizontal vorticity η, edge density and mass flux, PV at vertices and edges, w tendencies,
+# the contravariant correction over orography.
 
 "Potential temperature, Exner pressure and horizontal kinetic energy at the cells."
 @kernel function diagnose_kernel!(θ, πe, K, @Const(vn), @Const(ρ), @Const(ρθ), @Const(cell_edges), @Const(kinetic))
@@ -36,15 +37,15 @@ end
 "Add the vertical kinetic energy `(dzh_k w_k² + dzh_{k+1} w_{k+1}²) / 4dz_k` of the layer to `K`."
 @kernel function w_kinetic_kernel!(K, @Const(w), @Const(dz), @Const(dzh))
     i, k = @index(Global, NTuple)
-    @inbounds K[i, k] += (dzh[k] * w[i, k]^2 + dzh[k + 1] * w[i, k + 1]^2) / (4 * dz[k])
+    @inbounds K[i, k] += (dzh[i, k] * w[i, k]^2 + dzh[i, k + 1] * w[i, k + 1]^2) / (4 * dz[i, k])
 end
 
-"Horizontal vorticity `η = ∂vn/∂z - ∂w/∂n` at the edges of the interior interfaces (zero at ground and top)."
+"Horizontal vorticity `η = ∂vn/∂z - ∂w/∂n` at the edges of the interior interfaces (zero at ground and top), `dzh` at the edges."
 @kernel function eta_kernel!(η, @Const(vn), @Const(w), @Const(edge_cells), @Const(inverse_dual), @Const(dzh))
     e, j = @index(Global, NTuple)
     nlev = size(vn, 2)
     @inbounds if 2 <= j <= nlev
-        η[e, j] = (vn[e, j] - vn[e, j - 1]) / dzh[j] - (w[edge_cells[2, e], j] - w[edge_cells[1, e], j]) * inverse_dual[e]
+        η[e, j] = (vn[e, j] - vn[e, j - 1]) / dzh[e, j] - (w[edge_cells[2, e], j] - w[edge_cells[1, e], j]) * inverse_dual[e]
     else
         η[e, j] = 0.0
     end
@@ -74,9 +75,10 @@ interfaces, `ṽn = (ρ_{e,j-1} vn_{j-1} + ρ_{e,j} vn_j) / 2ρ_e` (`ρ = 1` wit
         for n in axes(cell_edges, 1)
             e = cell_edges[n, i]
             ρl, ρu = massweighted ? (ρe[e, j - 1], ρe[e, j]) : (1.0, 1.0)
-            s += inner[n, i] * η[e, j] * (ρl * vn[e, j - 1] + ρu * vn[e, j]) / (2 * (wlow[j] * ρl + (1 - wlow[j]) * ρu))
+            s += inner[n, i] * η[e, j] * (ρl * vn[e, j - 1] + ρu * vn[e, j]) /
+                 (2 * (wlow[i, j] * ρl + (1 - wlow[i, j]) * ρu))
         end
-        tw[i, j] = s - (K[i, j] - K[i, j - 1]) / dzh[j]
+        tw[i, j] = s - (K[i, j] - K[i, j - 1]) / dzh[i, j]
     else
         tw[i, j] = 0.0
     end
@@ -124,8 +126,27 @@ end
             v = (vn[e, j - 1] + vn[e, j]) / 2
             s += 2 * kinetic[n, i] * v * (w[edge_cells[2, e], j] - w[edge_cells[1, e], j]) * inverse_dual[e]
         end
-        tw[i, j] = -s - w[i, j] * (w[i, j + 1] - w[i, j - 1]) / (dz[j - 1] + dz[j])
+        tw[i, j] = -s - w[i, j] * (w[i, j + 1] - w[i, j - 1]) / (dz[i, j - 1] + dz[i, j])
     else
         tw[i, j] = 0.0
+    end
+end
+
+"Contravariant correction `w_c = u ⋅ ∇z` at the full levels of the cells, `Σ_e (l_e d_{e,i}/A_i) vn_e ∂z/∂n` (cell inner product)."
+@kernel function concorr_cell_kernel!(wcf, @Const(vn), @Const(cell_edges), @Const(inner), @Const(ddxn))
+    i, k = @index(Global, NTuple)
+    s = 0.0
+    @inbounds for n in axes(cell_edges, 1)
+        e = cell_edges[n, i]
+        s += inner[n, i] * vn[e, k] * ddxn[e, k]
+    end
+    @inbounds wcf[i, k] = s
+end
+
+"`tw += w_c ∂w/∂z` at the interior interfaces: the advection of `w` by `w - w_c` in place of `w` over orography."
+@kernel function w_concorr_tendency_kernel!(tw, @Const(w), @Const(wch), @Const(dzh), nlev)
+    i, j = @index(Global, NTuple)
+    @inbounds if 2 <= j <= nlev
+        tw[i, j] += wch[i, j] * (w[i, j + 1] - w[i, j - 1]) / (dzh[i, j] + dzh[i, j + 1])
     end
 end

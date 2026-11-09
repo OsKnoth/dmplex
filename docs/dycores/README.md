@@ -29,5 +29,7 @@ Accuracy, effective resolution and cost of Kite against ICON: [Kite-vs-ICON](Kit
 Test cases: `baroclinic_wave`, `jablonowski_williamson`, `thermal_wind`, `baroclinic_channel`
 (`Common/TestCases.jl`).
 
-Planned: ICON's `itype_vn_diffu = 2` and terrain-following levels, the ICON-IAP time stepper for
-MPAS-Gassmann, and MPAS-Orig.
+Orography: ICON and MPAS-Gassmann have terrain-following levels (`surface_height`,
+`terrain_following`); Kite is flat (plan in [OROGRAPHY_PLAN](../OROGRAPHY_PLAN.md)).
+
+Planned: ICON's `itype_vn_diffu = 2`, orography for Kite, and MPAS-Orig.

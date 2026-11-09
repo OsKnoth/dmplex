@@ -34,6 +34,39 @@ function baroclinic_wave(lon, lat, z; radius=6.37122e6, omega=7.292e-5, perturba
 end
 
 """
+    jw_surface_height(lon, lat; u0=35, radius, omega) -> h
+
+The orography of Jablonowski and Williamson (2006), `Φ_s/g` of their steady state at `η = 1`, on
+which `jablonowski_williamson` has `p_s = 10⁵ Pa`.
+"""
+function jw_surface_height(lon, lat; u0=35.0, radius=6.37122e6, omega=7.292e-5)
+    s, c = sincos(lat)
+    cv = cos((1 - 0.252) * π / 2)^1.5
+    f1 = 10 / 63 - 2 * s^6 * (c^2 + 1 / 3)
+    f2 = (8 / 5 * c^3 * (s^2 + 2 / 3) - π / 4) * radius * omega
+    return u0 * cv * (f1 * u0 * cv + f2) / GRAV
+end
+
+"""
+    dcmip_mountain_height(lon, lat; h0=2000, R=3π/4, ζ=π/16, λc=3π/2, φc=0) -> h
+
+The mountain of DCMIP 2012 test 2-0 (steady state at rest over orography): `h0/2 (1 + cos(π r/R))
+cos²(π r/ζ)` within the great-circle distance `r < R` (unit sphere) from `(λc, φc)`, the ridges of
+the half width `ζ/2`.
+"""
+function dcmip_mountain_height(lon, lat; h0=2000.0, R=3π / 4, ζ=π / 16, λc=3π / 2, φc=0.0)
+    r = acos(clamp(sin(φc) * sin(lat) + cos(φc) * cos(lat) * cos(lon - λc), -1, 1))
+    return r < R ? h0 / 2 * (1 + cos(π * r / R)) * cos(π * r / ζ)^2 : 0.0
+end
+
+"""
+    dcmip_rest(lon, lat, z; T0=300, Γ=0.0065) -> (T, p, u, v)
+
+The atmosphere at rest of DCMIP 2012 test 2-0: `T = T0 - Γz`, `p = p₀ (1 - Γz/T0)^(g/(R Γ))`.
+"""
+dcmip_rest(lon, lat, z; T0=300.0, Γ=0.0065) = (T0 - Γ * z, P0 * (1 - Γ * z / T0)^(GRAV / (Rd * Γ)), 0.0, 0.0)
+
+"""
     jablonowski_williamson(lon, lat, z; u0=35, T0=288, up=1, radius, omega) -> (T, p, u, v)
 
 The baroclinic wave of Jablonowski and Williamson (2006) (ICON `jabw`) in
@@ -183,7 +216,8 @@ function balanced_column(profile, v::VerticalGrid, iap_theta::Bool)
     T = [profile(z)[1] for z in v.z_full]
     πk = [(profile(z)[2] / P0)^κ for z in v.z_full]
     for _ in 1:(iap_theta ? 30 : 1), j in 2:nlev
-        c = iap_theta ? theta_stencil(j, 0.0, v.dz, v.dzh, v.wlow, nlev) : (0.0, v.wlow[j], 1 - v.wlow[j], 0.0)
+        c = iap_theta ? theta_stencil(1, j, 0.0, reshape(v.dz, 1, :), reshape(v.dzh, 1, :), reshape(v.wlow, 1, :), nlev) :
+            (0.0, v.wlow[j], 1 - v.wlow[j], 0.0)
         πj = πk[j]
         for _ in 1:50
             θh = sum(c[n] * T[j - 3 + n] / (j - 3 + n == j ? πj : πk[j - 3 + n]) for n in 1:4 if 1 <= j - 3 + n <= nlev)
@@ -195,15 +229,19 @@ function balanced_column(profile, v::VerticalGrid, iap_theta::Bool)
     return ρθ ./ (T ./ πk), ρθ
 end
 
-"Column of `profile` in the discrete hydrostatic balance of the model `m`."
-balanced_column(m::CGridNonhydrostatic, profile) = balanced_column(profile, m.vgrid, m.vertical_theta == 2)
+"Column `i` of `profile` in the discrete hydrostatic balance of the model `m`."
+balanced_column(m::CGridNonhydrostatic, profile, i) = balanced_column(profile, column_grid(m, i), m.vertical_theta == 2)
+
+"The levels of column `i` (cell) and the layer centres at edge `e` (`m.metric`: the column metrics of cells and edges)."
+column_grid(m::CGridNonhydrostatic, i) = VerticalGrid(view(m.metric.cells.z_half, i, :))
+edge_levels(m::CGridNonhydrostatic, e) = view(m.metric.edges.z_full, e, :)
 
 """
     initial_state(m::CGridNonhydrostatic, profile)
 
 State `(vn, w, ρ, ρθ)` from `profile(lon, lat, z) -> (T, p, u, v)`. Every
 column is in discrete hydrostatic balance with the vertical operators of the
-model: `π` of the lowest layer from `p`, above from
+model (in every column, at its heights): `π` of the lowest layer from `p`, above from
 `c_p θ_j (π_j - π_{j-1}) / dzh_j = -g` with `θ = T/π` at the layer centres and
 `θ_j` at the interfaces as the model has it at rest (fixed-point iteration per
 level, sweeps over the column for the upwind `θ`), so a state without
@@ -215,7 +253,7 @@ function initial_state(m::CGridNonhydrostatic, profile)
     ρ, ρθ = zeros(nc, nlev), zeros(nc, nlev)
     for i in 1:nc
         λ, φ = lonlat(g.centers[i])
-        ρ[i, :], ρθ[i, :] = balanced_column(m, z -> profile(λ, φ, z))
+        ρ[i, :], ρθ[i, :] = balanced_column(m, z -> profile(λ, φ, z), i)
     end
     vn = zeros(ne, nlev)
     for e in 1:ne
@@ -223,8 +261,8 @@ function initial_state(m::CGridNonhydrostatic, profile)
         λ, φ = lonlat(x)
         east, north = east_north(x)
         n = g.edge_normals[e]
-        for k in 1:nlev
-            _, _, u, vv = profile(λ, φ, v.z_full[k])
+        for (k, z) in enumerate(edge_levels(m, e))
+            _, _, u, vv = profile(λ, φ, z)
             vn[e, k] = u * dot(east, n) + vv * dot(north, n)
         end
     end

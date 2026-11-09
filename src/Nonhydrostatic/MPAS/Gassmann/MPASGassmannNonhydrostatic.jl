@@ -3,11 +3,12 @@
                                damping_height=Inf, damping_rate=0, kinetic_energy=:cell, hyperdiffusion=0,
                                pv_flux=:iap, vertical_advection=:iap, trisk_weights=:iap, smagorinsky=0.15,
                                vertical_theta=:upwind, time_stepping=:iap, vertical_solver=:five_band,
-                               backend=CPU())
+                               surface_height=nothing, z_half=nothing, coordinate=:sleve, flat_height=16000,
+                               decay_scale=4000, decay_exponent=1.35, backend=CPU())
 
 MPAS-Gassmann: the ICON-IAP form (Gassmann 2013) of the dry compressible Euler
-equations on the extruded C grid of a Voronoi mesh, shallow atmosphere, flat
-ground; `pv_flux=:trisk`, `trisk_weights=:exact`, `kinetic_energy=:mixed` give
+equations on the extruded C grid of a Voronoi mesh, shallow atmosphere, with
+orography (see below); `pv_flux=:trisk`, `trisk_weights=:exact`, `kinetic_energy=:mixed` give
 the horizontal operators of MPAS instead. Lorenz staggering as in ICON and ICON-IAP
 (Gassmann 2013):
 
@@ -103,6 +104,18 @@ MPAS, Skamarock et al. 2012, `:vertex` or a weight); the pure cell kinetic
 energy lets a strong jet become unstable on fine meshes (Hollingsworth et al.
 1983).
 
+**Orography**: `surface_height(lon, lat)` (or the heights of the cells) or `z_half` (cells ×
+nlev+1) give terrain-following levels as in `ICONNonhydrostatic` (`terrain_following`). The
+equations are along the levels: the horizontal fluxes times the layer thickness at the edges,
+divided by that of the cell; the contravariant correction `w_c = u ⋅ ∇z` (cell inner product of
+`vn ∂z/∂n`, interpolated to the interfaces, quadratically extrapolated to the ground) in the mass
+flux of the column solves (`w = w_c` at the ground), in `θ` at the interfaces and in the vertical
+coupling of `vn` (`w̃` of `w - w_c`), `w_c ∂w/∂z` added to the `w` tendency; the horizontal
+pressure gradient `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` of the deviation from ICON's reference
+atmosphere (`reference_atmosphere`). `∇K` and `η` stay along the levels, so the exchange of
+horizontal and vertical kinetic energy is exact only for flat ground. The Rayleigh damping and
+the taper of the Smagorinsky diffusion are on the reference levels.
+
 Arrays are `(n, nlev)` with the horizontal index fastest; every kernel runs
 over `(n, nlev)` or, for the vertical solver, one work item per column.
 """
@@ -136,9 +149,11 @@ struct MPASGassmannNonhydrostatic{M, V, I, J, VK, BE} <: CGridNonhydrostatic
     cell_edge_area::M    # l_e d_{e,i} / 2A_i: cell average of edge quantities
     smagorinsky::V       # hdiff_smag_fac A_e (1 - taper) per layer (m²)
     cell_areas::V        # a² A_i
-    dz::V
-    dzh::V
-    wlow::V
+    dz::M                # layer thickness, cells × layers
+    dzh::M               # distance of the layer centres at the interfaces, cells × interfaces
+    wlow::M              # weight of the layer below at the interfaces, cells × interfaces
+    orography::Bool      # terrain-following levels (the metric terms)
+    metric::NamedTuple   # edges: dz, dzh, ∂z/∂n; cells: 1/dz, z_full, π_ref, wgtfacq; host: cells, edges
     rayleigh::V          # damping rate at the interfaces
     work::NamedTuple
     radius::Float64
@@ -158,6 +173,8 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                                     hyperdiffusion::Real=0.0, pv_flux::Symbol=:iap, vertical_advection::Symbol=:iap,
                                     trisk_weights::Symbol=:iap, smagorinsky::Real=0.15, vertical_theta::Symbol=:upwind,
                                     time_stepping::Symbol=:iap, vertical_solver::Symbol=:five_band,
+                                    surface_height=nothing, z_half=nothing, coordinate::Symbol=:sleve,
+                                    flat_height::Real=16000.0, decay_scale::Real=4000.0, decay_exponent::Real=1.35,
                                     backend=KernelAbstractions.CPU())
     time_stepping in (:iap, :wicker_skamarock) || throw(ArgumentError("time_stepping must be :iap or :wicker_skamarock"))
     vertical_solver in (:five_band, :tridiagonal) ||
@@ -193,9 +210,22 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
             band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 2),
             band5=KernelAbstractions.zeros(backend, Float64, nc, nlev + 1, 4),
             tvn1=zeros2(ne, nlev), tw1=zeros2(nc, nlev + 1), θs=zeros2(nc, nlev), πm=zeros2(nc, nlev),
-            πold=zeros2(nc, nlev), started=Ref(false),
+            πold=zeros2(nc, nlev), started=Ref(false), wcf=zeros2(nc, nlev), wch=zeros2(nc, nlev + 1),
+            ŵ=zeros2(nc, nlev + 1), πp=zeros2(nc, nlev), dπdz=zeros2(nc, nlev),
             y0=(vn=zeros2(ne, nlev), w=zeros2(nc, nlev + 1), ρ=zeros2(nc, nlev), ρθ=zeros2(nc, nlev)))
-    edge_weight = dev(grid.cell_distances ./ grid.dual_lengths')
+    ew = grid.cell_distances ./ grid.dual_lengths'
+    edge_weight = dev(ew)
+    # terrain-following levels, at the edges with the edge weights; slopes of the levels at the edges
+    zi = model_levels(vgrid, grid.centers, surface_height, z_half; coordinate, flat_height, decay_scale, decay_exponent)
+    orography = any(i -> any(j -> zi[i, j] != vgrid.z_half[j], 1:(nlev + 1)), 1:nc)
+    cm = column_metrics(zi)
+    em = column_metrics([ew[1, e] * zi[grid.edge_cells[1, e], j] + ew[2, e] * zi[grid.edge_cells[2, e], j]
+                         for e in 1:ne, j in 1:(nlev + 1)])
+    ddxn = [(cm.z_full[grid.edge_cells[2, e], k] - cm.z_full[grid.edge_cells[1, e], k]) / (a * grid.dual_lengths[e])
+            for e in 1:ne, k in 1:nlev]
+    metric = (dz=dev(em.dz), dzh=dev(em.dzh), ddxn=dev(ddxn), rdz=dev(1 ./ cm.dz), z_full=dev(cm.z_full),
+              πref=dev(map(z -> reference_atmosphere(z)[2], cm.z_full)),
+              q=dev([ground_extrapolation(cm, i)[n] for i in 1:nc, n in 1:3]), cells=cm, edges=em)
     inner = zeros(size(grid.cell_edges))
     for i in 1:nc, j in axes(grid.cell_edges, 1)
         e = grid.cell_edges[j, i]
@@ -266,7 +296,8 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                                       dev(frame),
                                       dev(grid.cell_vertices), dev(grid.cell_kites ./ grid.cell_areas'), dev(cell_edge_area),
                                       dev(smag), dev(a^2 .* grid.cell_areas),
-                                      dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work, a, Float64(beta),
+                                      dev(cm.dz), dev(cm.dzh), dev(cm.wlow), orography, metric, dev(rayleigh), work, a,
+                                      Float64(beta),
                                       Float64(hyperdiffusion), pv_flux == :iap, vertical, vtheta, time_stepping == :iap,
                                       vertical_solver == :five_band,
                                       backend)

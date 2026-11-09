@@ -5,12 +5,12 @@
 # comparison with Fortran ICON.
 #
 #   julia --project examples/icon_jabw.jl grid.nc [days] [dtime] [nlev] [top_height] [--gpu]
-#         [--init=icon.nc] [--compare=icon.nc] [--timer]
+#         [--init=icon.nc] [--compare=icon.nc] [--flat] [--timer]
 #
-# Without --init the Jablonowski–Williamson state on flat ground (ICON's `jabw` has the JW orography,
-# which the model does not have). --init=icon.nc starts from the first time of an ICON output file
-# (native grid, model levels, vn, w, rho, theta_v, exner), e.g. of ICON's flat DCMIP 2016 wave
-# `dcmip_bw_11`; --compare=icon.nc compares the final state with the last time of an ICON output file.
+# Without --init the Jablonowski–Williamson state over the JW orography as ICON's `jabw` (SLEVE levels,
+# ICON's sleve_nml defaults), with --flat on flat ground. --init=icon.nc starts from the first time of
+# an ICON output file (native grid, model levels, vn, w, rho, theta_v, exner) on its levels (z_ifc),
+# e.g. of ICON's `jabw` or of the flat DCMIP 2016 wave `dcmip_bw_11`; --compare=icon.nc compares the final state with the last time of an ICON output file.
 # dtime is ICON's advective time step, the dynamics steps are dtime/5. Prints the minimum surface
 # pressure, max |w| and the time per step once a day and writes the surface pressure (Pa) and the
 # temperature of the lowest layer (K) to icon_jabw_<grid>.vtkhdf. --timer (with TimerOutputs in the
@@ -38,7 +38,9 @@ option(name) = (a = findfirst(startswith("--$name="), ARGS); a === nothing ? not
 function surface(m, y)
     ρ, π1 = Array(y.ρ)[:, 1], Array(y.exner)[:, 1]
     T1 = NH.P0 .* π1 .^ (NH.ICON_CVD / NH.ICON_RD) ./ (NH.ICON_RD .* ρ)
-    return NH.P0 .* π1 .^ (NH.ICON_CPD / NH.ICON_RD) .* exp.(NH.ICON_GRAV * m.vgrid.z_full[1] ./ (NH.ICON_RD .* T1)), T1
+    c = m.metric.cells
+    h = c.z_full[:, 1] .- c.z_half[:, 1]
+    return NH.P0 .* π1 .^ (NH.ICON_CPD / NH.ICON_RD) .* exp.(NH.ICON_GRAV .* h ./ (NH.ICON_RD .* T1)), T1
 end
 
 function main(args)
@@ -54,8 +56,11 @@ function main(args)
     backend = USE_GPU ? CUDA.CUDABackend() : KernelAbstractions.CPU()
     dm = hilbert_order(read_grid(grid))
     v = icon_vertical_grid(nlev, top)
-    m = ICONNonhydrostatic(TRiSKGrid(dm), v; beta=0.7, exner_expol=0.5, damping_height=25000.0, damping_rate=0.1,
-                           hdiff_efdt_ratio=20.0, ndyn_substeps=nsub, backend)
+    g = TRiSKGrid(dm)
+    levels = init !== nothing ? (; z_half=read_icon_levels(init, g)) :
+             "--flat" in ARGS ? (;) : (; surface_height=(λ, φ) -> jw_surface_height(λ, φ; radius=6.371229e6, omega=7.29212e-5))
+    m = ICONNonhydrostatic(g, v; beta=0.7, exner_expol=0.5, damping_height=25000.0, damping_rate=0.1,
+                           hdiff_efdt_ratio=20.0, ndyn_substeps=nsub, levels..., backend)
     @printf("%d cells × %d levels (lowest %.0f m, top %.0f m) on %s, dtime = %.0f s, dynamics dt = %.1f s\n",
             num_cells(dm), nlev, v.dz[1], top, nameof(typeof(backend)), dtime, dt)
     y = zero_state(m)

@@ -36,8 +36,11 @@ function step!(m::ICONNonhydrostatic, y, dt, ys=zero_state(m))
             g = w.grad
             launch!(m, icon_cell_gradient_kernel!, (nc, nlev), g..., y0.ρ, w.θ, m.cell_edges, m.edge_cells,
                     m.edge_height, m.green_gauss...)
-            launch!(m, icon_miura_kernel!, (ne, nlev), w.ρe, w.θe, w.pg, y0.vn, w.vt, y0.ρ, w.θ, w.π, g...,
-                    m.edge_cells, m.edge_vectors, m.inverse_dual, dt / (2 * m.radius))
+            m.orography && launch!(m, exner_deviation_kernel!, (nc, nlev), w.πp, w.dπdz, w.π, m.vertical.πref,
+                                   m.metric.z_full, nlev)
+            launch!(m, icon_miura_kernel!, (ne, nlev), w.ρe, w.θe, w.pg, y0.vn, w.vt, y0.ρ, w.θ,
+                    m.orography ? w.πp : w.π, g..., m.edge_cells, m.edge_vectors, m.inverse_dual, dt / (2 * m.radius),
+                    w.dπdz, m.metric.ddxn, m.edge_height, m.orography)
             copyto!(w.πprev, w.π0)
             launch!(m, icon_vn_update_kernel!, (ne, nlev), ys.vn, y0.vn, w.tvn_now, w.tvn_now, w.pg, w.hd, dt, 1.0, 0.0)
         end

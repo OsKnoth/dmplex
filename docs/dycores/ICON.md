@@ -6,7 +6,7 @@ dycores: the vertical grid, the column solver, the C-grid operators and the test
 
 ## Discretization
 
-Dry compressible Euler equations, shallow atmosphere, flat ground, on the extruded triangular C grid
+Dry compressible Euler equations, shallow atmosphere, with orography (terrain-following levels), on the extruded triangular C grid
 of ICON (Zängl et al. 2015): `vn` at the edges × layers, `w` at the cells (circumcentres) ×
 interfaces, `ρ`, `ρθ` and the prognostic Exner pressure `exner` at the cells × layers. The
 defaults of `ICONNonhydrostatic` are those of ICON's namelists (`nonhydrostatic_nml`,
@@ -103,8 +103,32 @@ ICON's grids, a solid-body rotation shows a deformation of up to 0.17/a at the m
 and below 0.01/a where the quadrilateral is a rhombus (tested). The ICON grid files
 (`icon_grid_00xx_R02Byy_G.nc`) are read with `read_grid` and give exactly ICON's geometry.
 
-**Differences to ICON:** flat ground only (ICON's `jabw` test has the JW orography with
-terrain-following levels; `dcmip_bw_11` is flat); the vn diffusion `itype_vn_diffu = 1` (ICON's
+**Orography** (`surface_height`, or ICON's levels `z_half = read_icon_levels(file, grid)`):
+terrain-following levels over the reference levels `vgrid` (`terrain_following`, SLEVE with
+ICON's `sleve_nml` defaults or Gal-Chen), the equations along the levels as in Zängl et al.
+(2015):
+
+- horizontal mass and ρθ fluxes times the layer thickness at the edges, divided by that of the cell;
+- the contravariant correction `w_c = vn ∂z/∂n + vt ∂z/∂t` (ICON `w_concorr_c`) in the vertical
+  fluxes of the column solve and in the vertical advection of `vn` and `w`; `w = w_c` at the ground;
+- the horizontal pressure gradient `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` of the deviation from the
+  reference atmosphere at the heights of the levels (`igradp_method = 1`);
+- Rayleigh damping and the height profiles of damping and diffusion on the reference levels.
+
+Against Fortran ICON's `jabw` (JW orography −315 to 113 m, R2B5, 64 SLEVE levels, the jabw10d
+namelist), started from ICON's state on ICON's levels: one advective step differs from ICON by
+0.9 % of ICON's own change of `w` (the flat model by a factor 440), the vn tendencies of advection and
+Coriolis by 0.0 %, of the pressure gradient by 0.3 %; after 10 days p_s min 928.85 hPa against
+ICON's 928.50 hPa, the p_s difference rms 0.12 hPa, max 2.0 hPa. From the analytic JW state on our
+SLEVE levels (`examples/icon_jabw.jl` without `--init`) p_s min is 928.84 hPa.
+
+The atmosphere at rest of DCMIP 2012 test 2-0 over its 2 km mountain (30 Gal-Chen levels to 12 km)
+stays at rest to max |vn| 0.19 m/s, max |w| 1e-3 m/s over two days (`create_spherical_mesh(5)`, rms vn
+0.008 m/s, half that of `create_spherical_mesh(4)`).
+
+**Differences to ICON:** over orography the pressure gradient of `igradp_method = 1` (ICON's
+default 3 adds the truncation over steep slopes, Zängl 2012), and no metric correction of the
+divergence damping or of the θ diffusion (`l_zdiffu_t`); the vn diffusion `itype_vn_diffu = 1` (ICON's
 jabw10d uses 2); no extra CFL diffusion (`lextra_diffu`); no tracers or physics (`ndyn_substeps`
 only sets when the diffusion is called); no nest boundaries; serial.
 

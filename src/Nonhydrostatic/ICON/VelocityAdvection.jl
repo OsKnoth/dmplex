@@ -21,22 +21,28 @@ end
     @inbounds y[i, k] = s
 end
 
-"Velocity tendency of `vn`: vorticity flux, kinetic-energy gradient (`coeff_gradekin`), vertical advection (`q`: wgtfacq)."
+"""
+Velocity tendency of `vn`: vorticity flux, kinetic-energy gradient (`coeff_gradekin`), vertical
+advection with the contravariant `w - w_c` (`wcf`: `w_c` at the full levels of the cells; `dz`,
+`wlow`, `q` (wgtfacq_e) at the edges).
+"""
 @kernel function icon_vn_tendency_kernel!(tvn, @Const(vn), @Const(vt), @Const(Ke), @Const(K), @Const(ζv), @Const(w),
-                                          @Const(edge_cells), @Const(edge_vertices), @Const(edge_height),
-                                          @Const(gradient), @Const(edge_coriolis), @Const(dz), @Const(wlow), q, nlev)
+                                          @Const(wcf), @Const(edge_cells), @Const(edge_vertices), @Const(edge_height),
+                                          @Const(gradient), @Const(edge_coriolis), @Const(dz), @Const(wlow), @Const(q),
+                                          nlev)
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
         ζ = (ζv[edge_vertices[1, e], k] + ζv[edge_vertices[2, e], k]) / 2
         g1, g2 = gradient[1, e], gradient[2, e]
         grad_K = Ke[e, k] * (g1 - g2) + g2 * K[r, k] - g1 * K[l, k]
-        we = (edge_height[1, e] * (w[l, k] + w[l, k + 1]) + edge_height[2, e] * (w[r, k] + w[r, k + 1])) / 2
+        we = edge_height[1, e] * ((w[l, k] + w[l, k + 1]) / 2 - wcf[l, k]) +
+             edge_height[2, e] * ((w[r, k] + w[r, k + 1]) / 2 - wcf[r, k])
         # vn at the ground quadratically extrapolated (wgtfacq_e), at the lid that of the top layer
-        vlow = k > 1 ? wlow[k] * vn[e, k - 1] + (1 - wlow[k]) * vn[e, k] :
-               nlev >= 3 ? q[1] * vn[e, 1] + q[2] * vn[e, 2] + q[3] * vn[e, 3] : vn[e, 1]
-        vup = k < nlev ? wlow[k + 1] * vn[e, k] + (1 - wlow[k + 1]) * vn[e, k + 1] : vn[e, k]
-        tvn[e, k] = (edge_coriolis[e] + ζ) * vt[e, k] - grad_K - we * (vup - vlow) / dz[k]
+        vlow = k > 1 ? wlow[e, k] * vn[e, k - 1] + (1 - wlow[e, k]) * vn[e, k] :
+               nlev >= 3 ? q[e, 1] * vn[e, 1] + q[e, 2] * vn[e, 2] + q[e, 3] * vn[e, 3] : vn[e, 1]
+        vup = k < nlev ? wlow[e, k + 1] * vn[e, k] + (1 - wlow[e, k + 1]) * vn[e, k + 1] : vn[e, k]
+        tvn[e, k] = (edge_coriolis[e] + ζ) * vt[e, k] - grad_K - we * (vup - vlow) / dz[e, k]
     end
 end
 
@@ -57,8 +63,8 @@ end
                                               @Const(tangent_sign), @Const(wlow), nlev)
     e, j = @index(Global, NTuple)
     @inbounds if 2 <= j <= nlev
-        vni = wlow[j] * vn[e, j - 1] + (1 - wlow[j]) * vn[e, j]
-        vti = wlow[j] * vt[e, j - 1] + (1 - wlow[j]) * vt[e, j]
+        vni = wlow[e, j] * vn[e, j - 1] + (1 - wlow[e, j]) * vn[e, j]
+        vti = wlow[e, j] * vt[e, j - 1] + (1 - wlow[e, j]) * vt[e, j]
         dn = (w[edge_cells[2, e], j] - w[edge_cells[1, e], j]) * inverse_dual[e]
         dt = tangent_sign[e] * (wv[edge_vertices[2, e], j] - wv[edge_vertices[1, e], j]) * inverse_primal[e]
         gw[e, j] = vni * dn + vti * dt
@@ -68,21 +74,51 @@ end
 end
 
 """
-Advection of `w` at the interior interfaces: `-Σ_e b_{i,e} gw_e - w ∂w/∂z` with
-the second-order `∂w/∂z` of the unequal layers (`c1`, `c2`: coeff1_dwdz, coeff2_dwdz).
+Advection of `w` at the interior interfaces: `-Σ_e b_{i,e} gw_e - (w - w_c) ∂w/∂z` with
+the second-order `∂w/∂z` of the unequal layers (`c1`, `c2`: coeff1_dwdz, coeff2_dwdz), `wch` the
+contravariant correction `w_c` at the interfaces.
 """
-@kernel function icon_w_tendency_kernel!(tw, @Const(gw), @Const(w), @Const(cell_edges), @Const(bilinear), @Const(c1),
-                                         @Const(c2), nlev)
+@kernel function icon_w_tendency_kernel!(tw, @Const(gw), @Const(w), @Const(wch), @Const(cell_edges), @Const(bilinear),
+                                         @Const(c1), @Const(c2), nlev)
     i, j = @index(Global, NTuple)
     @inbounds if 2 <= j <= nlev
         s = 0.0
         for n in axes(cell_edges, 1)
             s += bilinear[n, i] * gw[cell_edges[n, i], j]
         end
-        tw[i, j] = -s - w[i, j] * (c1[j] * w[i, j + 1] - c2[j] * w[i, j - 1] + (c2[j] - c1[j]) * w[i, j])
+        tw[i, j] = -s - (w[i, j] - wch[i, j]) *
+                        (c1[i, j] * w[i, j + 1] - c2[i, j] * w[i, j - 1] + (c2[i, j] - c1[i, j]) * w[i, j])
     else
         tw[i, j] = 0.0
     end
+end
+
+"""
+Contravariant correction `w_c = vn ∂z/∂n + vt ∂z/∂t` at the edges (full levels), `vt` by the RBF
+(ICON `z_w_concorr_me`).
+"""
+@kernel function icon_concorr_edge_kernel!(wce, @Const(vn), @Const(rbf_edges), @Const(rbf), @Const(ddxn), @Const(ddxt))
+    e, k = @index(Global, NTuple)
+    s = 0.0
+    @inbounds for j in axes(rbf_edges, 1)
+        s += rbf[j, e] * vn[rbf_edges[j, e], k]
+    end
+    @inbounds wce[e, k] = vn[e, k] * ddxn[e, k] + s * ddxt[e, k]
+end
+
+"""
+The contravariant correction of `vn` over orography at the full levels (`work.wcf`) and the
+interfaces (`work.wch`) of the cells, the edge values averaged with the bilinear weights (ICON
+`w_concorr_c`); zero for flat ground.
+"""
+function contravariant_correction!(m::ICONNonhydrostatic, vn)
+    m.orography || return nothing
+    w, x, nlev = m.work, m.metric, num_layers(m.vgrid)
+    nc, ne = num_cells(m.grid), num_edges(m.grid)
+    launch!(m, icon_concorr_edge_kernel!, (ne, nlev), w.G, vn, m.rbf_edges, m.rbf, x.ddxn, x.ddxt)
+    launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.wcf, w.G, m.cell_edges, m.bilinear)
+    launch!(m, concorr_interface_kernel!, (nc, nlev + 1), w.wch, w.wcf, m.wlow, m.vertical.wgtfacq, nlev)
+    return nothing
 end
 
 """
@@ -96,13 +132,15 @@ function velocity_tendencies!(tvn, tw, m::ICONNonhydrostatic, y; vn_only::Bool=f
     launch!(m, icon_edge_kinetic_kernel!, (ne, nlev), w.vt, w.Ke, y.vn, m.rbf_edges, m.rbf)
     launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.K, w.Ke, m.cell_edges, m.bilinear)
     launch!(m, vorticity_kernel!, (nv, nlev), w.ζv, y.vn, m.vertex_edges, m.curl)
-    launch!(m, icon_vn_tendency_kernel!, (ne, nlev), tvn, y.vn, w.vt, w.Ke, w.K, w.ζv, y.w, m.edge_cells,
-            m.edge_vertices, m.edge_height, m.gradient, m.edge_coriolis, m.dz, m.wlow, m.vertical.wgtfacq, nlev)
+    contravariant_correction!(m, y.vn)
+    x = m.metric
+    launch!(m, icon_vn_tendency_kernel!, (ne, nlev), tvn, y.vn, w.vt, w.Ke, w.K, w.ζv, y.w, w.wcf, m.edge_cells,
+            m.edge_vertices, m.edge_height, m.gradient, m.edge_coriolis, x.dze, x.wlowe, x.qe, nlev)
     vn_only && return nothing
     launch!(m, icon_vertex_w_kernel!, (nv, nlev + 1), w.wv, y.w, m.vertex_cells, m.vertex_weight)
     launch!(m, icon_edge_w_gradient_kernel!, (ne, nlev + 1), w.gw, y.vn, w.vt, y.w, w.wv, m.edge_cells,
-            m.edge_vertices, m.inverse_dual, m.inverse_primal, m.tangent_sign, m.wlow, nlev)
-    launch!(m, icon_w_tendency_kernel!, (nc, nlev + 1), tw, w.gw, y.w, m.cell_edges, m.bilinear, m.vertical.c1dwdz,
+            m.edge_vertices, m.inverse_dual, m.inverse_primal, m.tangent_sign, x.wlowe, nlev)
+    launch!(m, icon_w_tendency_kernel!, (nc, nlev + 1), tw, w.gw, y.w, w.wch, m.cell_edges, m.bilinear, m.vertical.c1dwdz,
             m.vertical.c2dwdz, nlev)
     return nothing
 end

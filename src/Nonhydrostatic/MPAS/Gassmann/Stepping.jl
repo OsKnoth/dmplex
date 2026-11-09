@@ -20,9 +20,13 @@ arrays, the `vn` tendency `w.tvn` (PV flux, `-∂_n K`, vertical coupling, and
 `pressure` times the pressure gradient) and the explicit `w` tendency `w.tw`.
 """
 function slow_tendencies!(m::MPASGassmannNonhydrostatic, ys, pressure)
-    w, nlev = m.work, num_layers(m.vgrid)
+    w, x, nlev = m.work, m.metric, num_layers(m.vgrid)
     nc, ne, nv = num_cells(m.grid), num_edges(m.grid), num_vertices(m.grid)
     launch!(m, diagnose_kernel!, (nc, nlev), w.θ, w.π, w.K, ys.vn, ys.ρ, ys.ρθ, m.cell_edges, m.kinetic)
+    # over orography the contravariant w of the stage state and the deviation of π from the reference
+    contravariant_correction!(m, ys.vn)
+    ŵ = m.orography ? (launch!(m, contravariant_w_kernel!, (nc, nlev + 1), w.ŵ, ys.w, w.wch); w.ŵ) : ys.w
+    m.orography && pressure > 0 && exner_deviation!(m, w.π)
     vk = m.vertex_kinetic
     if vk !== nothing
         launch!(m, vertex_kinetic_kernel!, (nv, nlev), w.Kv, ys.vn, m.vertex_edges, vk.weights)
@@ -36,7 +40,7 @@ function slow_tendencies!(m::MPASGassmannNonhydrostatic, ys, pressure)
     if m.vertical > 0
         # with the five-band solve ∂K_w/∂z is implicit in the w equation, in the vn equation K = K_h + K_w
         m.five_band || launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w, m.dz, m.dzh)
-        launch!(m, eta_kernel!, (ne, nlev + 1), w.η, ys.vn, ys.w, m.edge_cells, m.inverse_dual, m.dzh)
+        launch!(m, eta_kernel!, (ne, nlev + 1), w.η, ys.vn, ys.w, m.edge_cells, m.inverse_dual, x.dzh)
         launch!(m, w_tendency_vi_kernel!, (nc, nlev + 1), w.tw, w.η, ys.vn, w.ρe, w.K, m.cell_edges, m.inner, m.dzh,
                 m.wlow, m.vertical == 2)
         m.five_band && launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w, m.dz, m.dzh)
@@ -44,9 +48,31 @@ function slow_tendencies!(m::MPASGassmannNonhydrostatic, ys, pressure)
         launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
                 m.inverse_dual, m.dz)
     end
-    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ys.w, ys.ρ, w.θ, w.π, w.K, w.qe, w.η,
-            m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, m.dz, m.dzh, m.wlow, nlev,
-            m.vertical, pressure)
+    m.orography && launch!(m, w_concorr_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, w.wch, m.dzh, nlev)
+    launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ŵ, ys.ρ, w.θ, m.orography ? w.πp : w.π, w.K,
+            w.qe, w.η, m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, x.dz, x.dzh, m.wlow,
+            w.dπdz, x.ddxn, nlev, m.vertical, pressure, m.orography)
+    return nothing
+end
+
+"""
+The contravariant correction `w_c` of `vn` at the full levels (`work.wcf`) and the interfaces
+(`work.wch`) of the cells over orography; zero for flat ground.
+"""
+function contravariant_correction!(m::MPASGassmannNonhydrostatic, vn)
+    m.orography || return nothing
+    w, x, nlev = m.work, m.metric, num_layers(m.vgrid)
+    nc = num_cells(m.grid)
+    launch!(m, concorr_cell_kernel!, (nc, nlev), w.wcf, vn, m.cell_edges, m.inner, x.ddxn)
+    launch!(m, concorr_interface_kernel!, (nc, nlev + 1), w.wch, w.wcf, m.wlow, x.q, nlev)
+    return nothing
+end
+
+"The deviation of `π` from the reference atmosphere and its vertical derivative (`work.πp`, `work.dπdz`)."
+function exner_deviation!(m::MPASGassmannNonhydrostatic, π)
+    w, nlev = m.work, num_layers(m.vgrid)
+    launch!(m, exner_deviation_kernel!, (num_cells(m.grid), nlev), w.πp, w.dπdz, π, m.metric.πref, m.metric.z_full,
+            nlev)
     return nothing
 end
 
@@ -58,21 +84,26 @@ end
 `five_band_solve_kernel!` or `vertical_solve_kernel!`.
 """
 function fast_update!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
-    w, nlev = m.work, num_layers(m.vgrid)
+    w, x, nlev = m.work, m.metric, num_layers(m.vgrid)
     nc, ne = num_cells(m.grid), num_edges(m.grid)
+    oro = m.orography
     launch!(m, vn_update_kernel!, (ne, nlev), y.vn, y0.vn, w.tvn, w.hd, τ)
-    launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight)
+    launch!(m, flux_kernel!, (ne, nlev), w.F, w.Fθ, y.vn, ys.ρ, w.θ, m.edge_cells, m.edge_weight, oro ? x.dz : 1.0)
     launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
-            m.divergence, τ)
-    launch!(m, theta_interface_kernel!, nc, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ys.w, m.dz, m.dzh, m.wlow,
+            m.divergence, τ, oro ? x.rdz : 1.0)
+    # the contravariant correction of the new vn in the vertical fluxes, θ advected with w - w_c of ys
+    contravariant_correction!(m, y.vn)
+    ŵ = oro ? (launch!(m, contravariant_w_kernel!, (nc, nlev + 1), w.ŵ, ys.w, w.wch); w.ŵ) : ys.w
+    launch!(m, theta_interface_kernel!, nc, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ŵ, m.dz, m.dzh, m.wlow,
             τ, nlev, m.vertical_theta > 0)
     if m.five_band
         launch!(m, five_band_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.band5, y0.w, y0.ρ, w.π0, w.γ0, w.θ, w.θi, w.tw,
-                w.ρexpl, w.ρθexpl, y0.ρθ, m.dz, m.dzh, m.wlow, m.rayleigh, τ, m.beta, nlev, m.vertical_theta == 2)
+                w.ρexpl, w.ρθexpl, y0.ρθ, m.dz, m.dzh, m.wlow, m.rayleigh, w.wch, τ, m.beta, nlev,
+                m.vertical_theta == 2)
     else
         launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ,
-                w.θi, ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, τ, m.beta, nlev,
-                m.vertical_theta == 2, false)
+                w.θi, ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, w.wch, τ, m.beta,
+                nlev, m.vertical_theta == 2, false)
     end
     return y
 end
@@ -114,17 +145,21 @@ function iap_step!(m::MPASGassmannNonhydrostatic, y, y0, ys, dt)
     nc, ne = num_cells(m.grid), num_edges(m.grid)
     w.started[] || (copyto!(w.πold, w.π0); w.started[] = true)
     launch!(m, exner_mean_kernel!, (nc, nlev), w.πm, w.πold, w.π0)
+    m.orography && exner_deviation!(m, w.πm)
+    πm, x = m.orography ? w.πp : w.πm, m.metric
     # predictor
     slow_tendencies!(m, y0, 0.0)
     copyto!(w.tvn1, w.tvn); copyto!(w.tw1, w.tw); copyto!(w.θs, w.θ)
-    launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, w.πm, m.edge_cells, m.edge_weight, m.inverse_dual)
+    launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, πm, m.edge_cells, m.edge_weight, m.inverse_dual,
+            w.dπdz, x.ddxn, m.orography)
     fast_update!(m, ys, y0, y0, dt)
     # corrector
     slow_tendencies!(m, ys, 0.0)
     launch!(m, mean_kernel!, (ne, nlev), w.tvn, w.tvn1)
     launch!(m, mean_kernel!, (nc, nlev + 1), w.tw, w.tw1)
     launch!(m, mean_kernel!, (nc, nlev), w.θ, w.θs)
-    launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, w.πm, m.edge_cells, m.edge_weight, m.inverse_dual)
+    launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, πm, m.edge_cells, m.edge_weight, m.inverse_dual,
+            w.dπdz, x.ddxn, m.orography)
     return fast_update!(m, y, y0, ys, dt)
 end
 

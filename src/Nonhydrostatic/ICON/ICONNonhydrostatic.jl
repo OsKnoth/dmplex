@@ -9,14 +9,27 @@
                        hdiff_smag_fac2=0.07137, hdiff_smag_fac3=0, hdiff_smag_fac4=1, hdiff_smag_z=32500,
                        hdiff_smag_z2=60686, hdiff_smag_z3=50000, hdiff_smag_z4=90000, lhdiff_vn=true,
                        lhdiff_w=true, lhdiff_temp=true, rbf_vec_scale_v=0.5, divavg_cntrwgt=0.5,
-                       hyperdiffusion=0, backend=CPU())
+                       hyperdiffusion=0, surface_height=nothing, z_half=nothing, coordinate=:sleve,
+                       flat_height=16000, decay_scale=4000, decay_exponent=1.35, backend=CPU())
 
 Dry compressible Euler equations on the extruded triangular C grid of ICON
 (Zängl et al. 2015, `mo_solve_nonhydro`, `mo_velocity_advection`), shallow
 atmosphere, flat ground. `grid` is the `TRiSKGrid` of a triangle mesh with
 circumcentres. Lorenz staggering: `vn` at the edges × layers, `w` at the cells
 × interfaces, `ρ`, `ρθ` and the prognostic Exner pressure `exner` at the cells
-× layers (state `(vn, w, ρ, ρθ, exner)`). The defaults are those of ICON's
+× layers (state `(vn, w, ρ, ρθ, exner)`).
+
+**Orography**: `surface_height(lon, lat)` (or the heights of the cells) gives terrain-following
+levels over the reference levels of `vgrid` (`terrain_following` with `coordinate`,
+`flat_height`, `decay_scale`, `decay_exponent`), or `z_half` the interfaces of every cell
+(cells × nlev+1, such as ICON's `z_ifc`). As in Zängl et al. (2015) the equations are along the
+levels: the horizontal fluxes times the layer thickness `Δz_e` at the edges, divided by `Δz_i`;
+the contravariant correction `w_c = vn ∂z/∂n + vt ∂z/∂t` (edges, full levels; bilinear to the
+cells, interpolated to the interfaces, quadratically extrapolated to the ground, ICON
+`w_concorr_c`) in the vertical fluxes and the vertical advection, `w = w_c` at the ground; the
+horizontal pressure gradient `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` of the deviation `π'` from the
+reference state at the heights of the levels (ICON `igradp_method = 1`). The Rayleigh damping
+and the profiles of the damping and the diffusion are on the reference levels (`vct_a`). The defaults are those of ICON's
 namelists (`nonhydrostatic_nml`, `diffusion_nml`, `dynamics_nml`) and ICON's
 constants (`ICON_RD`, `ICON_CPD`, `ICON_GRAV`, earth radius and rotation).
 
@@ -98,8 +111,9 @@ above `damping_height` (`lhdiff_w`); `θ += A ∇⋅(K ∇θ)` at constant `ρ`,
 `hdiff_order = -1` switches it off; `hyperdiffusion = ν₄` adds `-ν₄ L(L(vn))`
 to every dynamics step.
 
-Differences to ICON: flat ground only (ICON's `jabw` test has the JW
-orography, `dcmip_bw_11` is flat); the vn diffusion is `itype_vn_diffu = 1`;
+Differences to ICON: the pressure gradient over orography is that of
+`igradp_method = 1`, without the truncation over steep slopes, the divergence damping and the θ
+diffusion without the metric correction; the vn diffusion is `itype_vn_diffu = 1`;
 no extra CFL diffusion (`lextra_diffu`); no tracer or physics coupling
 (`ndyn_substeps` only sets when the diffusion is called); no nest-boundary
 terms. Started from ICON's state, one step agrees with ICON to 0.1–1 % of
@@ -130,9 +144,11 @@ struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
     green_gauss::NTuple{3, M}   # n_{e,i} l_e n_e / A_i on the unit sphere: Green–Gauss gradient at the cells
     edge_vectors::M      # 12 × ne: x_e - x_l, x_e - x_r, n_e, t_e (unit sphere)
     cell_areas::V        # a² A_i
-    dz::V
-    dzh::V
-    wlow::V
+    dz::M                # layer thickness, cells × layers
+    dzh::M               # distance of the layer centres at the interfaces, cells × interfaces
+    wlow::M              # weight of the layer below at the interfaces, cells × interfaces
+    orography::Bool      # terrain-following levels (the metric terms)
+    metric::NamedTuple   # edges: Δz_e, wlow_e, wgtfacq_e, ∂z/∂n, ∂z/∂t; cells: z_full; host: cells, edges
     rayleigh::V          # Klemp's coefficient of w at the interfaces (rayleigh_w)
     vertical::NamedTuple # reference state and vertical metric coefficients
     work::NamedTuple
@@ -168,7 +184,9 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                             hdiff_smag_z2::Real=1600 + 50000 + sqrt(1600 * (1600 + 50000)),
                             hdiff_smag_z3::Real=50000.0, hdiff_smag_z4::Real=90000.0, lhdiff_vn::Bool=true,
                             lhdiff_w::Bool=true, lhdiff_temp::Bool=true, rbf_vec_scale_v::Real=0.5,
-                            divavg_cntrwgt::Real=0.5, hyperdiffusion::Real=0.0, backend=KernelAbstractions.CPU())
+                            divavg_cntrwgt::Real=0.5, hyperdiffusion::Real=0.0, surface_height=nothing,
+                            z_half=nothing, coordinate::Symbol=:sleve, flat_height::Real=16000.0,
+                            decay_scale::Real=4000.0, decay_exponent::Real=1.35, backend=KernelAbstractions.CPU())
     size(grid.cell_edges, 1) == 3 || throw(ArgumentError("ICONNonhydrostatic needs a triangle mesh"))
     itime_scheme in (4, 6) || throw(ArgumentError("itime_scheme must be 4 or 6"))
     divdamp_order in (2, 4, 24) || throw(ArgumentError("divdamp_order must be 2, 4 or 24"))
@@ -206,32 +224,40 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
         edge_vectors[7:9, e] .= n
         edge_vectors[10:12, e] .= t
     end
-    z_top, zh, zc, nl = vgrid.z_half[end], vgrid.z_half, vgrid.z_full, nlev
-    # Klemp et al. (2008) at the interior interfaces from damping_height up (rayleigh_type = 2)
+    # terrain-following levels: the interfaces of the cells, at the edges by c_lin_e
+    zi = model_levels(vgrid, grid.centers, surface_height, z_half; coordinate, flat_height, decay_scale, decay_exponent)
+    orography = any(i -> any(j -> zi[i, j] != vgrid.z_half[j], 1:(nlev + 1)), 1:nc)
+    cm = column_metrics(zi)
+    em = column_metrics([edge_height[1, e] * zi[grid.edge_cells[1, e], j] + edge_height[2, e] * zi[grid.edge_cells[2, e], j]
+                         for e in 1:ne, j in 1:(nlev + 1)])
+    z_top, zh, nl = vgrid.z_half[end], vgrid.z_half, nlev
+    # Klemp et al. (2008) at the interior interfaces from damping_height up (rayleigh_type = 2), reference levels
     rayleigh = [2 <= j <= nl && zh[j] >= damping_height ?
                 damping_rate * (1 - tanh(3.8 * (z_top - zh[j]) / max(1e-6, z_top - damping_height))) : 0.0
                 for j in 1:(nl + 1)]
-    # reference atmosphere of ICON (h_scal_bg, t0sl_bg, del_t_bg, p0sl_bg) at the layers and interfaces
-    ref_p(z) = 101325.0 * exp(-ICON_GRAV / ICON_RD * 10000.0 / 213.15 * log((exp(z / 10000.0) * 213.15 + 75.0) / 288.15))
-    ref_T(z) = 213.15 + 75.0 * exp(-z / 10000.0)
-    ref_π(z) = (ref_p(z) / P0)^(ICON_RD / ICON_CPD)
-    θref = [ref_T(z) / ref_π(z) for z in zc]
-    dπref = [-ICON_GRAV / (ICON_CPD * ref_T(z) / ref_π(z)) for z in zh]
+    # reference atmosphere of ICON at the layers and interfaces
+    ref_π(z) = reference_atmosphere(z)[2]
+    θref = map(z -> reference_atmosphere(z)[1] / ref_π(z), cm.z_full)
+    dπref = map(z -> -ICON_GRAV / (ICON_CPD * reference_atmosphere(z)[1] / ref_π(z)), cm.z_half)
     # second-order ∂w/∂z at the interfaces (coeff1_dwdz, coeff2_dwdz) and the quadratic extrapolation
-    # of a layer field to the ground (wgtfacq)
-    c1dwdz, c2dwdz = zeros(nl + 1), zeros(nl + 1)
-    for j in 2:nl
-        c1dwdz[j] = vgrid.dz[j - 1] / vgrid.dz[j] / (zh[j + 1] - zh[j - 1])
-        c2dwdz[j] = vgrid.dz[j] / vgrid.dz[j - 1] / (zh[j + 1] - zh[j - 1])
+    # of a layer field to the ground (wgtfacq) at the cells and the edges
+    c1dwdz, c2dwdz = zeros(nc, nl + 1), zeros(nc, nl + 1)
+    for i in 1:nc, j in 2:nl
+        c1dwdz[i, j] = cm.dz[i, j - 1] / cm.dz[i, j] / (cm.z_half[i, j + 1] - cm.z_half[i, j - 1])
+        c2dwdz[i, j] = cm.dz[i, j] / cm.dz[i, j - 1] / (cm.z_half[i, j + 1] - cm.z_half[i, j - 1])
     end
-    wgtfacq = if nl >= 3
-        z1, z2, z3 = zc[1], zc[2], zc[3]
-        q3 = z1 * z2 / (z2 - z3) / (z1 - z3)
-        q2 = (z1 - q3 * (z1 - z3)) / (z1 - z2)
-        (1 - q2 - q3, q2, q3)
-    else
-        (1.0, 0.0, 0.0)
+    qc = [ground_extrapolation(cm, i)[n] for i in 1:nc, n in 1:3]
+    qe = [ground_extrapolation(em, e)[n] for e in 1:ne, n in 1:3]
+    # slopes of the levels at the edges: normal from the cells, tangential from the vertices (cells_aw_verts)
+    vw = grid.vertex_kites ./ grid.vertex_areas'
+    zv = zeros(nv, nl)
+    for v in 1:nv, n in axes(grid.vertex_cells, 1)
+        c = grid.vertex_cells[n, v]
+        c > 0 && (zv[v, :] .+= vw[n, v] .* cm.z_full[c, :])
     end
+    ddxn = [(cm.z_full[grid.edge_cells[2, e], k] - cm.z_full[grid.edge_cells[1, e], k]) / (a * d[e]) for e in 1:ne, k in 1:nl]
+    ddxt = [tangent_sign[e] * (zv[grid.edge_vertices[2, e], k] - zv[grid.edge_vertices[1, e], k]) / (a * l[e])
+            for e in 1:ne, k in 1:nl]
     mean_area = 4π * a^2 / nc
     o4 = divdamp_order == 4 || (divdamp_order == 24 && divdamp_fac_o2 <= 4 * divdamp_fac)
     o2 = divdamp_order == 2 || (divdamp_order == 24 && divdamp_fac_o2 * mean_area > 1e-6)
@@ -257,7 +283,7 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
             ρi=z(nc, nlev + 1), θp=z(nc, nlev + 1), π0=z(nc, nlev), δ=z(nc, nlev), δ2=z(nc, nlev), G=z(ne, nlev),
             ζ=z(nv, nlev), Lvn=z(ne, nlev), uvert=ntuple(_ -> z(nv, nlev), 3), uvert2=ntuple(_ -> z(nv, nlev), 3),
             kh=z(ne, nlev), n2e=z(ne, nlev), Lw=z(nc, nlev + 1), substep=Ref(0),
-            hd=z(ne, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
+            hd=z(ne, nlev), wcf=z(nc, nlev), wch=z(nc, nlev + 1), πp=z(nc, nlev), dπdz=z(nc, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
     # mo_nh_diffusion: vertex RBF, the quadrilateral of each edge, coefficients
     rbf_v = rbf_vertex_coefficients(grid; scale=rbf_vec_scale_v)
     quad = zeros(Int, 4, ne)
@@ -300,9 +326,12 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                               dev(flux_edges), dev(flux_weights), dev(grid.vertex_edges), dev(curl), dev(grid.vertex_cells),
                               dev(grid.vertex_kites ./ grid.vertex_areas'), dev([2omega * x[3] for x in grid.edge_points]),
                               map(dev, green_gauss), dev(edge_vectors), dev(a^2 .* grid.cell_areas),
-                              dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh),
-                              (θref=dev(θref), πref=dev(ref_π.(zc)), dπref=dev(dπref), c1dwdz=dev(c1dwdz),
-                               c2dwdz=dev(c2dwdz), wgtfacq=wgtfacq), work, a, Float64(beta),
+                              dev(cm.dz), dev(cm.dzh), dev(cm.wlow), orography,
+                              (dze=dev(em.dz), rdz=dev(1 ./ cm.dz), wlowe=dev(em.wlow), qe=dev(qe), ddxn=dev(ddxn), ddxt=dev(ddxt),
+                               z_full=dev(cm.z_full), cells=cm, edges=em),
+                              dev(rayleigh),
+                              (θref=dev(θref), πref=dev(map(ref_π, cm.z_full)), dπref=dev(dπref), c1dwdz=dev(c1dwdz),
+                               c2dwdz=dev(c2dwdz), wgtfacq=dev(qc)), work, a, Float64(beta),
                               dev(divdamp), dev(divdamp_o2), dev(divdamp_3d),
                               (0.5 - veladv_offctr, 0.5 + veladv_offctr),
                               (0.5 - rhotheta_offctr, 0.5 + rhotheta_offctr), Int(itime_scheme),
@@ -333,9 +362,9 @@ Column of `profile(z) -> (T, p, ...)` in ICON's discrete hydrostatic balance
 above `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z = 0` at every interface with the reference
 state of the vertical pressure gradient of the column solve (`icon_column_matrix_kernel!`).
 """
-function balanced_column(m::ICONNonhydrostatic, profile)
-    v, nlev, κ = m.vgrid, num_layers(m.vgrid), ICON_RD / ICON_CPD
-    θref, πref, dπref = Array(m.vertical.θref), Array(m.vertical.πref), Array(m.vertical.dπref)
+function balanced_column(m::ICONNonhydrostatic, profile, i)
+    v, nlev, κ = column_grid(m, i), num_layers(m.vgrid), ICON_RD / ICON_CPD
+    θref, πref, dπref = (Array(view(x, i, :)) for x in (m.vertical.θref, m.vertical.πref, m.vertical.dπref))
     T = [profile(z)[1] for z in v.z_full]
     πk = [(profile(z)[2] / P0)^κ for z in v.z_full]
     for j in 2:nlev

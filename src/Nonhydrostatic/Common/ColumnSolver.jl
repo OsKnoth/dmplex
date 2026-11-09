@@ -4,24 +4,24 @@
 # the kite model.
 
 """
-Weights of the cells `j-2, j-1, j, j+1` in `θ` at interface `j` for the mass
+Weights of the cells `j-2, j-1, j, j+1` of column `i` in `θ` at interface `j` for the mass
 flux `M`: linear interpolation plus `1/6` of the curvature at the upwind cell,
 third-order upwind (ICON-IAP `impl_vert_adv_scalar_5diag`), linear next to the
 boundaries where the upwind stencil would leave the column.
 """
-@inline function theta_stencil(j, M, dz, dzh, wlow, nlev)
+@inline function theta_stencil(i, j, M, dz, dzh, wlow, nlev)
     σ = 1 / 6
-    a, b, c, d = 0.0, wlow[j], 1 - wlow[j], 0.0
-    if M >= 0
+    @inbounds a, b, c, d = 0.0, wlow[i, j], 1 - wlow[i, j], 0.0
+    @inbounds if M >= 0
         if j >= 3
-            a -= σ * dzh[j] / dz[j - 1]
-            b += σ * (dzh[j] + dzh[j - 1]) / dz[j - 1]
-            c -= σ * dzh[j - 1] / dz[j - 1]
+            a -= σ * dzh[i, j] / dz[i, j - 1]
+            b += σ * (dzh[i, j] + dzh[i, j - 1]) / dz[i, j - 1]
+            c -= σ * dzh[i, j - 1] / dz[i, j - 1]
         end
     elseif j <= nlev - 1
-        b -= σ * dzh[j + 1] / dz[j]
-        c += σ * (dzh[j] + dzh[j + 1]) / dz[j]
-        d -= σ * dzh[j] / dz[j]
+        b -= σ * dzh[i, j + 1] / dz[i, j]
+        c += σ * (dzh[i, j] + dzh[i, j + 1]) / dz[i, j]
+        d -= σ * dzh[i, j] / dz[i, j]
     end
     return (a, b, c, d)
 end
@@ -31,7 +31,8 @@ end
 advection of `θ` of the base state with the mass flux of the stage state over
 `τ/2` (Crank–Nicolson, one pentadiagonal system per column) and the
 third-order upwind interface values of the result, as ICON-IAP
-(`ltheta_up_vert`); otherwise `θ` of the stage state linearly interpolated.
+(`ltheta_up_vert`); otherwise `θ` of the stage state linearly interpolated. `ws` is the
+contravariant vertical velocity (`w - w_c` over orography). The metrics are columns × levels.
 """
 @kernel function theta_interface_kernel!(θi, A, θm, @Const(θs), @Const(ρ0), @Const(ρθ0), @Const(ρs), @Const(ws),
                                          @Const(dz), @Const(dzh), @Const(wlow), τ, nlev, upwind)
@@ -40,10 +41,10 @@ third-order upwind interface values of the result, as ICON-IAP
         θi[i, 1] = θi[i, nlev + 1] = 0.0
         if !upwind
             for j in 2:nlev
-                θi[i, j] = wlow[j] * θs[i, j - 1] + (1 - wlow[j]) * θs[i, j]
+                θi[i, j] = wlow[i, j] * θs[i, j - 1] + (1 - wlow[i, j]) * θs[i, j]
             end
         else
-            M(j) = (wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]) * ws[i, j]
+            M(j) = (wlow[i, j] * ρs[i, j - 1] + (1 - wlow[i, j]) * ρs[i, j]) * ws[i, j]
             # row k: θm_k + τ/(2ρ dz) [M_{k+1} (θ_{k+1} - θm_k) - M_k (θ_k - θm_k)] = θ0_k with the interface
             # values θ_j of the upwind stencil, over the cells k-2..k+2; built when it is eliminated, from
             # the stencils of the interfaces k and k + 1 (carried along). Gaussian elimination without
@@ -53,8 +54,8 @@ third-order upwind interface values of the result, as ICON-IAP
             u1l = u2l = yl = u1ll = u2ll = yll = 0.0
             for k in 1:nlev
                 Mu = k < nlev ? M(k + 1) : 0.0
-                cu = k < nlev ? theta_stencil(k + 1, Mu, dz, dzh, wlow, nlev) : (0.0, 0.0, 0.0, 0.0)
-                f = τ / (2 * ρs[i, k] * dz[k])
+                cu = k < nlev ? theta_stencil(i, k + 1, Mu, dz, dzh, wlow, nlev) : (0.0, 0.0, 0.0, 0.0)
+                f = τ / (2 * ρs[i, k] * dz[i, k])
                 u, l = f * Mu, f * Ml
                 r1 = -l * cl[1]
                 r2 = u * cu[1] - l * cl[2]
@@ -80,7 +81,7 @@ third-order upwind interface values of the result, as ICON-IAP
                 θ1, θ2 = θk, θ1
             end
             for j in 2:nlev
-                c = theta_stencil(j, M(j), dz, dzh, wlow, nlev)
+                c = theta_stencil(i, j, M(j), dz, dzh, wlow, nlev)
                 s = 0.0
                 for n in 1:4
                     cell = j - 3 + n
@@ -133,22 +134,24 @@ linearization of `π` around the base state (`π0`, `γ0` of
 `w` divided by `dzh[j]` (lower, diagonal, upper): `(0, 1, 0)` lumped, pointwise
 at the interfaces; `(dz[j-1], 2(dz[j-1] + dz[j]), dz[j]) / 6dzh[j]` for the
 consistent CG1 mass, which keeps the system tridiagonal. The coefficients of
-the cells and interfaces next to interface `j` are carried along the sweep.
+the cells and interfaces next to interface `j` are carried along the sweep. Over orography
+the mass flux is that of the contravariant velocity, `ρ_j (β w + (1 - β) w0 - w_c)` (`wch`),
+and `w = w_c` at the ground. The metrics are columns × levels.
 """
 @kernel function vertical_solve_kernel!(w, ρ, ρθ, cp_, dp_, @Const(w0), @Const(ρθ0), @Const(π0), @Const(γ0),
                                         @Const(θs), @Const(θi), @Const(ρs), @Const(tw), @Const(ρexpl),
                                         @Const(ρθexpl), @Const(dz), @Const(dzh), @Const(wlow), @Const(rayleigh),
-                                        @Const(wmass), τ, β, nlev, iap_theta, rho_interface)
+                                        @Const(wmass), @Const(wch), τ, β, nlev, iap_theta, rho_interface)
     i = @index(Global)
     @inbounds begin
-        θh(j) = iap_theta ? θi[i, j] : wlow[j] * θs[i, j - 1] + (1 - wlow[j]) * θs[i, j]
-        ρh(j) = rho_interface ? ρs[i, j] : wlow[j] * ρs[i, j - 1] + (1 - wlow[j]) * ρs[i, j]
+        θh(j) = iap_theta ? θi[i, j] : wlow[i, j] * θs[i, j - 1] + (1 - wlow[i, j]) * θs[i, j]
+        ρh(j) = rho_interface ? ρs[i, j] : wlow[i, j] * ρs[i, j - 1] + (1 - wlow[i, j]) * ρs[i, j]
         # interface j couples to j - 1 and j + 1 through M = b w + c (zero at the boundaries), in the ρθ flux
         # with θ_j: B = θ_j b, C = θ_j c
         B(j) = 2 <= j <= nlev ? θi[i, j] * ρh(j) * β : 0.0
-        C(j) = 2 <= j <= nlev ? θi[i, j] * ρh(j) * (1 - β) * w0[i, j] : 0.0
+        C(j) = 2 <= j <= nlev ? θi[i, j] * ρh(j) * ((1 - β) * w0[i, j] - wch[i, j]) : 0.0
         # cell k: γ = κ π0/ρθ0 τ/dz and the explicit π linearized around π0
-        γl = γ0[i, 1] * τ / dz[1]
+        γl = γ0[i, 1] * τ / dz[i, 1]
         π0l = π0[i, 1]
         πl = π0l + γ0[i, 1] * (ρθexpl[i, 1] - ρθ0[i, 1])
         Bl, Cl, Bc, Cc = 0.0, 0.0, B(2), C(2)
@@ -157,17 +160,17 @@ the cells and interfaces next to interface `j` are carried along the sweep.
         dp_[i, 1] = 0.0
         for j in 2:nlev
             g = γ0[i, j]
-            γu = g * τ / dz[j]
+            γu = g * τ / dz[i, j]
             π0u = π0[i, j]
             πu = π0u + g * (ρθexpl[i, j] - ρθ0[i, j])
             Bu, Cu = B(j + 1), C(j + 1)
             θj = θh(j)
-            aj = τ * Cpd * θj * β / dzh[j]
+            aj = τ * Cpd * θj * β / dzh[i, j]
             ml, md, mu = wmass[1, j], wmass[2, j], wmass[3, j]
             lower = ml - aj * γl * Bl
             diag = md + τ * rayleigh[j] + aj * (γu + γl) * Bc
             upper = mu - aj * γu * Bu
-            rhs = ml * w0[i, j - 1] + md * w0[i, j] + mu * w0[i, j + 1] + τ * (tw[i, j] - GRAV) - τ * Cpd * θj * (1 - β) * (π0u - π0l) / dzh[j] -
+            rhs = ml * w0[i, j - 1] + md * w0[i, j] + mu * w0[i, j + 1] + τ * (tw[i, j] - GRAV) - τ * Cpd * θj * (1 - β) * (π0u - π0l) / dzh[i, j] -
                   aj * (πu - πl) - aj * (-γu * Cu + (γu + γl) * Cc - γl * Cl)
             denom = diag - lower * cp_[i, j - 1]
             cp_[i, j] = upper / denom
@@ -179,19 +182,19 @@ the cells and interfaces next to interface `j` are carried along the sweep.
         for j in nlev:-1:2
             w[i, j] = dp_[i, j] - cp_[i, j] * w[i, j + 1]
         end
-        w[i, 1] = 0.0
+        w[i, 1] = wch[i, 1]
         # mass and ρθ fluxes M_j, θ_j M_j and the new ρ, ρθ
         Mlow = θMlow = 0.0
         for k in 1:nlev
             if k < nlev
                 ρj = ρh(k + 1)
-                M = ρj * (β * w[i, k + 1] + (1 - β) * w0[i, k + 1])
+                M = ρj * (β * w[i, k + 1] + (1 - β) * w0[i, k + 1] - wch[i, k + 1])
                 θM = θi[i, k + 1] * M
             else
                 M = θM = 0.0
             end
-            ρ[i, k] = ρexpl[i, k] - τ / dz[k] * (M - Mlow)
-            ρθ[i, k] = ρθexpl[i, k] - τ / dz[k] * (θM - θMlow)
+            ρ[i, k] = ρexpl[i, k] - τ / dz[i, k] * (M - Mlow)
+            ρθ[i, k] = ρθexpl[i, k] - τ / dz[i, k] * (θM - θMlow)
             Mlow, θMlow = M, θM
         end
     end

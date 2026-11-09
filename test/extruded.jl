@@ -88,13 +88,14 @@ end
         NH.launch!(m, NH.edge_density_kernel!, (ne, nl), W.ρe, W.Fs, vn, ρ, m.edge_cells, m.edge_weight)
         tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, (ne, nl), W.tvn, vn, W.Fs, w, ρ, W.θ, W.π, W.K, qe,
                                          η, m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk,
-                                         m.dz, m.dzh, m.wlow, nl, m.vertical, 1.0); copy(W.tvn))
+                                         m.metric.dz, m.metric.dzh, m.wlow, W.dπdz, m.metric.ddxn, nl, m.vertical,
+                                         1.0, false); copy(W.tvn))
         # the PV flux does no work
         F = ρe .* vn
         t = tendency(W.qe, zero(w), zero(W.η))
         @test abs(sum(Ae .* (F .* t) * v.dz)) < 1e-12 * sum(Ae .* abs.(F .* t) * v.dz)
         # the vorticity term exchanges horizontal and vertical kinetic energy without loss
-        NH.launch!(m, NH.eta_kernel!, (ne, nl + 1), W.η, vn, w, m.edge_cells, m.inverse_dual, m.dzh)
+        NH.launch!(m, NH.eta_kernel!, (ne, nl + 1), W.η, vn, w, m.edge_cells, m.inverse_dual, m.metric.dzh)
         NH.launch!(m, NH.w_tendency_vi_kernel!, (nc, nl + 1), W.tw, W.η, vn, W.ρe, W.K, m.cell_edges, m.inner,
                    m.dzh, m.wlow, mw)
         t = tendency(zero(W.qe), w, W.η)
@@ -150,7 +151,7 @@ end
     NH.launch!(m, NH.base_exner_kernel!, (nc, nl), π0, γ0, ρθ0)
     w, ρ, ρθ, A = zeros(nc, nl + 1), zeros(nc, nl), zeros(nc, nl), zeros(nc, nl + 1, 4)
     NH.launch!(m, NH.five_band_solve_kernel!, nc, w, ρ, ρθ, A, w0, ρ0, π0, γ0, θs, θi, tw, ρexpl, ρθexpl, ρθ0,
-               m.dz, m.dzh, m.wlow, m.rayleigh, τ, β, nl, true)
+               m.dz, m.dzh, m.wlow, m.rayleigh, zeros(nc, nl + 1), τ, β, nl, true)
     mf = A[:, :, 4]
     @test ρ ≈ ρexpl .- τ ./ v.dz' .* (mf[:, 2:end] .- mf[:, 1:end-1])
     @test ρθ ≈ ρθexpl .- τ ./ v.dz' .* (θi[:, 2:end] .* mf[:, 2:end] .- θi[:, 1:end-1] .* mf[:, 1:end-1])
@@ -434,6 +435,48 @@ end
                    mw.divergence, mw.inverse_dual, mw.cell_areas, mw.diffusion.k4w, mw.diffusion.n2w, nl)
     end
     @test all(j -> maximum(abs, x[:, j]) < maximum(abs, x0[:, j]), 2:findlast(<(20000.0), mw.vgrid.z_half))
+end
+
+@testset "orography: terrain-following levels, ICON and MPAS-Gassmann at rest over a mountain" begin
+    NH = dmplex.Nonhydrostatic
+    v = VerticalGrid(10, 12000.0)
+    h = [0.0, 1000.0, -200.0]
+    z = terrain_following(v, h; flat_height=8000.0)
+    @test z[1, :] == v.z_half && z[2, 1] == 1000.0 && z[3, 1] == -200.0
+    @test z[2, v.z_half .>= 8000] == v.z_half[v.z_half .>= 8000]       # flat above flat_height
+    @test terrain_following(v, h; coordinate=:basic)[2, :] ≈ v.z_half .+ 1000 .* (1 .- v.z_half ./ 12000)
+    @test_throws ArgumentError terrain_following(v, [20000.0])
+    c = column_metrics(z)
+    @test sum(c.dz; dims=2) ≈ 12000 .- h && c.z_full[2, :] ≈ (z[2, 1:(end - 1)] .+ z[2, 2:end]) ./ 2
+    # the atmosphere at rest of DCMIP 2012 test 2-0 over its 2 km mountain: mass to round-off, small
+    # spurious winds from the truncation of the pressure gradient along the sloping levels
+    m = ICONNonhydrostatic(create_spherical_mesh(3), v; damping_height=Inf, damping_rate=0.0,
+                           surface_height=dcmip_mountain_height, coordinate=:basic, flat_height=12000.0)
+    @test m.orography && maximum(m.metric.cells.z_half[:, 1]) > 1500
+    y, ys = initial_state(m, dcmip_rest), zero_state(m)
+    m0 = NH.total_mass(m, y)
+    for _ in 1:24
+        step!(m, y, 300.0, ys)
+    end
+    @test abs(NH.total_mass(m, y) / m0 - 1) < 1e-14
+    @test maximum(abs, y.vn) < 0.3 && maximum(abs, y.w) < 2e-3
+    # zero orography is the flat model
+    mf = ICONNonhydrostatic(create_spherical_mesh(2), v; surface_height=(λ, φ) -> 0.0)
+    @test !mf.orography
+    # MPAS-Gassmann at rest over the mountain, five-band and tridiagonal column solve
+    g = TRiSKGrid(create_hexagon_mesh(3))
+    for vertical_solver in (:five_band, :tridiagonal)
+        mm = MPASGassmannNonhydrostatic(g, v; surface_height=dcmip_mountain_height, coordinate=:basic,
+                                        flat_height=12000.0, vertical_solver)
+        @test mm.orography
+        y, ys = initial_state(mm, dcmip_rest), zero_state(mm)
+        m0 = NH.total_mass(mm, y)
+        for _ in 1:24
+            step!(mm, y, 300.0, ys)
+        end
+        @test abs(NH.total_mass(mm, y) / m0 - 1) < 1e-14
+        @test maximum(abs, y.vn) < 0.5 && maximum(abs, y.w) < 5e-3
+    end
 end
 
 @testset "kite nonhydrostatic: one layer is kite shallow water" begin

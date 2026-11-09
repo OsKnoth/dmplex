@@ -28,11 +28,13 @@ end
 """
 `ρ_e`, `θ_e` of Miura's second-order upwind reconstruction at the
 backtrajectory point of the edge over `Δt/2`, and the horizontal pressure
-gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure.
+gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure `πex`; over orography
+(`oro`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` with `πex = π'` and `dπdz = ∂π'/∂z`.
 """
 @kernel function icon_miura_kernel!(ρe, θe, pg, @Const(vn), @Const(vt), @Const(ρ), @Const(θ), @Const(πex),
                                     @Const(g1), @Const(g2), @Const(g3), @Const(h1), @Const(h2), @Const(h3),
-                                    @Const(edge_cells), @Const(edge_vectors), @Const(inverse_dual), half_dt_a)
+                                    @Const(edge_cells), @Const(edge_vectors), @Const(inverse_dual), half_dt_a,
+                                    @Const(dπdz), @Const(ddxn), @Const(edge_height), oro)
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
@@ -44,7 +46,9 @@ gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure.
         ρe[e, k] = ρ[up, k] + g1[up, k] * d1 + g2[up, k] * d2 + g3[up, k] * d3
         t = θ[up, k] + h1[up, k] * d1 + h2[up, k] * d2 + h3[up, k] * d3
         θe[e, k] = t
-        pg[e, k] = ICON_CPD * t * (πex[r, k] - πex[l, k]) * inverse_dual[e]
+        dπ = (πex[r, k] - πex[l, k]) * inverse_dual[e]
+        oro && (dπ -= ddxn[e, k] * (edge_height[1, e] * dπdz[l, k] + edge_height[2, e] * dπdz[r, k]))
+        pg[e, k] = ICON_CPD * t * dπ
     end
 end
 
@@ -64,10 +68,10 @@ end
     @inbounds va[e, k] = s
 end
 
-"Mass and `ρθ` fluxes `ρ_e vn`, `ρ_e θ_e vn` (with the averaged `vn`)."
-@kernel function icon_flux_kernel!(F, Fθ, @Const(vn), @Const(ρe), @Const(θe))
+"Mass and `ρθ` fluxes `ρ_e vn Δz_e`, `ρ_e θ_e vn Δz_e` (with the averaged `vn`; `dze` 1 for flat ground)."
+@kernel function icon_flux_kernel!(F, Fθ, @Const(vn), @Const(ρe), @Const(θe), @Const(dze))
     e, k = @index(Global, NTuple)
-    @inbounds f = ρe[e, k] * vn[e, k]
+    @inbounds f = ρe[e, k] * vn[e, k] * at_ik(dze, e, k)
     @inbounds F[e, k] = f
     @inbounds Fθ[e, k] = f * θe[e, k]
 end
@@ -82,11 +86,11 @@ end
 `ρ` and `θ` at the interior interfaces for the column solve: the time average
 `a0 x^n + as x*` of the cells below and above, linearly interpolated, minus
 `(Δt/2) w* ∂x/∂z` (backtrajectory, `half_dt = Δt/2`); with `as = half_dt = 0`
-the linear interpolation of `n` (predictor). `θp` is the interpolated
-`θ - θ_ref` without the backtrajectory term (ICON `z_theta_v_pr_ic`).
+the linear interpolation of `n` (predictor), `w*` contravariant (`wch` the correction). `θp`
+is the interpolated `θ - θ_ref` without the backtrajectory term (ICON `z_theta_v_pr_ic`).
 """
 @kernel function icon_interface_kernel!(θi, ρi, θp, @Const(ρ0), @Const(ρθ0), @Const(ρs), @Const(ρθs), @Const(ws),
-                                        @Const(θref), @Const(dzh), @Const(wlow), a0, as, half_dt, nlev)
+                                        @Const(wch), @Const(θref), @Const(dzh), @Const(wlow), a0, as, half_dt, nlev)
     i = @index(Global)
     @inbounds begin
         θi[i, 1] = θi[i, nlev + 1] = ρi[i, 1] = ρi[i, nlev + 1] = θp[i, 1] = θp[i, nlev + 1] = 0.0
@@ -95,10 +99,11 @@ the linear interpolation of `n` (predictor). `θp` is the interpolated
         for j in 2:nlev
             ρu = a0 * ρ0[i, j] + as * ρs[i, j]
             θu = a0 * ρθ0[i, j] / ρ0[i, j] + as * ρθs[i, j] / ρs[i, j]
-            c = half_dt * ws[i, j] / dzh[j]
-            ρi[i, j] = wlow[j] * ρl + (1 - wlow[j]) * ρu - c * (ρu - ρl)
-            θi[i, j] = wlow[j] * θl + (1 - wlow[j]) * θu - c * (θu - θl)
-            θp[i, j] = wlow[j] * (θl - θref[j - 1]) + (1 - wlow[j]) * (θu - θref[j])
+            c = half_dt * (ws[i, j] - wch[i, j]) / dzh[i, j]
+            wl = wlow[i, j]
+            ρi[i, j] = wl * ρl + (1 - wl) * ρu - c * (ρu - ρl)
+            θi[i, j] = wl * θl + (1 - wl) * θu - c * (θu - θl)
+            θp[i, j] = wl * (θl - θref[i, j - 1]) + (1 - wl) * (θu - θref[i, j])
             ρl, θl = ρu, θu
         end
     end
@@ -111,27 +116,28 @@ end
 # `θ_j ∂π'/∂z + θ'_j ∂π_ref/∂z` with the analytic `∂π_ref/∂z = -g/(c_p θ_ref)` (`dπref`) that balances
 # gravity, the first part off-centred with `β`; `π` is linearized around `π0`,
 # `π = π0 + (R/c_v) π0/ρθ0 Δ(ρθ)`, and `ρθ` follows from it, so that `ρθ` is conserved in flux form.
-# Klemp's damping of `w`, `w/(1 + τ r_j)`, after the solve. As in ICON all but the Thomas sweeps run
+# Over orography the explicit mass flux has the contravariant correction, `ρ_j ((1 - β) w0_j - w_c,j)`,
+# and `w = w_c` at the ground. Klemp's damping of `w`, `w/(1 + τ r_j)`, after the solve. As in ICON all but the Thomas sweeps run
 # over cells × levels: the explicit parts of the layers, the tridiagonal system of the interfaces, the
 # sweeps of the columns, the update of the layers.
 
-"Explicit mass flux `(1 - β) ρ_j w0_j` at interface `j` (zero at the ground and the lid)."
-@inline icon_explicit_flux(ρi, w0, β, i, j, nlev) = 2 <= j <= nlev ? ρi[i, j] * (1 - β) * w0[i, j] : 0.0
+"Explicit mass flux `ρ_j ((1 - β) w0_j - w_c,j)` at interface `j` (zero at the ground and the lid)."
+@inline icon_explicit_flux(ρi, w0, wch, β, i, j, nlev) = 2 <= j <= nlev ? ρi[i, j] * ((1 - β) * w0[i, j] - wch[i, j]) : 0.0
 
 "`α = β θ_j ρ_j` of the implicit mass flux at interface `j` (zero at the ground and the lid)."
 @inline icon_implicit_weight(θi, ρi, β, i, j, nlev) = 2 <= j <= nlev ? β * θi[i, j] * ρi[i, j] : 0.0
 
 "ICON's `z_beta` of layer `k` (`zβ`), its explicit `ρ` (`ρx`) and `π'` (`πx`)."
-@kernel function icon_column_explicit_kernel!(zβ, ρx, πx, @Const(w0), @Const(ρθ0), @Const(π0), @Const(θi),
-                                              @Const(ρi), @Const(ρexpl), @Const(ρθexpl), @Const(πref), @Const(dz),
-                                              τ, β, nlev)
+@kernel function icon_column_explicit_kernel!(zβ, ρx, πx, @Const(w0), @Const(wch), @Const(ρθ0), @Const(π0),
+                                              @Const(θi), @Const(ρi), @Const(ρexpl), @Const(ρθexpl), @Const(πref),
+                                              @Const(dz), τ, β, nlev)
     i, k = @index(Global, NTuple)
     @inbounds begin
-        Ml, Mu = icon_explicit_flux(ρi, w0, β, i, k, nlev), icon_explicit_flux(ρi, w0, β, i, k + 1, nlev)
-        b = τ * ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k] * dz[k])
+        Ml, Mu = icon_explicit_flux(ρi, w0, wch, β, i, k, nlev), icon_explicit_flux(ρi, w0, wch, β, i, k + 1, nlev)
+        b = τ * ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k] * dz[i, k])
         zβ[i, k] = b
-        ρx[i, k] = ρexpl[i, k] - τ / dz[k] * (Mu - Ml)
-        πx[i, k] = π0[i, k] - πref[k] + ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k]) * (ρθexpl[i, k] - ρθ0[i, k]) -
+        ρx[i, k] = ρexpl[i, k] - τ / dz[i, k] * (Mu - Ml)
+        πx[i, k] = π0[i, k] - πref[i, k] + ICON_RD * π0[i, k] / (ICON_CVD * ρθ0[i, k]) * (ρθexpl[i, k] - ρθ0[i, k]) -
                    b * (θi[i, k + 1] * Mu - θi[i, k] * Ml)
     end
 end
@@ -143,11 +149,12 @@ end
     i, j = @index(Global, NTuple)
     @inbounds if 2 <= j <= nlev
         bl, bu = zβ[i, j - 1], zβ[i, j]
-        γ = τ * ICON_CPD * β * θi[i, j] / dzh[j]
+        γ = τ * ICON_CPD * β * θi[i, j] / dzh[i, j]
         lower[i, j] = -γ * bl * icon_implicit_weight(θi, ρi, β, i, j - 1, nlev)
         cp_[i, j] = -γ * bu * icon_implicit_weight(θi, ρi, β, i, j + 1, nlev)
         diag[i, j] = 1 + γ * icon_implicit_weight(θi, ρi, β, i, j, nlev) * (bl + bu)
-        pg = (1 - β) * θi[i, j] * ((π0[i, j] - πref[j]) - (π0[i, j - 1] - πref[j - 1])) / dzh[j] + θp[i, j] * dπref[j]
+        pg = (1 - β) * θi[i, j] * ((π0[i, j] - πref[i, j]) - (π0[i, j - 1] - πref[i, j - 1])) / dzh[i, j] +
+             θp[i, j] * dπref[i, j]
         dp_[i, j] = w0[i, j] + τ * (tw[i, j] - ICON_CPD * pg) - γ * (πx[i, j] - πx[i, j - 1])
     else
         lower[i, j] = cp_[i, j] = dp_[i, j] = 0.0
@@ -155,8 +162,9 @@ end
     end
 end
 
-"The Thomas sweeps of a column for `w` over the interior interfaces, then Klemp's damping."
-@kernel function icon_column_sweep_kernel!(w, cp_, dp_, @Const(lower), @Const(diag), @Const(rayleigh), τ, nlev)
+"The Thomas sweeps of a column for `w` over the interior interfaces, then Klemp's damping; `w = w_c` at the ground."
+@kernel function icon_column_sweep_kernel!(w, cp_, dp_, @Const(lower), @Const(diag), @Const(rayleigh), @Const(wch), τ,
+                                           nlev)
     i = @index(Global)
     @inbounds begin
         for j in 2:nlev
@@ -172,7 +180,7 @@ end
             w[i, j] = wj / (1 + τ * rayleigh[j])
             wu = wj
         end
-        w[i, 1] = 0.0
+        w[i, 1] = wch[i, 1]
     end
 end
 
@@ -181,9 +189,9 @@ end
                                             @Const(π0), @Const(θi), @Const(ρi), @Const(πref), @Const(dz), τ, β, nlev)
     i, k = @index(Global, NTuple)
     @inbounds begin
-        wl, wu = w[i, k], w[i, k + 1]
-        ρ[i, k] = ρx[i, k] - β * τ / dz[k] * (ρi[i, k + 1] * wu - ρi[i, k] * wl)
-        π = πx[i, k] + πref[k] - zβ[i, k] * (icon_implicit_weight(θi, ρi, β, i, k + 1, nlev) * wu -
+        wl, wu = k > 1 ? w[i, k] : 0.0, w[i, k + 1]
+        ρ[i, k] = ρx[i, k] - β * τ / dz[i, k] * (ρi[i, k + 1] * wu - ρi[i, k] * wl)
+        π = πx[i, k] + πref[i, k] - zβ[i, k] * (icon_implicit_weight(θi, ρi, β, i, k + 1, nlev) * wu -
                                              icon_implicit_weight(θi, ρi, β, i, k, nlev) * wl)
         πn[i, k] = π
         ρθ[i, k] = ρθ0[i, k] * ((π / π0[i, k] - 1) * ICON_CVD / ICON_RD + 1)
@@ -193,7 +201,7 @@ end
 "Divergence `δ += s_k ∂w/∂z` of the cells (the 3D divergence of the divergence damping, `s` = scalfac_dd3d)."
 @kernel function icon_dwdz_kernel!(δ, @Const(w), @Const(dz), @Const(s))
     i, k = @index(Global, NTuple)
-    @inbounds δ[i, k] += s[k] * (w[i, k + 1] - w[i, k]) / dz[k]
+    @inbounds δ[i, k] += s[k] * (w[i, k + 1] - w[i, k]) / dz[i, k]
 end
 
 "`vn += scale_k (δ_r - δ_l)/d_e`, the divergence damping with the coefficient `scale` per layer."
@@ -230,19 +238,20 @@ function fast_waves!(m::ICONNonhydrostatic, y, πn, y0, ys, tw, dt, corrector::B
     nc, ne = num_cells(m.grid), num_edges(m.grid)
     section(m, "edgecomp") do
         launch!(m, icon_edge_average_kernel!, (ne, nlev), w.va, y.vn, m.flux_edges, m.flux_weights)
-        launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, w.va, w.ρe, w.θe)
+        launch!(m, icon_flux_kernel!, (ne, nlev), w.F, w.Fθ, w.va, w.ρe, w.θe, m.orography ? m.metric.dze : 1.0)
+        contravariant_correction!(m, y.vn)
     end
     section(m, "vimpl") do
         launch!(m, divergence_kernel!, (nc, nlev), w.ρexpl, w.ρθexpl, y0.ρ, y0.ρθ, w.F, w.Fθ, w.hρθ, m.cell_edges,
-                m.divergence, dt)
+                m.divergence, dt, m.orography ? m.metric.rdz : 1.0)
         a0, as = corrector ? m.rth_weights : (1.0, 0.0)
-        launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, w.θp, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, v.θref, m.dzh, m.wlow,
-                a0, as, corrector ? dt / 2 : 0.0, nlev)
-        launch!(m, icon_column_explicit_kernel!, (nc, nlev), w.zβ, w.ρx, w.πx, y0.w, y0.ρθ, w.π0, w.θi, w.ρi,
+        launch!(m, icon_interface_kernel!, nc, w.θi, w.ρi, w.θp, y0.ρ, y0.ρθ, ys.ρ, ys.ρθ, ys.w, w.wch, v.θref, m.dzh,
+                m.wlow, a0, as, corrector ? dt / 2 : 0.0, nlev)
+        launch!(m, icon_column_explicit_kernel!, (nc, nlev), w.zβ, w.ρx, w.πx, y0.w, w.wch, y0.ρθ, w.π0, w.θi, w.ρi,
                 w.ρexpl, w.ρθexpl, v.πref, m.dz, dt, m.beta, nlev)
         launch!(m, icon_column_matrix_kernel!, (nc, nlev + 1), w.lower, w.diag, w.cprime, w.dprime, w.zβ, w.πx,
                 y0.w, w.π0, w.θi, w.θp, w.ρi, tw, v.πref, v.dπref, m.dzh, dt, m.beta, nlev)
-        launch!(m, icon_column_sweep_kernel!, nc, y.w, w.cprime, w.dprime, w.lower, w.diag, m.rayleigh, dt, nlev)
+        launch!(m, icon_column_sweep_kernel!, nc, y.w, w.cprime, w.dprime, w.lower, w.diag, m.rayleigh, w.wch, dt, nlev)
         launch!(m, icon_column_update_kernel!, (nc, nlev), y.ρ, y.ρθ, πn, y.w, w.zβ, w.ρx, w.πx, y0.ρθ, w.π0, w.θi,
                 w.ρi, v.πref, m.dz, dt, m.beta, nlev)
     end
