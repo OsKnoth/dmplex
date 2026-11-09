@@ -695,6 +695,63 @@ $c_p\bar\theta_j(\pi_j - \pi_{j-1}) = -g\Delta z^h_j$, upwards from the lowest l
 iteration for $\pi_j$ with the given temperature, so that an atmosphere at rest stays at rest to
 round-off.
 
+\subsection{Orography: options for the vertical discretization}\label{sec:orography}
+% Draft of the design options; not implemented in the kite model yet.
+Over orography the levels follow the terrain, $z = \zeta + h(\mathbf{x})\,b(\zeta)$ over reference levels
+$0 = \zeta_1 < \dots < \zeta_{L+1} = z_T$, with $b(0) = 1$ and $b = 0$ above a height $z_F \le z_T$. The basic
+coordinate $b = 1 - \zeta/z_T$ \cite{GalChen1975} and the smooth decay
+$b = \sinh((z_F/s)^n - (\zeta/s)^n)/\sinh((z_F/s)^n)$ \cite{Schaer2002} are the usual choices. The layer
+thickness $\Delta z_k(\mathbf{x})$ now depends on the position, and the extruded element of a kite and a layer is a
+prism with a sloping top and bottom. The column structure of Section~\ref{sec:vertical} survives unchanged:
+every Radau node $i$ carries its own column with the thicknesses $\Delta z_k(\mathbf{x}_i)$, its mass, fluxes and
+pressure gradient are those of a flat column with these thicknesses, and Theorem~\ref{thm:vertical-energy}
+holds column by column. What changes is the horizontal part and the coupling of the two.
+
+\paragraph{Mass flux and continuity} With the reference coordinate $\zeta$ the continuity equation of layer $k$
+is $\partial_t(\Delta z_k\rho_k) + \nabla_\zeta\cdot(\Delta z_k\rho_k\bu_k) + (\Omega_{k+1} - \Omega_k) = 0$,
+with the mass flux $\Omega_j$ through the sloping interface, $\Omega_j = F_j - \overline{\rho\,\bu\cdot\nabla z}_j$.
+At the Radau nodes $\Delta z_k(\mathbf{x}_i)$ is a diagonal factor of the height mass, so $\rho$, $\rho\theta$ and $w$
+keep diagonal masses $M_{h,ii}\Delta z_k(\mathbf{x}_i)$ and $M_{h,ii}\Delta z^h_j(\mathbf{x}_i)$. The correction
+$\bu\cdot\nabla z$ at the nodes needs the pointwise velocity and the gradient of the levels, both available in
+the height space; the lower boundary condition becomes $\Omega_1 = 0$, that is $w = \bu\cdot\nabla h$ at the
+ground.
+
+\paragraph{Pressure gradient} On the sloping levels $\nabla_z\pi = \nabla_\zeta\pi - \nabla z\,\partial_z\pi$. As the
+adjoint of the divergence of the transformed equations the metric term follows from the Galerkin method; the
+truncation error over steep slopes is reduced by writing it for the deviation $\pi' = \pi - \pi_\mathrm{ref}(z)$
+from a reference profile, whose gradient on height surfaces vanishes.
+
+\paragraph{The velocity mass} The energy is now
+$E = \sum_k\int\Delta z_k(\mathbf{x})\bigl[\rho|\bu|^2/2 + c_v\rho\theta\pi + \rho g\bar z_k\bigr]$, so the exact energy
+exchange of the horizontal terms needs $\partial E/\partial\bu = M_u^{(k)}\bF$ with the thickness-weighted mass
+$M_u^{(k)} = \bigl(\int\Delta z_k\,\bv_i\cdot\bv_j\bigr)$ of every layer, and the projection $\Pi_U$ of the fluxes
+with the same weighted rule (Section~\ref{sec:quadrature-mismatch}). There are three options.
+\begin{enumerate}
+\item \emph{Weighted mass per layer.} $M_u^{(k)}$ in every layer, with the rule of the projections. Energy and
+  the Casimir property of Section~\ref{sec:quadrature-mismatch} are kept, but the dual-cell blocks are
+  factorized $L$ times, which multiplies the storage of the factors and their set-up by the number of layers.
+\item \emph{Separable thickness.} If $\Delta z_k(\mathbf{x}) = \Delta\zeta_k\,J(\mathbf{x})$, as for the basic coordinate with
+  $J = 1 - h/z_T$, then $M_u^{(k)} = \Delta\zeta_k M_u^J$ with the single weighted mass
+  $M_u^J = (\int J\,\bv_i\cdot\bv_j)$. One factorization serves all layers and option 1 costs no more than flat
+  ground. A smooth decay of the terrain with height is not separable; a coordinate that is separable in a
+  few height zones keeps the number of factorizations at the number of zones.
+\item \emph{Flat velocity mass.} $M_u$ of the reference levels, the thickness only in the diagonal height mass and
+  in the fluxes. This is the choice of finite-volume C-grid models; it is cheap but gives up the exact energy
+  exchange and $\Pi_U(c\bv) = c\bv$ for the weighted fluxes, and with it the protection of the stratified rest
+  state against the sub-cell mode of Section~\ref{sec:quadrature-mismatch}.
+\end{enumerate}
+
+\paragraph{Static condensation of the kite blocks} The cost of option 1 is dominated by the factorization of
+the dual-cell blocks. A dual-cell block couples its kites only through the $s$ normal degrees of freedom of
+their common primal faces (Section~\ref{sec:quadrature-mismatch}). On every kite the remaining
+$m - 2s$ unknowns, the interior ones and those of the two dual faces, can be eliminated by a local Schur
+complement. What remains per dual cell is a cyclic block-tridiagonal system of $n_w s$ face unknowns, six for
+$U_1$ on a hexagonal mesh in place of thirty. The interior solves are independent of the dual cell and of $n_w$:
+they are small dense systems of one size for all kites of all meshes, ideal for batched solves on GPUs,
+and the same matrix for congruent kites. With a weight that varies from layer to layer only the small
+interior inverses and the face system have to be recomputed, which can be done on the fly in every layer
+instead of storing $L$ factors.
+
 %==============================================================================
 \section{From two to three dimensions}\label{sec:2d3d}
 
@@ -1073,7 +1130,8 @@ differs from the projected $K$ of the pressure term; whether an energy-conservin
 same stability exists is open. The sub-cell height modes are seen by the vertical but not by the horizontal
 pressure gradient; a pair without them, or a filter of the modes, is to be tested in 3D. The DG terms are
 serial CPU loops so far. Charney--Phillips staggering, with $\theta$ in the space of $w$, and higher vertical
-order are the next steps for the vertical part.
+order are the next steps for the vertical part. Orography needs the thickness-weighted velocity mass of Section~\ref{sec:orography}; a
+separable terrain-following coordinate or the static condensation of the kite blocks keeps its cost low.
 
 \section*{Code availability}
 {\sloppy
@@ -1139,6 +1197,11 @@ GPUs for batch and native modes in MAGMA, J. Comput. Sci. 20 (2017) 85--93.
 \bibitem{Zaengl2015} G.~Z\"angl, D.~Reinert, P.~R\'ipodas and M.~Baldauf, The ICON (ICOsahedral
   Non-hydrostatic) modelling framework of DWD and MPI-M: description of the non-hydrostatic dynamical core,
   \emph{Q. J. R. Meteorol. Soc.} 141 (2015) 563--579.
+\bibitem{GalChen1975} T.~Gal-Chen and R.~C.~J. Somerville, On the use of a coordinate transformation for the
+  solution of the Navier--Stokes equations, \emph{J. Comput. Phys.} 17 (1975) 209--228.
+\bibitem{Schaer2002} C.~Sch\"ar, D.~Leuenberger, O.~Fuhrer, D.~L\"uthi and C.~Girard, A new terrain-following
+  vertical coordinate formulation for atmospheric prediction models, \emph{Mon. Wea. Rev.} 130 (2002)
+  2459--2480.
 \end{thebibliography}
 
 \end{document}
