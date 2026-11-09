@@ -24,29 +24,31 @@ end
 @testset "nonhydrostatic MPAS-Gassmann" begin
     g = TRiSKGrid(create_hexagon_mesh(3))
     v = VerticalGrid(10, 30000.0; stretch=3)
-    m = MPASGassmannNonhydrostatic(g, v; damping_height=22000.0, damping_rate=0.05)
     @test TRiSKNonhydrostatic === MPASGassmannNonhydrostatic   # former name
-    mass(y) = dmplex.Nonhydrostatic.total_mass(m, y)
-    # a horizontally homogeneous column in discrete hydrostatic balance stays at rest
-    rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
-    y = initial_state(m, rest)
-    M0 = mass(y)
-    ys = zero_state(m)
-    for _ in 1:5
-        step!(m, y, 300.0, ys)
+    @testset "$solver" for solver in (:five_band, :tridiagonal)
+        m = MPASGassmannNonhydrostatic(g, v; damping_height=22000.0, damping_rate=0.05, vertical_solver=solver)
+        mass(y) = dmplex.Nonhydrostatic.total_mass(m, y)
+        # a horizontally homogeneous column in discrete hydrostatic balance stays at rest
+        rest(λ, φ, z) = (baroclinic_wave(0.0, 0.0, z; perturbation=false)[1:2]..., 0.0, 0.0)
+        y = initial_state(m, rest)
+        M0 = mass(y)
+        ys = zero_state(m)
+        for _ in 1:5
+            step!(m, y, 300.0, ys)
+        end
+        @test maximum(abs, y.vn) == 0
+        @test maximum(abs, y.w) < 1e-12
+        @test mass(y) ≈ M0 rtol = 1e-14
+        # the unperturbed baroclinic wave is a steady state: small changes, mass conserved
+        y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false))
+        vn0, M0 = copy(y.vn), mass(y)
+        for _ in 1:12
+            step!(m, y, 300.0, ys)
+        end
+        @test maximum(abs, y.vn .- vn0) < 2
+        @test maximum(abs, y.w) < 0.05
+        @test mass(y) ≈ M0 rtol = 1e-13
     end
-    @test maximum(abs, y.vn) == 0
-    @test maximum(abs, y.w) < 1e-12
-    @test mass(y) ≈ M0 rtol = 1e-14
-    # the unperturbed baroclinic wave is a steady state: small changes, mass conserved
-    y = initial_state(m, (λ, φ, z) -> baroclinic_wave(λ, φ, z; perturbation=false))
-    vn0, M0 = copy(y.vn), mass(y)
-    for _ in 1:12
-        step!(m, y, 300.0, ys)
-    end
-    @test maximum(abs, y.vn .- vn0) < 2
-    @test maximum(abs, y.w) < 0.05
-    @test mass(y) ≈ M0 rtol = 1e-13
 end
 
 @testset "ICON-IAP momentum advection" begin
@@ -127,6 +129,41 @@ end
     y.vn .= [20 * dot(cross([0, 0, 1.0], g.edge_points[e]), g.edge_normals[e]) for e in 1:ne, _ in 1:nl]
     NH.smagorinsky!(hd, hρθ, m, y)
     @test maximum(m.work.Ke) < 0.05 * 0.15 * 8π * a^2 / ne * 20 / a
+end
+
+@testset "five-band vertical solve of ICON-IAP" begin
+    NH = dmplex.Nonhydrostatic
+    Random.seed!(5)
+    g = TRiSKGrid(create_hexagon_mesh(1))
+    v = VerticalGrid(12, 30000.0; stretch=3)
+    m = MPASGassmannNonhydrostatic(g, v; damping_height=20000.0, damping_rate=0.05)
+    nc, nl, τ, β = length(g.centers), 12, 300.0, 0.7
+    ρ0 = exp.(-v.z_full' ./ 8000) .* (1 .+ 0.1 .* rand(nc, nl))
+    ρθ0 = 300 .* ρ0 .* (1 .+ 0.1 .* rand(nc, nl))
+    ρexpl, ρθexpl = ρ0 .* (1 .+ 1e-3 .* randn(nc, nl)), ρθ0 .* (1 .+ 1e-3 .* randn(nc, nl))
+    w0, tw = randn(nc, nl + 1), 10 .+ randn(nc, nl + 1)
+    w0[:, [1, nl + 1]] .= 0
+    θi = 300 .+ randn(nc, nl + 1)
+    θi[:, [1, nl + 1]] .= 0
+    θs = ρθ0 ./ ρ0
+    π0, γ0 = zeros(nc, nl), zeros(nc, nl)
+    NH.launch!(m, NH.base_exner_kernel!, (nc, nl), π0, γ0, ρθ0)
+    w, ρ, ρθ, A = zeros(nc, nl + 1), zeros(nc, nl), zeros(nc, nl), zeros(nc, nl + 1, 4)
+    NH.launch!(m, NH.five_band_solve_kernel!, nc, w, ρ, ρθ, A, w0, ρ0, π0, γ0, θs, θi, tw, ρexpl, ρθexpl, ρθ0,
+               m.dz, m.dzh, m.wlow, m.rayleigh, τ, β, nl, true)
+    mf = A[:, :, 4]
+    @test ρ ≈ ρexpl .- τ ./ v.dz' .* (mf[:, 2:end] .- mf[:, 1:end-1])
+    @test ρθ ≈ ρθexpl .- τ ./ v.dz' .* (θi[:, 2:end] .* mf[:, 2:end] .- θi[:, 1:end-1] .* mf[:, 1:end-1])
+    # the mass flux is (ρ̄ w⁰ + ρ⁰ w)/2 with the new density ρ̄ at the interfaces
+    ih(x, j) = v.wlow[j] .* x[:, j - 1] .+ (1 - v.wlow[j]) .* x[:, j]
+    @test maximum(maximum(abs, mf[:, j] .- (ih(ρ, j) .* w0[:, j] .+ ih(ρ0, j) .* w[:, j]) ./ 2) for j in 2:nl) < 1e-12
+    # and the w equation holds with π linearized and K_w = w⁰ w/2 averaged to the cells
+    πn = π0 .+ γ0 .* (ρθ .- ρθ0)
+    K = [(v.dzh[k] * w0[i, k] * w[i, k] + v.dzh[k + 1] * w0[i, k + 1] * w[i, k + 1]) / (4 * v.dz[k]) for i in 1:nc, k in 1:nl]
+    r = [w[i, j] - w0[i, j] - τ * (tw[i, j] - NH.GRAV) + τ * m.rayleigh[j] * w[i, j] +
+         τ * NH.Cpd * θi[i, j] * ((1 - β) * (π0[i, j] - π0[i, j - 1]) + β * (πn[i, j] - πn[i, j - 1])) / v.dzh[j] +
+         τ * (K[i, j] - K[i, j - 1]) / v.dzh[j] for i in 1:nc, j in 2:nl]
+    @test maximum(abs, r) < 1e-9
 end
 
 @testset "upwind θ at the interfaces" begin

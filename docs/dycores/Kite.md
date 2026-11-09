@@ -11,7 +11,7 @@ A direct product of the 2D kite spaces of `NonlinearKiteShallowWater` with the l
 ⊗ DG0 (or the dual Radau pair of Wess et al.). Per layer the horizontal terms are those of the
 energy-conserving kite shallow-water model with ρ in place of h; the vertical terms are the Galerkin
 terms of DG0 × CG1 with the trapezoidal rule (exact vertical energy exchange, upwind penalty of the
-vertical ρθ flux with `vertical_theta=:upwind`), implicit in one column per Radau node
+vertical ρθ flux with `vertical_theta=:upwind`, central θ by default), implicit in one column per Radau node
 (`KiteColumn.jl`). Wicker–Skamarock RK3, HEVI.
 
 ## Status

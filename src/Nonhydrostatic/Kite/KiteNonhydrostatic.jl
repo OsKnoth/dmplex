@@ -5,7 +5,7 @@
 
 """
     KiteNonhydrostatic(primal, vgrid, k=1; height_order=k + 1, radius=6.37122e6, omega=7.292e-5,
-                       beta=0.65, damping_height=Inf, damping_rate=0, vertical_theta=:upwind,
+                       beta=0.65, damping_height=Inf, damping_rate=0, vertical_theta=:central,
                        backend=CPU())
 
 Dry compressible Euler equations on the extruded kite mesh of `primal` with
@@ -33,7 +33,7 @@ of the divergence, so the vertical energy exchange is exact
 off-centring `beta`, Rayleigh damping of `w` above `damping_height`).
 `vertical_theta=:upwind` adds the upwind penalty `|F_j| (θ_{j-1} - θ_j)/2` of
 the stage state to the ρθ flux (the upwind flux of DG0, dissipative);
-`:central` keeps `θ̄_j F_j`.
+`:central` (default) keeps `θ̄_j F_j`, second order in the vertical (docs/dycores/Kite-vs-ICON.md).
 `velocity` is the velocity space as in `NonlinearKiteShallowWater`: `:rt`
 (`KiteBrokenRT(k)`, default) or `:dual_radau` (`KiteDualRadau(k)`, the equal
 order pair of Wess et al. with `height_order = k`), always with the exact mass in
@@ -86,7 +86,7 @@ end
 
 function KiteNonhydrostatic(primal::Plex, vgrid::VerticalGrid, k::Integer=1; height_order::Integer=k + 1,
                             radius::Real=6.37122e6, omega::Real=7.292e-5, beta::Real=0.65,
-                            damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:upwind,
+                            damping_height::Real=Inf, damping_rate::Real=0.0, vertical_theta::Symbol=:central,
                             vertical_advection::Symbol=:vector_invariant,
                             velocity::Symbol=:rt, horizontal_theta::Symbol=:central,
                             horizontal_advection::Symbol=:vector_invariant,

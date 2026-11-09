@@ -2,7 +2,8 @@
     MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius, omega, beta=0.65,
                                damping_height=Inf, damping_rate=0, kinetic_energy=:cell, hyperdiffusion=0,
                                pv_flux=:iap, vertical_advection=:iap, trisk_weights=:iap, smagorinsky=0.15,
-                               vertical_theta=:upwind, time_stepping=:iap, backend=CPU())
+                               vertical_theta=:upwind, time_stepping=:iap, vertical_solver=:five_band,
+                               backend=CPU())
 
 MPAS-Gassmann: the ICON-IAP form (Gassmann 2013) of the dry compressible Euler
 equations on the extruded C grid of a Voronoi mesh, shallow atmosphere, flat
@@ -51,8 +52,12 @@ horizontal pressure gradient with the Exner pressure off-centred in time), with
 `:wicker_skamarock` the three stages of Wicker and Skamarock (2002). Each stage is
 horizontally explicit (forward–backward: the mass fluxes use the new `vn`) and
 vertically implicit for `w`, `ρ`, `ρθ` with the off-centring `beta` and the
-linearized equation of state, one tridiagonal system for `w` per column (as
-in ICON, Zängl et al. 2015). `r(z)` is a Rayleigh damping of `w` above
+linearized equation of state. With `vertical_solver = :five_band` (default) as
+ICON-IAP (`divergent_modes_5band`, Gassmann and Herzog 2008, `five_band_solve_kernel!`): the
+unknown is the vertical mass flux, time-centred in the products of density and `w`, the
+vertical kinetic energy `w⁰ w/2` implicit, one pentadiagonal system per column; ICON-IAP takes
+`beta = c_v/c_p`. `:tridiagonal` solves for `w` with `K_w` explicit, one tridiagonal system per
+column (as in ICON, Zängl et al. 2015). `r(z)` is a Rayleigh damping of `w` above
 `damping_height` (rate `damping_rate sin²`).
 
 The momentum advection is in the 3D vector-invariant form (`ω × u` and
@@ -143,6 +148,7 @@ struct MPASGassmannNonhydrostatic{M, V, I, J, VK, BE} <: CGridNonhydrostatic
     vertical::Int        # 0 advective, 1 vector invariant, 2 ICON-IAP mass fluxes
     vertical_theta::Int  # θ at the interfaces: 0 centred, 1 upwind in the flux, 2 upwind also in ∂π/∂z (ICON-IAP)
     iap_stepping::Bool   # time_stepping = :iap
+    five_band::Bool      # vertical_solver = :five_band
     backend::BE
 end
 
@@ -151,8 +157,13 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                                     damping_rate::Real=0.0, kinetic_energy::Union{Symbol, Real}=:cell,
                                     hyperdiffusion::Real=0.0, pv_flux::Symbol=:iap, vertical_advection::Symbol=:iap,
                                     trisk_weights::Symbol=:iap, smagorinsky::Real=0.15, vertical_theta::Symbol=:upwind,
-                                    time_stepping::Symbol=:iap, backend=KernelAbstractions.CPU())
+                                    time_stepping::Symbol=:iap, vertical_solver::Symbol=:five_band,
+                                    backend=KernelAbstractions.CPU())
     time_stepping in (:iap, :wicker_skamarock) || throw(ArgumentError("time_stepping must be :iap or :wicker_skamarock"))
+    vertical_solver in (:five_band, :tridiagonal) ||
+        throw(ArgumentError("vertical_solver must be :five_band or :tridiagonal"))
+    vertical_solver == :five_band && vertical_advection == :advective &&
+        throw(ArgumentError("vertical_solver = :five_band needs the vector-invariant vertical advection"))
     pv_flux in (:iap, :trisk) || throw(ArgumentError("pv_flux must be :iap or :trisk"))
     vertical = get(Dict(:advective => 0, :vector_invariant => 1, :iap => 2), vertical_advection) do
         throw(ArgumentError("vertical_advection must be :iap, :vector_invariant or :advective"))
@@ -180,6 +191,7 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
             θi=zeros2(nc, nlev + 1), ρe=zeros2(ne, nlev), Fs=zeros2(ne, nlev), θm=zeros2(nc, nlev),
             π0=zeros2(nc, nlev), γ0=zeros2(nc, nlev),
             band=KernelAbstractions.zeros(backend, Float64, nc, nlev, 2),
+            band5=KernelAbstractions.zeros(backend, Float64, nc, nlev + 1, 4),
             tvn1=zeros2(ne, nlev), tw1=zeros2(nc, nlev + 1), θs=zeros2(nc, nlev), πm=zeros2(nc, nlev),
             πold=zeros2(nc, nlev), started=Ref(false),
             y0=(vn=zeros2(ne, nlev), w=zeros2(nc, nlev + 1), ρ=zeros2(nc, nlev), ρθ=zeros2(nc, nlev)))
@@ -256,6 +268,7 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                                       dev(smag), dev(a^2 .* grid.cell_areas),
                                       dev(vgrid.dz), dev(vgrid.dzh), dev(vgrid.wlow), dev(rayleigh), work, a, Float64(beta),
                                       Float64(hyperdiffusion), pv_flux == :iap, vertical, vtheta, time_stepping == :iap,
+                                      vertical_solver == :five_band,
                                       backend)
 end
 

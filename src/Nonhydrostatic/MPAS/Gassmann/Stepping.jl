@@ -34,10 +34,12 @@ function slow_tendencies!(m::MPASGassmannNonhydrostatic, ys, pressure)
             m.iap_pv)
     launch!(m, edge_density_kernel!, (ne, nlev), w.ρe, w.Fs, ys.vn, ys.ρ, m.edge_cells, m.edge_weight)
     if m.vertical > 0
-        launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w, m.dz, m.dzh)
+        # with the five-band solve ∂K_w/∂z is implicit in the w equation, in the vn equation K = K_h + K_w
+        m.five_band || launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w, m.dz, m.dzh)
         launch!(m, eta_kernel!, (ne, nlev + 1), w.η, ys.vn, ys.w, m.edge_cells, m.inverse_dual, m.dzh)
         launch!(m, w_tendency_vi_kernel!, (nc, nlev + 1), w.tw, w.η, ys.vn, w.ρe, w.K, m.cell_edges, m.inner, m.dzh,
                 m.wlow, m.vertical == 2)
+        m.five_band && launch!(m, w_kinetic_kernel!, (nc, nlev), w.K, ys.w, m.dz, m.dzh)
     else
         launch!(m, w_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, ys.vn, m.cell_edges, m.kinetic, m.edge_cells,
                 m.inverse_dual, m.dz)
@@ -52,7 +54,8 @@ end
     fast_update!(m, y, y0, ys, τ)
 
 `vn = vn0 + τ (w.tvn + hd)`, the horizontal fluxes with the new `vn`, `ρ` of `ys` and
-`θ = w.θ`, and the vertically implicit `w`, `ρ`, `ρθ` from `y0` (`y = y0 + τ T`).
+`θ = w.θ`, and the vertically implicit `w`, `ρ`, `ρθ` from `y0` (`y = y0 + τ T`), with
+`five_band_solve_kernel!` or `vertical_solve_kernel!`.
 """
 function fast_update!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
     w, nlev = m.work, num_layers(m.vgrid)
@@ -63,9 +66,14 @@ function fast_update!(m::MPASGassmannNonhydrostatic, y, y0, ys, τ)
             m.divergence, τ)
     launch!(m, theta_interface_kernel!, nc, w.θi, w.band, w.θm, w.θ, y0.ρ, y0.ρθ, ys.ρ, ys.w, m.dz, m.dzh, m.wlow,
             τ, nlev, m.vertical_theta > 0)
-    launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ, w.θi,
-            ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, τ, m.beta, nlev,
-            m.vertical_theta == 2, false)
+    if m.five_band
+        launch!(m, five_band_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.band5, y0.w, y0.ρ, w.π0, w.γ0, w.θ, w.θi, w.tw,
+                w.ρexpl, w.ρθexpl, y0.ρθ, m.dz, m.dzh, m.wlow, m.rayleigh, τ, m.beta, nlev, m.vertical_theta == 2)
+    else
+        launch!(m, vertical_solve_kernel!, nc, y.w, y.ρ, y.ρθ, w.cprime, w.dprime, y0.w, y0.ρθ, w.π0, w.γ0, w.θ,
+                w.θi, ys.ρ, w.tw, w.ρexpl, w.ρθexpl, m.dz, m.dzh, m.wlow, m.rayleigh, w.wmass, τ, m.beta, nlev,
+                m.vertical_theta == 2, false)
+    end
     return y
 end
 
