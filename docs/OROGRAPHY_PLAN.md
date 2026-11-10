@@ -20,6 +20,17 @@ All three dycores have flat ground: the levels are one `VerticalGrid` for every 
     state. The steady state (`up = 0`) must stay steady (u error at day 9), and the wave runs on it.
   - Resting atmosphere over a steep mountain (DCMIP 2012 test 2-0): spurious `w`.
   - Schär mountain waves on the reduced planet (DCMIP 2012 test 2-1, X = 500).
+  - DCMIP 2025 mesoscale mountain tests (Andrews et al. 2026, egusphere-2026-2293), on the small
+    planet `small_planet(20)` (a/20, 20Ω or no rotation). There are two orographies:
+    - `dcmip2025_gap_height`: a mountain chain with a gap.
+    - `dcmip2025_vortex_height`: an isolated Gaussian mountain for vortex shedding.
+
+    The initial state `dcmip2025_mountain_flow` is isothermal, 288 K, with u = 10 cos φ. The
+    levels `dcmip2025_levels` have 57 layers up to 20 km. The paper's Rayleigh friction of u and v
+    towards the initial wind above 10 km (τ = 100 s) is not in the models yet; they damp only w.
+- **Planet and rotation.** `radius` and `omega` are keywords of every model. `coriolis(x)` gives
+  the Coriolis parameter at the point `x` of the unit sphere (default `2Ω x₃`), so a run can have
+  no rotation or use an f-plane.
 
 ## ICON (`ICONNonhydrostatic`): first, checked against Fortran ICON `jabw`
 

@@ -1,5 +1,6 @@
 """
     ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius=6.371229e6, omega=7.29212e-5,
+                       coriolis=x -> 2omega * x[3],
                        beta=0.65, damping_height=45000, damping_rate=0.05, itime_scheme=4,
                        divdamp_order=4, divdamp_type=3, divdamp_fac=0.0025, divdamp_fac2=0.004,
                        divdamp_fac3=0.004, divdamp_fac4=0.004, divdamp_z=32500, divdamp_z2=40000,
@@ -32,6 +33,9 @@ reference state at the heights of the levels (ICON `igradp_method = 1`). The Ray
 and the profiles of the damping and the diffusion are on the reference levels (`vct_a`). The defaults are those of ICON's
 namelists (`nonhydrostatic_nml`, `diffusion_nml`, `dynamics_nml`) and ICON's
 constants (`ICON_RD`, `ICON_CPD`, `ICON_GRAV`, earth radius and rotation).
+`radius` and `omega` set the planet (a small planet: `small_planet`), `coriolis(x)` the Coriolis
+parameter at the point `x` of the unit sphere (default `2Ω x₃`; `x -> 0.0` without rotation, a
+constant for an f-plane).
 
 **Velocity tendencies** (`mo_velocity_advection`), horizontal operators of
 `ICONShallowWater` per layer:
@@ -170,6 +174,7 @@ struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
 end
 
 function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6.371229e6, omega::Real=7.29212e-5,
+                            coriolis=x -> 2omega * x[3],
                             beta::Real=0.65, damping_height::Real=45000.0, damping_rate::Real=0.05,
                             itime_scheme::Integer=4, divdamp_order::Integer=4, divdamp_type::Integer=3,
                             divdamp_fac::Real=0.0025, divdamp_fac2::Real=0.004, divdamp_fac3::Real=0.004,
@@ -324,7 +329,7 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                               dev(grid.edge_cells), dev(grid.edge_vertices), dev(edge_height), dev(gradient),
                               dev(1 ./ (a .* d)), dev(1 ./ (a .* l)), dev(tangent_sign), dev(rbf_edges), dev(rbf),
                               dev(flux_edges), dev(flux_weights), dev(grid.vertex_edges), dev(curl), dev(grid.vertex_cells),
-                              dev(grid.vertex_kites ./ grid.vertex_areas'), dev([2omega * x[3] for x in grid.edge_points]),
+                              dev(grid.vertex_kites ./ grid.vertex_areas'), dev([Float64(coriolis(x)) for x in grid.edge_points]),
                               map(dev, green_gauss), dev(edge_vectors), dev(a^2 .* grid.cell_areas),
                               dev(cm.dz), dev(cm.dzh), dev(cm.wlow), orography,
                               (dze=dev(em.dz), rdz=dev(1 ./ cm.dz), wlowe=dev(em.wlow), qe=dev(qe), ddxn=dev(ddxn), ddxt=dev(ddxt),

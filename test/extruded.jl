@@ -479,6 +479,34 @@ end
     end
 end
 
+@testset "DCMIP 2025 mountain tests: small planet, Coriolis parameter, orography, levels" begin
+    P = small_planet(20)
+    @test P.radius ≈ 6.371229e6 / 20 && P.omega ≈ 20 * 7.2921e-5 && small_planet(20; rotation=false).omega == 0
+    v = dcmip2025_levels()
+    @test num_layers(v) == 57 && v.z_half[11] ≈ 1000 && abs(v.z_half[end] - 20007) < 1 &&
+          all(diff(v.z_half) .<= 500 + 1e-9)
+    a = P.radius
+    gap(λ, φ) = dcmip2025_gap_height(λ, φ; radius=a)
+    @test gap(π, 0.0) == 0 && isapprox(gap(π, 0.1), 1500; rtol=1e-6) && gap(0.0, 0.1) == 0
+    # the extents (lon, lat, gap) of 40, 300 and 50 km hold the orography above 10 % of h0
+    @test isapprox(gap(π + 20e3 / a, 0.1), 150; rtol=1e-6) && isapprox(gap(π, 150e3 / a), 150; rtol=1e-6) &&
+          isapprox(gap(π, 25e3 / a), 1350; rtol=1e-6)
+    vortex(λ, φ) = dcmip2025_vortex_height(λ, φ; radius=a)
+    @test vortex(π, π / 9) == 2000 && isapprox(vortex(π + 12.5e3 / a / cos(π / 9), π / 9), 2000 / ℯ; rtol=1e-3)
+    # isothermal, p independent of the orography, solid-body rotation
+    T, p, u, vv = dcmip2025_mountain_flow(0.3, 0.4, 500.0; P...)
+    @test T == 288 && u ≈ 10cos(0.4) && vv == 0 &&
+          p ≈ 1e5 * exp(-10 * (10 + 2P.omega * a) * (sin(0.4)^2 - 1) / (2 * 287 * 288) - 9.80616 * 500 / (287 * 288))
+    # the Coriolis parameter of the C-grid models: default 2Ω x₃, none, f-plane
+    g = create_spherical_mesh(2)
+    vg = VerticalGrid(4, 8000.0)
+    m = ICONNonhydrostatic(g, vg; P...)
+    @test Array(m.edge_coriolis) ≈ [2P.omega * x[3] for x in TRiSKGrid(g).edge_points]
+    @test all(iszero, Array(ICONNonhydrostatic(g, vg; P..., coriolis=x -> 0.0).edge_coriolis))
+    mm = MPASGassmannNonhydrostatic(TRiSKGrid(create_hexagon_mesh(2)), vg; P..., coriolis=x -> 1e-4)
+    @test all(≈(1e-4), Array(mm.edge_coriolis)) && all(≈(1e-4), Array(mm.coriolis))
+end
+
 @testset "kite nonhydrostatic: one layer is kite shallow water" begin
     # θ = 1, p = g (ρθ)²/2: the horizontal terms of one layer are those of NonlinearKiteShallowWater
     u0 = 0.2

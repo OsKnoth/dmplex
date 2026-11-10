@@ -1,5 +1,6 @@
 """
-    MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius, omega, beta=0.65,
+    MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius, omega,
+                               coriolis=x -> 2omega * x[3], beta=0.65,
                                damping_height=Inf, damping_rate=0, kinetic_energy=:cell, hyperdiffusion=0,
                                pv_flux=:iap, vertical_advection=:iap, trisk_weights=:iap, smagorinsky=0.15,
                                vertical_theta=:upwind, time_stepping=:iap, vertical_solver=:five_band,
@@ -168,7 +169,8 @@ struct MPASGassmannNonhydrostatic{M, V, I, J, VK, BE} <: CGridNonhydrostatic
 end
 
 function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6.37122e6,
-                                    omega::Real=7.292e-5, beta::Real=0.65, damping_height::Real=Inf,
+                                    omega::Real=7.292e-5, coriolis=x -> 2omega * x[3], beta::Real=0.65,
+                                    damping_height::Real=Inf,
                                     damping_rate::Real=0.0, kinetic_energy::Union{Symbol, Real}=:cell,
                                     hyperdiffusion::Real=0.0, pv_flux::Symbol=:iap, vertical_advection::Symbol=:iap,
                                     trisk_weights::Symbol=:iap, smagorinsky::Real=0.15, vertical_theta::Symbol=:upwind,
@@ -189,7 +191,7 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
         throw(ArgumentError("vertical_theta must be :upwind, :iap or :centred"))
     end
     a = Float64(radius)
-    sw = TRiSKShallowWater(grid; coriolis=x -> 2omega * x[3], kinetic_energy, backend)
+    sw = TRiSKShallowWater(grid; coriolis, kinetic_energy, backend)
     nc, ne, nv, nlev = num_cells(grid), num_edges(grid), num_vertices(grid), num_layers(vgrid)
     z_top = vgrid.z_half[end]
     rayleigh = map(vgrid.z_half) do z
@@ -292,7 +294,7 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                                       dev(1 ./ (a .* grid.primal_lengths)), sw.vertex_edges,
                                       dev(Array(sw.curl) ./ a), sw.vertex_cells, sw.vertex_height, sw.coriolis,
                                       dev(trisk_index), dev(trisk), dev(rhombus),
-                                      dev([2omega * x[3] for x in grid.edge_points]), map(dev, perot), dev(barycentric),
+                                      dev([Float64(coriolis(x)) for x in grid.edge_points]), map(dev, perot), dev(barycentric),
                                       dev(frame),
                                       dev(grid.cell_vertices), dev(grid.cell_kites ./ grid.cell_areas'), dev(cell_edge_area),
                                       dev(smag), dev(a^2 .* grid.cell_areas),

@@ -67,6 +67,76 @@ The atmosphere at rest of DCMIP 2012 test 2-0: `T = T0 - Γz`, `p = p₀ (1 - Γ
 dcmip_rest(lon, lat, z; T0=300.0, Γ=0.0065) = (T0 - Γ * z, P0 * (1 - Γ * z / T0)^(GRAV / (Rd * Γ)), 0.0, 0.0)
 
 """
+    small_planet(X; radius=6.371229e6, omega=7.2921e-5, rotation=true) -> (; radius, omega)
+
+The planet reduced by `X` (Wedi and Smolarkiewicz 2009): radius `a/X`, and `XΩ`, which keeps the
+Rossby number of the Earth, or no rotation. Time steps and dimensional damping rates scale with
+`1/X` and `X`.
+"""
+small_planet(X::Real; radius::Real=6.371229e6, omega::Real=7.2921e-5, rotation::Bool=true) =
+    (radius=radius / X, omega=rotation ? X * omega : 0.0)
+
+"""
+    dcmip2025_gap_height(lon, lat; radius, h0=1500, extent=(40e3, 300e3, 50e3), exponent=10,
+                         center=(π, 0)) -> h
+
+The mountain chain with a gap of DCMIP 2025 (Andrews et al. 2026, Eqs. 18–20): `f g` with
+`f = h0 exp(-((λ-λc)/d₁)^e - ((φ-φc)/d₂)^e)` and the gap `g = 1 - exp(-((φ-φc)/d₃)^e)`,
+`d_i = x_i/(2a) (ln 10)^(-1/e)` from the extents `x_i` (lon, lat, gap) of the orography above
+10 % of `h0`, `a` the radius (the small planet of `X = 20`: 40, 300 and 50 km).
+"""
+function dcmip2025_gap_height(lon, lat; radius::Real, h0::Real=1500.0, extent=(40e3, 300e3, 50e3),
+                              exponent::Real=10, center=(π, 0.0))
+    d = extent ./ (2radius) .* log(10)^(-1 / exponent)
+    Δλ = mod(lon - center[1] + π, 2π) - π
+    Δφ = lat - center[2]
+    return h0 * exp(-(Δλ / d[1])^exponent - (Δφ / d[2])^exponent) * (1 - exp(-(Δφ / d[3])^exponent))
+end
+
+"""
+    dcmip2025_vortex_height(lon, lat; radius, h0=2000, d=12.5e3, center=(π, π/9)) -> h
+
+The isolated mountain of DCMIP 2025 for vortex shedding (Andrews et al. 2026, Eq. 23):
+`h0 exp(-(r/d)²)`, `r` the great-circle distance from `center` (the half width `d` on the small
+planet of `X = 20`).
+"""
+function dcmip2025_vortex_height(lon, lat; radius::Real, h0::Real=2000.0, d::Real=12.5e3, center=(π, π / 9))
+    λc, φc = center
+    r = radius * acos(clamp(sin(lat) * sin(φc) + cos(lat) * cos(φc) * cos(lon - λc), -1, 1))
+    return h0 * exp(-(r / d)^2)
+end
+
+"""
+    dcmip2025_mountain_flow(lon, lat, z; radius, omega, u0=10, T0=288, psp=1e5) -> (T, p, u, v)
+
+The initial state of the DCMIP 2025 mountain tests (Andrews et al. 2026, Eqs. 1–2): isothermal
+`T0`, solid-body rotation `u = u0 cos φ`, the balanced `p_s` of Eq. (1e) reduced to the height:
+`p = psp exp(-u0 (u0 + 2Ωa)(sin²φ - 1)/(2 R T0) - g z/(R T0))`, independent of the orography.
+"""
+function dcmip2025_mountain_flow(lon, lat, z; radius::Real, omega::Real, u0::Real=10.0, T0::Real=288.0,
+                                 psp::Real=1e5)
+    p = psp * exp(-u0 * (u0 + 2omega * radius) * (sin(lat)^2 - 1) / (2Rd * T0) - GRAV * z / (Rd * T0))
+    return (T0, p, u0 * cos(lat), 0.0)
+end
+
+"""
+    dcmip2025_levels(; z_low=1000, z_up=6000, z_top=20000, dz_min=100, dz_max=500, γ=1.01679)
+
+The reference levels of the DCMIP 2025 mountain tests (Andrews et al. 2026, Eq. 9): `dz_min` up to
+`z_low`, then `dz_k = min(dz_{k-1}^γ, dz_max)` up to `z_up`, `dz_max` above; 57 layers, top at
+20007 m.
+"""
+function dcmip2025_levels(; z_low::Real=1000.0, z_up::Real=6000.0, z_top::Real=20000.0, dz_min::Real=100.0,
+                          dz_max::Real=500.0, γ::Real=1.01679)
+    z, dz = [0.0], Float64(dz_min)
+    while z[end] < z_top - 1e-9
+        z[end] < z_low - 1e-9 || (dz = z[end] <= z_up ? min(dz^γ, dz_max) : dz_max)
+        push!(z, z[end] + dz)
+    end
+    return VerticalGrid(z)
+end
+
+"""
     jablonowski_williamson(lon, lat, z; u0=35, T0=288, up=1, radius, omega) -> (T, p, u, v)
 
 The baroclinic wave of Jablonowski and Williamson (2006) (ICON `jabw`) in
