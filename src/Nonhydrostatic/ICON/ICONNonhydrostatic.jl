@@ -9,8 +9,8 @@
                        ndyn_substeps=5, hdiff_efdt_ratio=36, hdiff_w_efdt_ratio=15, hdiff_smag_fac=0.015,
                        hdiff_smag_fac2=0.07137, hdiff_smag_fac3=0, hdiff_smag_fac4=1, hdiff_smag_z=32500,
                        hdiff_smag_z2=60686, hdiff_smag_z3=50000, hdiff_smag_z4=90000, lhdiff_vn=true,
-                       lhdiff_w=true, lhdiff_temp=true, rbf_vec_scale_v=0.5, divavg_cntrwgt=0.5,
-                       hyperdiffusion=0, surface_height=nothing, z_half=nothing, coordinate=:sleve,
+                       lhdiff_w=true, lhdiff_temp=true, l_zdiffu_t=true, thslp_zdiffu=0.025,
+                       thhgtd_zdiffu=200, rbf_vec_scale_v=0.5, divavg_cntrwgt=0.5, hyperdiffusion=0, surface_height=nothing, z_half=nothing, coordinate=:sleve,
                        flat_height=16000, decay_scale=4000, decay_exponent=1.35, pressure_gradient=:levels,
                        backend=CPU())
 
@@ -112,7 +112,10 @@ deformation `|D|` on the quadrilateral of the edge (`s(z)` the profile of
 `k₄ = 1/(64 hdiff_efdt_ratio)` (`lhdiff_vn`); `w -= k_w A² ∇⁴w` with
 `k_w = min(1/48, ndyn_substeps/(36 hdiff_w_efdt_ratio))` plus the `∇²w` of ICON
 above `damping_height` (`lhdiff_w`); `θ += A ∇⋅(K ∇θ)` at constant `ρ`, with
-`K` raised over cold pools in the lowest two layers, and `exner` updated with it (`lhdiff_temp`).
+`K` raised over cold pools in the lowest two layers, and `exner` updated with it (`lhdiff_temp`);
+over steep slopes (`l_zdiffu_t`, thresholds `thslp_zdiffu` of the slope and `thhgtd_zdiffu` of the
+height difference to the neighbours) plus ICON's truly horizontal diffusion `c ∇²θ` of `θ` of the
+neighbours interpolated to the height of the cell (`truly_horizontal_points`).
 `hdiff_order = -1` switches it off; `hyperdiffusion = ν₄` adds `-ν₄ L(L(vn))`
 to every dynamics step.
 
@@ -120,11 +123,10 @@ Differences to ICON: the pressure gradient over orography is that of
 `igradp_method = 1` along the levels, without the truncation over steep slopes, or with
 `pressure_gradient = :height` at constant height everywhere (`π'` of both cells interpolated
 linearly in height to the edge, extrapolated below the ground of a cell; ICON's `igradp_method = 3`
-only where the slope is steep, with a hydrostatic extrapolation), the divergence damping and the θ
-diffusion without the metric correction; the vn diffusion is `itype_vn_diffu = 1`;
-no extra CFL diffusion (`lextra_diffu`); no tracer or physics coupling
-(`ndyn_substeps` only sets when the diffusion is called); no nest-boundary
-terms. Started from ICON's state, one step agrees with ICON to 0.1–1 % of
+only where the slope is steep, with a hydrostatic extrapolation); the divergence damping without
+the metric correction; the vn diffusion is `itype_vn_diffu = 1`; no extra CFL diffusion
+(`lextra_diffu`); no tracer or physics coupling (`ndyn_substeps` only sets when the diffusion is
+called); no nest-boundary terms. Started from ICON's state, one step agrees with ICON to 0.1–1 % of
 ICON's own change of `w`, `ρ`, `θ_v` and `exner`. Serial.
 """
 struct ICONNonhydrostatic{M, V, I, BE} <: CGridNonhydrostatic
@@ -192,7 +194,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                             hdiff_smag_fac3::Real=0.0, hdiff_smag_fac4::Real=1.0, hdiff_smag_z::Real=32500.0,
                             hdiff_smag_z2::Real=1600 + 50000 + sqrt(1600 * (1600 + 50000)),
                             hdiff_smag_z3::Real=50000.0, hdiff_smag_z4::Real=90000.0, lhdiff_vn::Bool=true,
-                            lhdiff_w::Bool=true, lhdiff_temp::Bool=true, rbf_vec_scale_v::Real=0.5,
+                            lhdiff_w::Bool=true, lhdiff_temp::Bool=true, l_zdiffu_t::Bool=true,
+                            thslp_zdiffu::Real=0.025, thhgtd_zdiffu::Real=200.0, rbf_vec_scale_v::Real=0.5,
                             divavg_cntrwgt::Real=0.5, hyperdiffusion::Real=0.0, surface_height=nothing,
                             z_half=nothing, coordinate::Symbol=:sleve, flat_height::Real=16000.0,
                             decay_scale::Real=4000.0, decay_exponent::Real=1.35, pressure_gradient::Symbol=:levels,
@@ -303,7 +306,7 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
             ζ=z(nv, nlev), Lvn=z(ne, nlev), uvert=ntuple(_ -> z(nv, nlev), 3), uvert2=ntuple(_ -> z(nv, nlev), 3),
             kh=z(ne, nlev), n2e=z(ne, nlev), Lw=z(nc, nlev + 1), substep=Ref(0),
             hd=z(ne, nlev), wcf=z(nc, nlev), wch=z(nc, nlev + 1), πp=z(nc, nlev), dπdz=z(nc, nlev),
-            ρpr=z(nc, nlev), θpr=z(nc, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
+            ρpr=z(nc, nlev), θpr=z(nc, nlev), Tθ=z(nc, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
     # mo_nh_diffusion: vertex RBF, the quadrilateral of each edge, coefficients
     rbf_v = rbf_vertex_coefficients(grid; scale=rbf_vec_scale_v)
     quad = zeros(Int, 4, ne)
@@ -332,6 +335,9 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
     n2w = [jb !== nothing && jb < j <= nlev ? ((zh[j] - zh[jb]) / (zh[nlev] - zh[jb]))^4 / 12 : 0.0
            for j in 1:(nlev + 1)]
     on = hdiff_order == 5
+    zd = truly_horizontal_points(grid, cm.z_full, divergence, 1 ./ (a .* d); cntrwgt=divavg_cntrwgt,
+                                 thslp=thslp_zdiffu, thhgtd=thhgtd_zdiffu,
+                                 active=on && lhdiff_temp && l_zdiffu_t && orography)
     diffusion = (rbf_edges=dev(rbf_v[1]), rbf=map(dev, rbf_v[2:4]), quad=dev(quad), quad_vectors=dev(quad_vectors),
                  inverse_vv=dev(inverse_vv),
                  edge_area=dev(a^2 .* l .* d),
@@ -339,7 +345,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                                          hdiff_smag_z, hdiff_smag_z2, hdiff_smag_z3, hdiff_smag_z4)),
                  offset=k4d * ndyn_substeps / 4, limit=dev(fill(1 / 8 - 4kvn, nlev)), k4=kvn,
                  k4w=k4w,
-                 n2w=dev(n2w), lhdiff_vn=on && lhdiff_vn, lhdiff_w=on && lhdiff_w, lhdiff_temp=on && lhdiff_temp)
+                 n2w=dev(n2w), lhdiff_vn=on && lhdiff_vn, lhdiff_w=on && lhdiff_w, lhdiff_temp=on && lhdiff_temp,
+                 zdiffu=map(dev, zd), θref=dev(θref))
     return ICONNonhydrostatic(grid, vgrid, dev(grid.cell_edges), dev(divergence), dev(bilinear_weights(grid)),
                               dev(grid.edge_cells), dev(grid.edge_vertices), dev(edge_height), dev(gradient),
                               dev(1 ./ (a .* d)), dev(1 ./ (a .* l)), dev(tangent_sign), dev(rbf_edges), dev(rbf),
@@ -440,13 +447,46 @@ each of the two cells and is their mean; the weights are scaled to reproduce
 a constant vector. `cntrwgt = 1` is the identity.
 """
 function flux_average(grid::TRiSKGrid, divergence::AbstractMatrix; cntrwgt::Real=0.5, niter::Integer=1000)
-    nc, ne = num_cells(grid), num_edges(grid)
+    ne = num_edges(grid)
+    ce, ec = grid.cell_edges, grid.edge_cells
+    across(i, e) = ec[1, e] == i ? ec[2, e] : ec[1, e]
+    slot(i, e) = findfirst(==(e), view(ce, :, i))
+    nb, C = cell_average(grid; cntrwgt, niter)
+    D(i, e) = divergence[slot(i, e), i]
+    Cn(i, j) = C[1 + findfirst(==(j), view(nb, :, i)), i]     # weight of the neighbour j in the average of i
+    others(i, e) = [f for f in view(ce, :, i) if f != e]
+    # weight of the edge g of cell i for the edge f of i (f ≠ g), from the condition at the cell across g
+    outer(g, i, f) = (j = across(i, g); Cn(j, i) * D(i, f) / D(j, g))
+    edges, weights = zeros(Int, 5, ne), zeros(5, ne)
+    for e in 1:ne
+        c1, c2 = ec[1, e], ec[2, e]
+        a, b = others(c1, e), others(c2, e)
+        edges[:, e] .= (e, a..., b...)
+        central(i, j) = (C[1, i] * D(i, e) + Cn(i, j) * D(j, e) - sum(D(i, g) * outer(g, i, e) for g in others(i, e))) /
+                        D(i, e)
+        weights[1, e] = (central(c1, c2) + central(c2, c1)) / 2
+        weights[2:3, e] .= [outer(e, c1, f) for f in a]
+        weights[4:5, e] .= [outer(e, c2, f) for f in b]
+        n = grid.edge_normals[e]
+        weights[:, e] ./= sum(weights[k, e] * dot(n, grid.edge_normals[edges[k, e]]) for k in 1:5)
+    end
+    return edges, weights
+end
+
+"""
+    cell_average(grid; cntrwgt=0.5, niter=1000) -> (nb, C)
+
+ICON's cell average (`c_bln_avg`) `x̄_i = C[1, i] x_i + Σ_k C[1 + k, i] x_{nb[k, i]}` over the cell
+and its neighbours `nb[k, i]` across its edges `cell_edges[k, i]` (see `flux_average`).
+"""
+function cell_average(grid::TRiSKGrid; cntrwgt::Real=0.5, niter::Integer=1000)
+    nc = num_cells(grid)
     ce, ec = grid.cell_edges, grid.edge_cells
     across(i, e) = ec[1, e] == i ? ec[2, e] : ec[1, e]
     slot(i, e) = findfirst(==(e), view(ce, :, i))
     nb = [across(i, ce[k, i]) for k in 1:3, i in 1:nc]
     back = [slot(nb[k, i], ce[k, i]) for k in 1:3, i in 1:nc]   # position of i in the list of its neighbour k
-    # cell average: cntrwgt at the cell, the neighbours with zero first moment in the tangent plane
+    # cntrwgt at the cell, the neighbours with zero first moment in the tangent plane
     C = zeros(4, nc)
     for i in 1:nc
         x = grid.centers[i]
@@ -477,25 +517,7 @@ function flux_average(grid::TRiSKGrid, divergence::AbstractMatrix; cntrwgt::Real
             C[1, :] .-= resid
         end
     end
-    D(i, e) = divergence[slot(i, e), i]
-    Cn(i, j) = C[1 + findfirst(==(j), view(nb, :, i)), i]     # weight of the neighbour j in the average of i
-    others(i, e) = [f for f in view(ce, :, i) if f != e]
-    # weight of the edge g of cell i for the edge f of i (f ≠ g), from the condition at the cell across g
-    outer(g, i, f) = (j = across(i, g); Cn(j, i) * D(i, f) / D(j, g))
-    edges, weights = zeros(Int, 5, ne), zeros(5, ne)
-    for e in 1:ne
-        c1, c2 = ec[1, e], ec[2, e]
-        a, b = others(c1, e), others(c2, e)
-        edges[:, e] .= (e, a..., b...)
-        central(i, j) = (C[1, i] * D(i, e) + Cn(i, j) * D(j, e) - sum(D(i, g) * outer(g, i, e) for g in others(i, e))) /
-                        D(i, e)
-        weights[1, e] = (central(c1, c2) + central(c2, c1)) / 2
-        weights[2:3, e] .= [outer(e, c1, f) for f in a]
-        weights[4:5, e] .= [outer(e, c2, f) for f in b]
-        n = grid.edge_normals[e]
-        weights[:, e] ./= sum(weights[k, e] * dot(n, grid.edge_normals[edges[k, e]]) for k in 1:5)
-    end
-    return edges, weights
+    return nb, C
 end
 
 ICONNonhydrostatic(dm::Plex, vgrid::VerticalGrid; kwargs...) = ICONNonhydrostatic(TRiSKGrid(dm), vgrid; kwargs...)

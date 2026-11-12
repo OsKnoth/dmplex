@@ -460,6 +460,17 @@ end
     end
     @test abs(NH.total_mass(m, y) / m0 - 1) < 1e-14
     @test maximum(abs, y.vn) < 0.3 && maximum(abs, y.w) < 2e-3
+    # truly horizontal θ diffusion over the slopes: no diffusion of θ linear in height, none without the option
+    p, nc = m.diffusion.zdiffu, num_cells(m.grid)
+    @test !isempty(p.cell) && all(p.lev .>= 1) && all(0 .< p.coef .<= 1 / 500)
+    zf = m.metric.z_full
+    T = zeros(nc, num_layers(v))
+    NH.launch!(m, NH.icon_zdiffu_kernel!, (length(p.cell),), T, 300 .+ 0.004 .* zf, p.cell, p.lev, p.coef, p.nbr,
+               p.nlev, p.wt, p.geo)
+    @test maximum(abs, T) < 1e-12 * maximum(abs, p.geo)
+    @test all(sum(p.geo; dims=1) .> 0)
+    @test isempty(ICONNonhydrostatic(create_spherical_mesh(3), v; surface_height=dcmip_mountain_height,
+                                     coordinate=:basic, flat_height=12000.0, l_zdiffu_t=false).diffusion.zdiffu.cell)
     # the pressure gradient at constant height: π' interpolated in height, the same at rest
     zc = [0.0 100.0 300.0; 500.0 700.0 900.0]
     lev, wt = NH.height_interpolation([1; 2;;], zc, [600.0 200.0 1000.0])

@@ -94,44 +94,120 @@ end
 
 """
 ICON's enhanced diffusion of grid-point cold pools in the lowest two layers:
-`(-5 K - Δθ) 5e-4` where `θ` is more than 7.5 K below the mean of the three
-neighbours (`Δθ < -7.5 K`; flat ground, no reference state), else zero.
+`(-5 K - Δθ + Δθ_ref) 5e-4` where `Δθ - Δθ_ref`, the deviation `Δθ` of `θ` from the
+mean of the three neighbours less that of the reference state `θref`, is below
+-5 K in a valley (`Δθ_ref < 0`) or below -7.5 K elsewhere, else zero.
 """
-@inline function cold_pool(θ, i, k, cell_edges, edge_cells)
+@inline function cold_pool(θ, θref, i, k, cell_edges, edge_cells)
     @inbounds begin
-        s = 0.0
+        s = sr = 0.0
         for n in axes(cell_edges, 1)
             e = cell_edges[n, i]
             l, r = edge_cells[1, e], edge_cells[2, e]
             s += θ[l == i ? r : l, k]
+            sr += θref[l == i ? r : l, k]
         end
-        dθ = θ[i, k] - s / 3
-        return dθ < -7.5 ? (-5 - dθ) * 5e-4 : 0.0
+        dθ, dθr = θ[i, k] - s / 3, θref[i, k] - sr / 3
+        return dθ - dθr < -5 && dθr < 0 || dθ - dθr < -7.5 ? (-5 - dθ + dθr) * 5e-4 : 0.0
     end
 end
 
 "Flux `kh ∇θ` at the edges (`kh` raised by `cold_pool` in the lowest two layers)."
-@kernel function icon_theta_flux_kernel!(F, @Const(kh), @Const(θ), @Const(cell_edges), @Const(edge_cells),
-                                         @Const(inverse_dual))
+@kernel function icon_theta_flux_kernel!(F, @Const(kh), @Const(θ), @Const(θref), @Const(cell_edges),
+                                         @Const(edge_cells), @Const(inverse_dual))
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
         K = kh[e, k]
-        k <= 2 && (K = max(K, cold_pool(θ, l, k, cell_edges, edge_cells), cold_pool(θ, r, k, cell_edges, edge_cells)))
+        k <= 2 && (K = max(K, cold_pool(θ, θref, l, k, cell_edges, edge_cells),
+                           cold_pool(θ, θref, r, k, cell_edges, edge_cells)))
         F[e, k] = K * (θ[r, k] - θ[l, k]) * inverse_dual[e]
     end
 end
 
-"`θ += A ∇⋅F` at constant `ρ`, the Exner pressure linearized with it, `π (1 + R/c_v (θ_new/θ - 1))`."
-@kernel function icon_theta_diffusion_kernel!(ρθ, exner, @Const(ρ), @Const(θ), @Const(F), @Const(cell_edges),
-                                              @Const(divergence), @Const(cell_areas))
+"""
+    truly_horizontal_points(grid, z, divergence, inverse_dual; cntrwgt=0.5, thslp=0.025, thhgtd=200, active=true)
+        -> (cell, lev, coef, nbr, nlev, wt, geo)
+
+The points of ICON's truly horizontal θ diffusion over steep slopes (`l_zdiffu_t`). The slope `s`
+and the height difference `h` of cell `i` at layer `k`: the largest `|Δz|/d` and `|Δz|` of the
+layer heights `z` across its edges, averaged over the cell and its neighbours (`cell_average`).
+A column takes part where its lowest layer has `s ≥ thslp` or `h ≥ thhgtd`, from the lowest layer
+above the lowest layers of all neighbours up to the highest layer with that property. At each
+point `p` (cell `cell[p]`, layer `lev[p]`) the neighbour `nbr[n, p]` has its `θ` interpolated
+linearly to the height of the point between its layers `nlev[n, p]` and `nlev[n, p] + 1` (weight
+`wt[n, p]`), `geo[n, p]` its weight in `∇²θ`, and `coef[p] = min(1/500, max(√(s - thslp)/250,
+2e-4 √(h - thhgtd)))`. Empty for `active = false`.
+"""
+function truly_horizontal_points(grid::TRiSKGrid, z::AbstractMatrix, divergence::AbstractMatrix,
+                                 inverse_dual::AbstractVector; cntrwgt::Real=0.5, thslp::Real=0.025,
+                                 thhgtd::Real=200.0, active::Bool=true)
+    nc, nlev = size(z)
+    ce, ec = grid.cell_edges, grid.edge_cells
+    cell, lev, coef = Int32[], Int32[], Float64[]
+    nbr, nlevs, wt, geo = Int32[], Int32[], Float64[], Float64[]
+    if active && nlev >= 2
+        nb, C = cell_average(grid; cntrwgt)
+        slope, height = zeros(nc, nlev), zeros(nc, nlev)
+        for i in 1:nc, k in 1:nlev, n in 1:3
+            e = ce[n, i]
+            h = abs(z[ec[2, e], k] - z[ec[1, e], k])
+            height[i, k] = max(height[i, k], h)
+            slope[i, k] = max(slope[i, k], h * inverse_dual[e])
+        end
+        avg(x, i, k) = C[1, i] * x[i, k] + sum(C[1 + n, i] * x[nb[n, i], k] for n in 1:3)
+        steep(i, k) = avg(slope, i, k) >= thslp || avg(height, i, k) >= thhgtd
+        for i in 1:nc
+            steep(i, 1) || continue
+            zmin = maximum(z[nb[n, i], 1] for n in 1:3)
+            k0, k1 = findfirst(k -> z[i, k] >= zmin, 1:nlev), findlast(k -> steep(i, k), 1:nlev)
+            (k0 === nothing || k0 > k1) && continue
+            for k in k0:k1
+                s, h = avg(slope, i, k), avg(height, i, k)
+                push!(cell, i); push!(lev, k)
+                push!(coef, min(1 / 500, max(sqrt(max(0.0, s - thslp)) / 250, 2e-4 * sqrt(max(0.0, h - thhgtd)))))
+                for n in 1:3
+                    e, j = ce[n, i], nb[n, i]
+                    col = view(z, j, :)
+                    jl = clamp(searchsortedlast(col, z[i, k]), 1, nlev - 1)
+                    push!(nbr, j); push!(nlevs, jl); push!(wt, (z[i, k] - col[jl]) / (col[jl + 1] - col[jl]))
+                    push!(geo, divergence[n, i] * (ec[1, e] == i ? 1 : -1) * inverse_dual[e])
+                end
+            end
+        end
+    end
+    r(x) = reshape(x, 3, :)
+    return (cell=cell, lev=lev, coef=coef, nbr=r(nbr), nlev=r(nlevs), wt=r(wt), geo=r(geo))
+end
+
+"`T = c ∇²θ` at the points of `truly_horizontal_points`, with `θ` of the neighbours at the height of the point."
+@kernel function icon_zdiffu_kernel!(T, @Const(θ), @Const(cell), @Const(lev), @Const(coef), @Const(nbr), @Const(nlev),
+                                     @Const(wt), @Const(geo))
+    p = @index(Global)
+    @inbounds begin
+        i, k = cell[p], lev[p]
+        s = 0.0
+        for n in 1:3
+            j, l, t = nbr[n, p], nlev[n, p], wt[n, p]
+            s += geo[n, p] * (θ[j, l] + t * (θ[j, l + 1] - θ[j, l]) - θ[i, k])
+        end
+        T[i, k] = coef[p] * s
+    end
+end
+
+"""
+`θ += A (∇⋅F + T)` at constant `ρ` (`T` of `icon_zdiffu_kernel!`, zero elsewhere), the Exner
+pressure linearized with it, `π (1 + R/c_v (θ_new/θ - 1))`.
+"""
+@kernel function icon_theta_diffusion_kernel!(ρθ, exner, @Const(ρ), @Const(θ), @Const(F), @Const(T),
+                                              @Const(cell_edges), @Const(divergence), @Const(cell_areas))
     i, k = @index(Global, NTuple)
     s = 0.0
     @inbounds for n in axes(cell_edges, 1)
         s += divergence[n, i] * F[cell_edges[n, i], k]
     end
     @inbounds begin
-        θn = θ[i, k] + cell_areas[i] * s
+        θn = θ[i, k] + cell_areas[i] * (s + T[i, k])
         ρθ[i, k] = ρ[i, k] * θn
         exner[i, k] *= 1 + ICON_RD / ICON_CVD * (θn / θ[i, k] - 1)
     end
@@ -164,9 +240,13 @@ function icon_diffusion!(m::ICONNonhydrostatic, y, dt)
     end
     if d.lhdiff_temp
         @. w.θ = y.ρθ / y.ρ
-        launch!(m, icon_theta_flux_kernel!, (ne, nlev), w.F, w.kh, w.θ, m.cell_edges, m.edge_cells, m.inverse_dual)
-        launch!(m, icon_theta_diffusion_kernel!, (nc, nlev), y.ρθ, y.exner, y.ρ, w.θ, w.F, m.cell_edges, m.divergence,
-                m.cell_areas)
+        launch!(m, icon_theta_flux_kernel!, (ne, nlev), w.F, w.kh, w.θ, d.θref, m.cell_edges, m.edge_cells,
+                m.inverse_dual)
+        p = d.zdiffu
+        isempty(p.cell) || launch!(m, icon_zdiffu_kernel!, (length(p.cell),), w.Tθ, w.θ, p.cell, p.lev, p.coef, p.nbr,
+                                   p.nlev, p.wt, p.geo)
+        launch!(m, icon_theta_diffusion_kernel!, (nc, nlev), y.ρθ, y.exner, y.ρ, w.θ, w.F, w.Tθ, m.cell_edges,
+                m.divergence, m.cell_areas)
     end
     return y
 end
