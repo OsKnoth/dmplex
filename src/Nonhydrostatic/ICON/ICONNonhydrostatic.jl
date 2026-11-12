@@ -11,7 +11,8 @@
                        hdiff_smag_z2=60686, hdiff_smag_z3=50000, hdiff_smag_z4=90000, lhdiff_vn=true,
                        lhdiff_w=true, lhdiff_temp=true, rbf_vec_scale_v=0.5, divavg_cntrwgt=0.5,
                        hyperdiffusion=0, surface_height=nothing, z_half=nothing, coordinate=:sleve,
-                       flat_height=16000, decay_scale=4000, decay_exponent=1.35, backend=CPU())
+                       flat_height=16000, decay_scale=4000, decay_exponent=1.35, pressure_gradient=:levels,
+                       backend=CPU())
 
 Dry compressible Euler equations on the extruded triangular C grid of ICON
 (Zängl et al. 2015, `mo_solve_nonhydro`, `mo_velocity_advection`), shallow
@@ -116,7 +117,10 @@ above `damping_height` (`lhdiff_w`); `θ += A ∇⋅(K ∇θ)` at constant `ρ`,
 to every dynamics step.
 
 Differences to ICON: the pressure gradient over orography is that of
-`igradp_method = 1`, without the truncation over steep slopes, the divergence damping and the θ
+`igradp_method = 1` along the levels, without the truncation over steep slopes, or with
+`pressure_gradient = :height` at constant height everywhere (`π'` of both cells interpolated
+linearly in height to the edge, extrapolated below the ground of a cell; ICON's `igradp_method = 3`
+only where the slope is steep, with a hydrostatic extrapolation), the divergence damping and the θ
 diffusion without the metric correction; the vn diffusion is `itype_vn_diffu = 1`;
 no extra CFL diffusion (`lextra_diffu`); no tracer or physics coupling
 (`ndyn_substeps` only sets when the diffusion is called); no nest-boundary
@@ -191,7 +195,9 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                             lhdiff_w::Bool=true, lhdiff_temp::Bool=true, rbf_vec_scale_v::Real=0.5,
                             divavg_cntrwgt::Real=0.5, hyperdiffusion::Real=0.0, surface_height=nothing,
                             z_half=nothing, coordinate::Symbol=:sleve, flat_height::Real=16000.0,
-                            decay_scale::Real=4000.0, decay_exponent::Real=1.35, backend=KernelAbstractions.CPU())
+                            decay_scale::Real=4000.0, decay_exponent::Real=1.35, pressure_gradient::Symbol=:levels,
+                            miura_reference::Bool=true, backend=KernelAbstractions.CPU())
+    pressure_gradient in (:levels, :height) || throw(ArgumentError("pressure_gradient must be :levels or :height"))
     size(grid.cell_edges, 1) == 3 || throw(ArgumentError("ICONNonhydrostatic needs a triangle mesh"))
     itime_scheme in (4, 6) || throw(ArgumentError("itime_scheme must be 4 or 6"))
     divdamp_order in (2, 4, 24) || throw(ArgumentError("divdamp_order must be 2, 4 or 24"))
@@ -244,6 +250,13 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
     ref_π(z) = reference_atmosphere(z)[2]
     θref = map(z -> reference_atmosphere(z)[1] / ref_π(z), cm.z_full)
     dπref = map(z -> -ICON_GRAV / (ICON_CPD * reference_atmosphere(z)[1] / ref_π(z)), cm.z_half)
+    # ρ_ref, θ_ref of the Miura reconstruction (ICON rho_ref_mc, theta_ref_mc at the cells,
+    # rho_ref_me, theta_ref_me at the edges at their own heights); zero: the full fields are reconstructed
+    ref_ρ(z) = P0 * ref_π(z)^(ICON_CPD / ICON_RD) / (ICON_RD * reference_atmosphere(z)[1])
+    ref_θ(z) = reference_atmosphere(z)[1] / ref_π(z)
+    miura(f, x) = miura_reference ? map(f, x) : zero(x)
+    ρref_c, θref_c, ρref_e, θref_e = miura(ref_ρ, cm.z_full), miura(ref_θ, cm.z_full), miura(ref_ρ, em.z_full),
+                                     miura(ref_θ, em.z_full)
     # second-order ∂w/∂z at the interfaces (coeff1_dwdz, coeff2_dwdz) and the quadratic extrapolation
     # of a layer field to the ground (wgtfacq) at the cells and the edges
     c1dwdz, c2dwdz = zeros(nc, nl + 1), zeros(nc, nl + 1)
@@ -261,6 +274,7 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
         c > 0 && (zv[v, :] .+= vw[n, v] .* cm.z_full[c, :])
     end
     ddxn = [(cm.z_full[grid.edge_cells[2, e], k] - cm.z_full[grid.edge_cells[1, e], k]) / (a * d[e]) for e in 1:ne, k in 1:nl]
+    zlev, zwt = height_interpolation(grid.edge_cells, cm.z_full, em.z_full)
     ddxt = [tangent_sign[e] * (zv[grid.edge_vertices[2, e], k] - zv[grid.edge_vertices[1, e], k]) / (a * l[e])
             for e in 1:ne, k in 1:nl]
     mean_area = 4π * a^2 / nc
@@ -288,7 +302,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
             ρi=z(nc, nlev + 1), θp=z(nc, nlev + 1), π0=z(nc, nlev), δ=z(nc, nlev), δ2=z(nc, nlev), G=z(ne, nlev),
             ζ=z(nv, nlev), Lvn=z(ne, nlev), uvert=ntuple(_ -> z(nv, nlev), 3), uvert2=ntuple(_ -> z(nv, nlev), 3),
             kh=z(ne, nlev), n2e=z(ne, nlev), Lw=z(nc, nlev + 1), substep=Ref(0),
-            hd=z(ne, nlev), wcf=z(nc, nlev), wch=z(nc, nlev + 1), πp=z(nc, nlev), dπdz=z(nc, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
+            hd=z(ne, nlev), wcf=z(nc, nlev), wch=z(nc, nlev + 1), πp=z(nc, nlev), dπdz=z(nc, nlev),
+            ρpr=z(nc, nlev), θpr=z(nc, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
     # mo_nh_diffusion: vertex RBF, the quadrilateral of each edge, coefficients
     rbf_v = rbf_vertex_coefficients(grid; scale=rbf_vec_scale_v)
     quad = zeros(Int, 4, ne)
@@ -333,10 +348,12 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                               map(dev, green_gauss), dev(edge_vectors), dev(a^2 .* grid.cell_areas),
                               dev(cm.dz), dev(cm.dzh), dev(cm.wlow), orography,
                               (dze=dev(em.dz), rdz=dev(1 ./ cm.dz), wlowe=dev(em.wlow), qe=dev(qe), ddxn=dev(ddxn), ddxt=dev(ddxt),
-                               z_full=dev(cm.z_full), cells=cm, edges=em),
+                               z_full=dev(cm.z_full), zlev=dev(zlev), zwt=dev(zwt),
+                               pgrad=pressure_gradient == :height ? 2 : 1, cells=cm, edges=em),
                               dev(rayleigh),
                               (θref=dev(θref), πref=dev(map(ref_π, cm.z_full)), dπref=dev(dπref), c1dwdz=dev(c1dwdz),
-                               c2dwdz=dev(c2dwdz), wgtfacq=dev(qc)), work, a, Float64(beta),
+                               c2dwdz=dev(c2dwdz), wgtfacq=dev(qc), ρref_c=dev(ρref_c), θref_c=dev(θref_c),
+                               ρref_e=dev(ρref_e), θref_e=dev(θref_e)), work, a, Float64(beta),
                               dev(divdamp), dev(divdamp_o2), dev(divdamp_3d),
                               (0.5 - veladv_offctr, 0.5 + veladv_offctr),
                               (0.5 - rhotheta_offctr, 0.5 + rhotheta_offctr), Int(itime_scheme),

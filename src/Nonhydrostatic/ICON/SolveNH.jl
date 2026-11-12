@@ -30,11 +30,14 @@ end
 backtrajectory point of the edge over `Δt/2`, and the horizontal pressure
 gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure `πex`; over orography
 (`oro`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` with `πex = π'` and `dπdz = ∂π'/∂z`.
+As in ICON, `ρ`, `θ` (and their gradients) are the deviations from the reference state, which is
+added at the height of the edge (`ρref_e`, `θref_e`; zero for the reconstruction of the full fields).
 """
 @kernel function icon_miura_kernel!(ρe, θe, pg, @Const(vn), @Const(vt), @Const(ρ), @Const(θ), @Const(πex),
                                     @Const(g1), @Const(g2), @Const(g3), @Const(h1), @Const(h2), @Const(h3),
                                     @Const(edge_cells), @Const(edge_vectors), @Const(inverse_dual), half_dt_a,
-                                    @Const(dπdz), @Const(ddxn), @Const(edge_height), oro)
+                                    @Const(dπdz), @Const(ddxn), @Const(edge_height), @Const(zlev), @Const(zwt), oro,
+                                    @Const(ρref_e), @Const(θref_e))
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
@@ -43,12 +46,34 @@ gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure `πex`; over o
         d1 = edge_vectors[o + 1, e] - half_dt_a * (u * edge_vectors[7, e] + v * edge_vectors[10, e])
         d2 = edge_vectors[o + 2, e] - half_dt_a * (u * edge_vectors[8, e] + v * edge_vectors[11, e])
         d3 = edge_vectors[o + 3, e] - half_dt_a * (u * edge_vectors[9, e] + v * edge_vectors[12, e])
-        ρe[e, k] = ρ[up, k] + g1[up, k] * d1 + g2[up, k] * d2 + g3[up, k] * d3
-        t = θ[up, k] + h1[up, k] * d1 + h2[up, k] * d2 + h3[up, k] * d3
+        ρe[e, k] = ρref_e[e, k] + ρ[up, k] + g1[up, k] * d1 + g2[up, k] * d2 + g3[up, k] * d3
+        t = θref_e[e, k] + θ[up, k] + h1[up, k] * d1 + h2[up, k] * d2 + h3[up, k] * d3
         θe[e, k] = t
-        dπ = (πex[r, k] - πex[l, k]) * inverse_dual[e]
-        oro && (dπ -= ddxn[e, k] * (edge_height[1, e] * dπdz[l, k] + edge_height[2, e] * dπdz[r, k]))
+        if oro == 2
+            dπ = height_difference(πex, edge_cells, zlev, zwt, e, k) * inverse_dual[e]
+        else
+            dπ = (πex[r, k] - πex[l, k]) * inverse_dual[e]
+            oro == 1 && (dπ -= ddxn[e, k] * (edge_height[1, e] * dπdz[l, k] + edge_height[2, e] * dπdz[r, k]))
+        end
         pg[e, k] = ICON_CPD * t * dπ
+    end
+end
+
+"""
+`π' = π - π_ref` of the layers (ICON `z_exner_ex_pr`) and `∂π'/∂z` across each layer from `π'` at
+its interfaces (ICON `z_dexner_dz_c`): linear between the layers (`wlow`), quadratic to the ground
+(`q`: wgtfacq), at the lid extrapolated linearly; for the metric term of the pressure gradient.
+"""
+@kernel function icon_exner_deviation_kernel!(πp, dπdz, @Const(π), @Const(πref), @Const(wlow), @Const(q), @Const(dz),
+                                              nlev)
+    i, k = @index(Global, NTuple)
+    @inbounds begin
+        p(j) = π[i, j] - πref[i, j]
+        lo = k > 1 ? wlow[i, k] * p(k - 1) + (1 - wlow[i, k]) * p(k) :
+             nlev >= 3 ? q[i, 1] * p(1) + q[i, 2] * p(2) + q[i, 3] * p(3) : p(1)
+        hi = k < nlev ? wlow[i, k + 1] * p(k) + (1 - wlow[i, k + 1]) * p(k + 1) : 2 * p(k) - lo
+        πp[i, k] = p(k)
+        dπdz[i, k] = (hi - lo) / dz[i, k]
     end
 end
 
@@ -198,10 +223,14 @@ end
     end
 end
 
-"Divergence `δ += s_k ∂w/∂z` of the cells (the 3D divergence of the divergence damping, `s` = scalfac_dd3d)."
-@kernel function icon_dwdz_kernel!(δ, @Const(w), @Const(dz), @Const(s))
+"""
+Divergence `δ += s_k ∂(w - w_c)/∂z` of the cells (the 3D divergence of the divergence damping, `s` =
+scalfac_dd3d), `w_c` the contravariant correction at the interfaces (`wch`, zero for flat ground): over
+orography the terrain-following flow `w = w_c` has no divergence.
+"""
+@kernel function icon_dwdz_kernel!(δ, @Const(w), @Const(wch), @Const(dz), @Const(s))
     i, k = @index(Global, NTuple)
-    @inbounds δ[i, k] += s[k] * (w[i, k + 1] - w[i, k]) / dz[i, k]
+    @inbounds δ[i, k] += s[k] * ((w[i, k + 1] - wch[i, k + 1]) - (w[i, k] - wch[i, k])) / dz[i, k]
 end
 
 "`vn += scale_k (δ_r - δ_l)/d_e`, the divergence damping with the coefficient `scale` per layer."
@@ -219,7 +248,7 @@ function divergence_damping!(vn, m::ICONNonhydrostatic, ys)
     w, nlev = m.work, num_layers(m.vgrid)
     nc, ne = num_cells(m.grid), num_edges(m.grid)
     launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.δ, ys.vn, m.cell_edges, m.divergence)
-    launch!(m, icon_dwdz_kernel!, (nc, nlev), w.δ, ys.w, m.dz, m.divdamp_3d)
+    launch!(m, icon_dwdz_kernel!, (nc, nlev), w.δ, ys.w, w.wch, m.dz, m.divdamp_3d)
     launch!(m, icon_edge_gradient_kernel!, (ne, nlev), w.G, w.δ, m.edge_cells, m.inverse_dual, 1.0)
     launch!(m, icon_cell_sum_kernel!, (nc, nlev), w.δ2, w.G, m.cell_edges, m.divergence)
     launch!(m, icon_divdamp_kernel!, (ne, nlev), vn, w.δ, m.edge_cells, m.inverse_dual, m.divdamp_o2)

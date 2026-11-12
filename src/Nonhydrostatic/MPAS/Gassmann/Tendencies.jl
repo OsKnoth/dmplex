@@ -11,13 +11,20 @@
 end
 
 """
-`c_p θ_e ∂π/∂n` at edge `e`, over orography (`oro`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` with `πe = π'`
-the deviation from the reference atmosphere and `dπdz = ∂π'/∂z` (`exner_deviation_kernel!`).
+`c_p θ_e ∂π/∂n` at edge `e`; over orography with `πe = π'` the deviation from the reference
+atmosphere: along the levels (`oro = 1`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)`, `dπdz = ∂π'/∂z`
+(`exner_deviation_kernel!`), or at constant height (`oro = 2`) from `π'` of both cells interpolated
+to the height of the edge (`height_difference`).
 """
-@inline function pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, edge_weight, inverse_dual, oro)
+@inline function pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, zlev, zwt, edge_cells, edge_weight, inverse_dual,
+                                   oro)
     @inbounds begin
-        dπ = (πe[r, k] - πe[l, k]) * inverse_dual[e]
-        oro && (dπ -= ddxn[e, k] * (edge_weight[1, e] * dπdz[l, k] + edge_weight[2, e] * dπdz[r, k]))
+        if oro == 2
+            dπ = height_difference(πe, edge_cells, zlev, zwt, e, k) * inverse_dual[e]
+        else
+            dπ = (πe[r, k] - πe[l, k]) * inverse_dual[e]
+            oro == 1 && (dπ -= ddxn[e, k] * (edge_weight[1, e] * dπdz[l, k] + edge_weight[2, e] * dπdz[r, k]))
+        end
         return Cpd * θe * dπ
     end
 end
@@ -29,7 +36,8 @@ vertical advection with the contravariant `w`, `dz`, `dzh` at the edges, `wlow` 
 @kernel function vn_tendency_kernel!(tvn, @Const(vn), @Const(Fs), @Const(w), @Const(ρ), @Const(θ), @Const(πe), @Const(K),
                                      @Const(qe), @Const(η), @Const(edge_cells), @Const(edge_weight),
                                      @Const(inverse_dual), @Const(trisk_index), @Const(trisk), @Const(dz), @Const(dzh),
-                                     @Const(wlow), @Const(dπdz), @Const(ddxn), nlev, vertical, pressure, oro)
+                                     @Const(wlow), @Const(dπdz), @Const(ddxn), @Const(zlev), @Const(zwt), nlev, vertical,
+                                     pressure, oro)
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
@@ -39,7 +47,8 @@ vertical advection with the contravariant `w`, `dz`, `dzh` at the edges, `wlow` 
         end
         θe = edge_weight[1, e] * θ[l, k] + edge_weight[2, e] * θ[r, k]
         t = s - inverse_dual[e] * (K[r, k] - K[l, k])
-        pressure > 0 && (t -= pressure * pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, edge_weight, inverse_dual, oro))
+        pressure > 0 && (t -= pressure * pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, zlev, zwt, edge_cells, edge_weight,
+                                                                  inverse_dual, oro))
         if vertical > 0
             # -η w̃ at the two interfaces of the layer, w̃ = M_e/ρ_e (ρ = 1 for the plain vector-invariant form),
             # adjoint to ṽn in the w equation
@@ -65,12 +74,13 @@ end
 
 "`tvn -= c_p θ_e ∂_n π` with `θ_e` the edge mean of `θ` (the pressure gradient of the ICON-IAP step, `pressure_gradient`)."
 @kernel function pressure_gradient_kernel!(tvn, @Const(θ), @Const(πe), @Const(edge_cells), @Const(edge_weight),
-                                           @Const(inverse_dual), @Const(dπdz), @Const(ddxn), oro)
+                                           @Const(inverse_dual), @Const(dπdz), @Const(ddxn), @Const(zlev), @Const(zwt), oro)
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
         θe = edge_weight[1, e] * θ[l, k] + edge_weight[2, e] * θ[r, k]
-        tvn[e, k] -= pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, edge_weight, inverse_dual, oro)
+        tvn[e, k] -= pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, zlev, zwt, edge_cells, edge_weight,
+                                                                  inverse_dual, oro)
     end
 end
 

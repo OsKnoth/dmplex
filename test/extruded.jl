@@ -88,8 +88,8 @@ end
         NH.launch!(m, NH.edge_density_kernel!, (ne, nl), W.ρe, W.Fs, vn, ρ, m.edge_cells, m.edge_weight)
         tendency(qe, w, η) = (NH.launch!(m, NH.vn_tendency_kernel!, (ne, nl), W.tvn, vn, W.Fs, w, ρ, W.θ, W.π, W.K, qe,
                                          η, m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk,
-                                         m.metric.dz, m.metric.dzh, m.wlow, W.dπdz, m.metric.ddxn, nl, m.vertical,
-                                         1.0, false); copy(W.tvn))
+                                         m.metric.dz, m.metric.dzh, m.wlow, W.dπdz, m.metric.ddxn, m.metric.zlev,
+                                         m.metric.zwt, nl, m.vertical, 1.0, 0); copy(W.tvn))
         # the PV flux does no work
         F = ρe .* vn
         t = tendency(W.qe, zero(w), zero(W.η))
@@ -460,14 +460,29 @@ end
     end
     @test abs(NH.total_mass(m, y) / m0 - 1) < 1e-14
     @test maximum(abs, y.vn) < 0.3 && maximum(abs, y.w) < 2e-3
+    # the pressure gradient at constant height: π' interpolated in height, the same at rest
+    zc = [0.0 100.0 300.0; 500.0 700.0 900.0]
+    lev, wt = NH.height_interpolation([1; 2;;], zc, [600.0 200.0 1000.0])
+    @test lev[:, 1, :] == [2 2 2; 1 1 2] && wt[:, 1, 1] ≈ [2.5, 0.5] && wt[:, 1, 2] ≈ [0.5, -1.5]
+    πp = [1.0 2.0 4.0; 3.0 5.0 7.0]
+    @test NH.height_difference(πp, [1; 2;;], lev, wt, 1, 1) ≈ (3 + 0.5 * 2) - (2 + 2.5 * 2)
+    mh = ICONNonhydrostatic(create_spherical_mesh(3), v; damping_height=Inf, damping_rate=0.0,
+                            surface_height=dcmip_mountain_height, coordinate=:basic, flat_height=12000.0,
+                            pressure_gradient=:height)
+    y, ys = initial_state(mh, dcmip_rest), zero_state(mh)
+    for _ in 1:24
+        step!(mh, y, 300.0, ys)
+    end
+    @test maximum(abs, y.vn) < 0.3 && maximum(abs, y.w) < 2e-3
+    @test_throws ArgumentError ICONNonhydrostatic(create_spherical_mesh(2), v; pressure_gradient=:z)
     # zero orography is the flat model
     mf = ICONNonhydrostatic(create_spherical_mesh(2), v; surface_height=(λ, φ) -> 0.0)
     @test !mf.orography
     # MPAS-Gassmann at rest over the mountain, five-band and tridiagonal column solve
     g = TRiSKGrid(create_hexagon_mesh(3))
-    for vertical_solver in (:five_band, :tridiagonal)
+    for (vertical_solver, pressure_gradient) in ((:five_band, :levels), (:tridiagonal, :levels), (:five_band, :height))
         mm = MPASGassmannNonhydrostatic(g, v; surface_height=dcmip_mountain_height, coordinate=:basic,
-                                        flat_height=12000.0, vertical_solver)
+                                        flat_height=12000.0, vertical_solver, pressure_gradient)
         @test mm.orography
         y, ys = initial_state(mm, dcmip_rest), zero_state(mm)
         m0 = NH.total_mass(mm, y)

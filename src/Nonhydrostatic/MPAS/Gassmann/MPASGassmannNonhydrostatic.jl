@@ -5,7 +5,7 @@
                                pv_flux=:iap, vertical_advection=:iap, trisk_weights=:iap, smagorinsky=0.15,
                                vertical_theta=:upwind, time_stepping=:iap, vertical_solver=:five_band,
                                surface_height=nothing, z_half=nothing, coordinate=:sleve, flat_height=16000,
-                               decay_scale=4000, decay_exponent=1.35, backend=CPU())
+                               decay_scale=4000, decay_exponent=1.35, pressure_gradient=:levels, backend=CPU())
 
 MPAS-Gassmann: the ICON-IAP form (Gassmann 2013) of the dry compressible Euler
 equations on the extruded C grid of a Voronoi mesh, shallow atmosphere, with
@@ -113,7 +113,9 @@ divided by that of the cell; the contravariant correction `w_c = u ⋅ ∇z` (ce
 flux of the column solves (`w = w_c` at the ground), in `θ` at the interfaces and in the vertical
 coupling of `vn` (`w̃` of `w - w_c`), `w_c ∂w/∂z` added to the `w` tendency; the horizontal
 pressure gradient `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` of the deviation from ICON's reference
-atmosphere (`reference_atmosphere`). `∇K` and `η` stay along the levels, so the exchange of
+atmosphere (`reference_atmosphere`), or with `pressure_gradient = :height` that of `π'` of both
+cells interpolated linearly in height to the edge (`height_interpolation`, extrapolated below the
+ground of a cell). `∇K` and `η` stay along the levels, so the exchange of
 horizontal and vertical kinetic energy is exact only for flat ground. The Rayleigh damping and
 the taper of the Smagorinsky diffusion are on the reference levels.
 
@@ -177,7 +179,8 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                                     time_stepping::Symbol=:iap, vertical_solver::Symbol=:five_band,
                                     surface_height=nothing, z_half=nothing, coordinate::Symbol=:sleve,
                                     flat_height::Real=16000.0, decay_scale::Real=4000.0, decay_exponent::Real=1.35,
-                                    backend=KernelAbstractions.CPU())
+                                    pressure_gradient::Symbol=:levels, backend=KernelAbstractions.CPU())
+    pressure_gradient in (:levels, :height) || throw(ArgumentError("pressure_gradient must be :levels or :height"))
     time_stepping in (:iap, :wicker_skamarock) || throw(ArgumentError("time_stepping must be :iap or :wicker_skamarock"))
     vertical_solver in (:five_band, :tridiagonal) ||
         throw(ArgumentError("vertical_solver must be :five_band or :tridiagonal"))
@@ -225,7 +228,9 @@ function MPASGassmannNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius
                          for e in 1:ne, j in 1:(nlev + 1)])
     ddxn = [(cm.z_full[grid.edge_cells[2, e], k] - cm.z_full[grid.edge_cells[1, e], k]) / (a * grid.dual_lengths[e])
             for e in 1:ne, k in 1:nlev]
+    zlev, zwt = height_interpolation(grid.edge_cells, cm.z_full, em.z_full)
     metric = (dz=dev(em.dz), dzh=dev(em.dzh), ddxn=dev(ddxn), rdz=dev(1 ./ cm.dz), z_full=dev(cm.z_full),
+              zlev=dev(zlev), zwt=dev(zwt), pgrad=pressure_gradient == :height ? 2 : 1,
               πref=dev(map(z -> reference_atmosphere(z)[2], cm.z_full)),
               q=dev([ground_extrapolation(cm, i)[n] for i in 1:nc, n in 1:3]), cells=cm, edges=em)
     inner = zeros(size(grid.cell_edges))

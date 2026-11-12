@@ -83,6 +83,38 @@ the ground and the lid; ICON `z_exner_ex_pr`, `z_dexner_dz_c`), for the pressure
     end
 end
 
+"""
+    height_interpolation(edge_cells, zc, ze) -> (lev, wt)
+
+For the height `ze[e, k]` of edge `e` at level `k` and either cell `c = edge_cells[s, e]`: the
+layer `lev[s, e, k]` and the weight `wt[s, e, k]` of `z = zc[c, j] + wt (zc[c, j+1] - zc[c, j])`
+between the layer centres `zc` of the column, linearly extrapolated below the lowest and above
+the highest. For the horizontal pressure gradient at constant height (`height_difference`).
+"""
+function height_interpolation(edge_cells, zc, ze)
+    ne, nlev = size(ze)
+    lev, wt = ones(Int32, 2, ne, nlev), zeros(2, ne, nlev)
+    nlev >= 2 || return lev, wt
+    for e in 1:ne, s in 1:2
+        c = edge_cells[s, e]
+        col = view(zc, c, :)
+        for k in 1:nlev
+            j = clamp(searchsortedlast(col, ze[e, k]), 1, nlev - 1)
+            lev[s, e, k], wt[s, e, k] = j, (ze[e, k] - col[j]) / (col[j + 1] - col[j])
+        end
+    end
+    return lev, wt
+end
+
+"`π'` of the cells of edge `e` at its height at level `k`, right minus left (`height_interpolation`)."
+@inline function height_difference(πp, edge_cells, lev, wt, e, k)
+    @inbounds begin
+        l, r = edge_cells[1, e], edge_cells[2, e]
+        jl, tl, jr, tr = lev[1, e, k], wt[1, e, k], lev[2, e, k], wt[2, e, k]
+        return πp[r, jr] + tr * (πp[r, jr + 1] - πp[r, jr]) - πp[l, jl] - tl * (πp[l, jl + 1] - πp[l, jl])
+    end
+end
+
 "`w_c` at the interfaces from the full levels `wcf`: linear inside, quadratic to the ground (wgtfacq), zero at the lid."
 @kernel function concorr_interface_kernel!(wch, @Const(wcf), @Const(wlow), @Const(q), nlev)
     i, j = @index(Global, NTuple)

@@ -23,11 +23,12 @@ end
 
 """
 Velocity tendency of `vn`: vorticity flux, kinetic-energy gradient (`coeff_gradekin`), vertical
-advection with the contravariant `w - w_c` (`wcf`: `w_c` at the full levels of the cells; `dz`,
-`wlow`, `q` (wgtfacq_e) at the edges).
+advection with the contravariant `w - w_c` of the interfaces (`wch`: `w_c` at the interfaces), zero
+at the ground, averaged to the full level as in ICON (`z_w_con_c_full`); `dz`, `wlow`, `q`
+(wgtfacq_e) at the edges.
 """
 @kernel function icon_vn_tendency_kernel!(tvn, @Const(vn), @Const(vt), @Const(Ke), @Const(K), @Const(ζv), @Const(w),
-                                          @Const(wcf), @Const(edge_cells), @Const(edge_vertices), @Const(edge_height),
+                                          @Const(wch), @Const(edge_cells), @Const(edge_vertices), @Const(edge_height),
                                           @Const(gradient), @Const(edge_coriolis), @Const(dz), @Const(wlow), @Const(q),
                                           nlev)
     e, k = @index(Global, NTuple)
@@ -36,8 +37,8 @@ advection with the contravariant `w - w_c` (`wcf`: `w_c` at the full levels of t
         ζ = (ζv[edge_vertices[1, e], k] + ζv[edge_vertices[2, e], k]) / 2
         g1, g2 = gradient[1, e], gradient[2, e]
         grad_K = Ke[e, k] * (g1 - g2) + g2 * K[r, k] - g1 * K[l, k]
-        we = edge_height[1, e] * ((w[l, k] + w[l, k + 1]) / 2 - wcf[l, k]) +
-             edge_height[2, e] * ((w[r, k] + w[r, k + 1]) / 2 - wcf[r, k])
+        wcon(c) = ((k > 1 ? w[c, k] - wch[c, k] : 0.0) + (w[c, k + 1] - wch[c, k + 1])) / 2
+        we = edge_height[1, e] * wcon(l) + edge_height[2, e] * wcon(r)
         # vn at the ground quadratically extrapolated (wgtfacq_e), at the lid that of the top layer
         vlow = k > 1 ? wlow[e, k] * vn[e, k - 1] + (1 - wlow[e, k]) * vn[e, k] :
                nlev >= 3 ? q[e, 1] * vn[e, 1] + q[e, 2] * vn[e, 2] + q[e, 3] * vn[e, 3] : vn[e, 1]
@@ -134,7 +135,7 @@ function velocity_tendencies!(tvn, tw, m::ICONNonhydrostatic, y; vn_only::Bool=f
     launch!(m, vorticity_kernel!, (nv, nlev), w.ζv, y.vn, m.vertex_edges, m.curl)
     contravariant_correction!(m, y.vn)
     x = m.metric
-    launch!(m, icon_vn_tendency_kernel!, (ne, nlev), tvn, y.vn, w.vt, w.Ke, w.K, w.ζv, y.w, w.wcf, m.edge_cells,
+    launch!(m, icon_vn_tendency_kernel!, (ne, nlev), tvn, y.vn, w.vt, w.Ke, w.K, w.ζv, y.w, w.wch, m.edge_cells,
             m.edge_vertices, m.edge_height, m.gradient, m.edge_coriolis, x.dze, x.wlowe, x.qe, nlev)
     vn_only && return nothing
     launch!(m, icon_vertex_w_kernel!, (nv, nlev + 1), w.wv, y.w, m.vertex_cells, m.vertex_weight)

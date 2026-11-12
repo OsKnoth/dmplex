@@ -51,7 +51,7 @@ function slow_tendencies!(m::MPASGassmannNonhydrostatic, ys, pressure)
     m.orography && launch!(m, w_concorr_tendency_kernel!, (nc, nlev + 1), w.tw, ys.w, w.wch, m.dzh, nlev)
     launch!(m, vn_tendency_kernel!, (ne, nlev), w.tvn, ys.vn, w.Fs, ŵ, ys.ρ, w.θ, m.orography ? w.πp : w.π, w.K,
             w.qe, w.η, m.edge_cells, m.edge_weight, m.inverse_dual, m.trisk_index, m.trisk, x.dz, x.dzh, m.wlow,
-            w.dπdz, x.ddxn, nlev, m.vertical, pressure, m.orography)
+            w.dπdz, x.ddxn, x.zlev, x.zwt, nlev, m.vertical, pressure, m.orography ? x.pgrad : 0)
     return nothing
 end
 
@@ -151,7 +151,7 @@ function iap_step!(m::MPASGassmannNonhydrostatic, y, y0, ys, dt)
     slow_tendencies!(m, y0, 0.0)
     copyto!(w.tvn1, w.tvn); copyto!(w.tw1, w.tw); copyto!(w.θs, w.θ)
     launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, πm, m.edge_cells, m.edge_weight, m.inverse_dual,
-            w.dπdz, x.ddxn, m.orography)
+            w.dπdz, x.ddxn, x.zlev, x.zwt, m.orography ? x.pgrad : 0)
     fast_update!(m, ys, y0, y0, dt)
     # corrector
     slow_tendencies!(m, ys, 0.0)
@@ -159,7 +159,7 @@ function iap_step!(m::MPASGassmannNonhydrostatic, y, y0, ys, dt)
     launch!(m, mean_kernel!, (nc, nlev + 1), w.tw, w.tw1)
     launch!(m, mean_kernel!, (nc, nlev), w.θ, w.θs)
     launch!(m, pressure_gradient_kernel!, (ne, nlev), w.tvn, w.θ, πm, m.edge_cells, m.edge_weight, m.inverse_dual,
-            w.dπdz, x.ddxn, m.orography)
+            w.dπdz, x.ddxn, x.zlev, x.zwt, m.orography ? x.pgrad : 0)
     return fast_update!(m, y, y0, ys, dt)
 end
 
