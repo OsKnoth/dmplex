@@ -334,12 +334,40 @@ CFL number $0.4$.
 \mathbf m_C = \frac{1}{|C|}\sum_F s_{CF}|F|\,U_F\,(\bx_F-\bx_C),
 \end{equation}
 is exact for constant fields; for linear fields the face-centroid rule misses a quadratic term, an
-$O(h)$ error that cancels on symmetric cells only. On triangles the scheme is therefore first order.
+$O(h)$ error that cancels on symmetric cells only. On triangles the scheme is therefore first order,
+and no reconstruction from the three normal components of the cell alone can do better: they define
+exactly one lowest-order Raviart--Thomas field $\mathbf a+b(\bx-\bx_C)$, three degrees of freedom
+against the six of a linear tangential field, and $\mathbf m_C$ is its value at the centroid. The
+barycentric reconstruction (POLYEDER's \code{Barycentric}: at every corner the vector with the normal
+components of its three faces, the cell vector their Wachspress mean) gives the same: the corner
+vectors are the values of that field at the vertices. Its matrix agrees with Perot's to $10^{-7}$
+(the curvature of the layer), and on hexagons it is about twice less accurate than Perot's.
 A least-squares fit of a linear vector field to the normal components on the faces of the cell and of
 its vertex neighbours is exact for linear fields, but unstable in the shallow-water scheme; weighting
 the faces of the cell itself twenty times stronger than those of the neighbours makes it stable and
 second order on triangles. On hexagons and quadrilaterals Perot's form is more accurate and stays
 stable over 15 days, where the weighted fit grows; the default takes the fit on triangles only.
+The instability of the unweighted fit is not one of the energy: projecting the cell tendency with the
+adjoint of the reconstruction $R$, $P=(R^\top VR)^{-1}R^\top V$, makes the Coriolis term free of work
+but blows up within 20 steps. $R^\top VR$ is singular on hexagons (three faces per cell against two
+components) and badly conditioned on triangles, the ratio of its extreme eigenvalues being
+$6.9\times10^{-5}$ for the unweighted fit, $1.5\times10^{-3}$ with the weight and $3.7\times10^{-3}$
+for Perot's: the fit hardly sees some face patterns, which then grow unchecked. The weight converges
+for large values ($2.094\times10^{-3}$ and $5.66\times10^{-4}$ on levels 3 and 4 for weights
+$10^2$ and $10^4$), towards the fit constrained to the three normal components of the cell.
+
+\paragraph{Implementation} The operators are sparse matrices of the global complex: the face gradient
+and the face values of the interaction regions, the upwind face values of the reconstruction from
+either side and the cell momentum. On every rank they are restricted to padded tables of the rows
+it computes, in local numbering, and the tendency is four KernelAbstractions kernels gathering over
+them, without atomics: the cell momentum at the owned cells, the face values and fluxes at the
+interior faces of the owned cells, the cell tendencies, and the projection with the pressure gradient
+at the owned faces. With MPI the cells are partitioned into the zonal equal-area regions, a face is
+owned by the smallest part of its cells, and the ghosts of a rank are exactly the cells and faces in
+the stencils of its rows; the state, the cell momentum and the cell tendency are exchanged once
+each. The distributed state equals the serial one bitwise. On the level-6 triangles (81920 cells)
+a tendency takes 5.7\,ms on one core and 3.0\,ms on four, against 29\,ms for the sparse-matrix
+form; the same kernels run on GPUs.
 
 \begin{table}[h]
 \centering
@@ -363,7 +391,15 @@ cubed sphere $32^2$ & 6144 & $1.84\times10^{-4}$ & $2.85\times10^{-4}$ & \\
 \end{tabular}
 \end{table}
 
-\textcolor{red}{Next:} the barotropic instability of Galewsky et al.~\cite{Galewsky2004}, bathymetry
+\paragraph{Galewsky's jet} At 50--60\,km (icosahedral and hexagonal level 7, cubed sphere $200^2$; one A100,
+6 days in 42--143\,s) the scheme stays stable and conserves mass to $10^{-12}$, but the grid excites
+the barotropic instability: the unperturbed jet, balanced within 8--20\,m after 3 days, has broken up by
+day 6 with the wave number of the grid (5 on hexagons, 4 on the cubed sphere, 6 for the fit on
+triangles). With the perturbation the hexagons and the cubed sphere show the expected roll-up behind
+it on top of the grid waves. Perot's vectors on triangles (300\,m off balance after 3 days) are too
+diffusive, and there the perturbation makes no difference.
+
+\textcolor{red}{Next:} the grid imprinting of the jet, bathymetry
 (Williamson's case 5), split-explicit time integration~\cite{Wensch2009}, the GPU, and general
 three-dimensional complexes.
 

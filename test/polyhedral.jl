@@ -199,19 +199,32 @@ end
     for (mesh, perot) in ((create_hexagon_mesh(3), true), (create_spherical_mesh(3), false))
         sh = extruded_complex(ExtrudedPlex(mesh, 1), [0.0, 1000.0]; radius=R)
         m = PolyShallowWater(sh; gravity=grav, omega=Ω, degree=2)
-        @test (m.R === nothing) == perot
+        @test (m.cell_vector == :perot) == perot
         geo = m.geometry
-        h0 = [hexact(x) for x in geo.cell_centroid]
-        y = [h0; [f in m.interior ? hexact(geo.face_centroid[f]) * dot(uexact(geo.face_centroid[f]), geo.normal[f]) : 0.0
-                  for f in 1:num_poly_faces(sh)]]
+        y = initial_state(m, uexact, hexact)
+        h0, mass0 = [hexact(x) for x in geo.cell_centroid], total_mass(m, y)
         steps = ceil(Int, 86400 / shallow_water_time_step(m, y))
         cache = SSPRK3Cache(y)
         for _ in 1:steps
-            ssprk3_step!(y, 86400 / steps, PH.tendency!, cache, m)
+            ssprk3_step!(y, 86400 / steps, tendency!, cache, m)
         end
         h = y[1:num_poly_cells(sh)]
         @test sqrt(sum(geo.volume .* (h .- h0) .^ 2) / sum(geo.volume .* h0 .^ 2)) < 2e-3
-        @test abs(sum(geo.volume .* h) / sum(geo.volume .* h0) - 1) < 1e-13
+        @test abs(total_mass(m, y) / mass0 - 1) < 1e-13
+        @test @allocated(tendency!(cache.k, y, m)) < 10_000
+    end
+    # 1 and 3 ranks give the same state (gathers only, no atomics: bitwise)
+    script = joinpath(@__DIR__, "mpi_poly.jl")
+    project = dirname(@__DIR__)
+    for mesh in ("triangles", "hexagons", "cubed")
+        results = map((1, 3)) do n
+            file = tempname()
+            run(`$(MPI.mpiexec()) -n $n $(Base.julia_cmd()) --project=$project $script $file $mesh`)
+            lines = readlines(file)
+            parse(Float64, split(lines[1])[1]), parse.(Float64, lines[2:end])
+        end
+        @test results[2][2] == results[1][2]
+        @test abs(results[2][1]) < 1e-13
     end
     @test_throws ArgumentError PolyShallowWater(cx; cell_vector=:rbf)
 end

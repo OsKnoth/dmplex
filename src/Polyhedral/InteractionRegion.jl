@@ -107,6 +107,23 @@ function cell_vectors(cx::PolyComplex, geometry::PolyGeometry, un::AbstractVecto
     end
 end
 
+"`cell_vectors` as sparse matrices (cells × faces) of the three Cartesian components."
+function cell_vector_matrices(cx::PolyComplex, geometry::PolyGeometry)
+    nc, nf = num_poly_cells(cx), num_poly_faces(cx)
+    I, J, V = Int[], Int[], [Float64[] for _ in 1:3]
+    for c in 1:nc
+        faces, signs = cell_cone(cx, c)
+        for (f, s) in zip(faces, signs)
+            w = s * geometry.area[f] * (geometry.face_centroid[f] - geometry.cell_centroid[c]) / geometry.volume[c]
+            push!(I, c); push!(J, f)
+            for k in 1:3
+                push!(V[k], w[k])
+            end
+        end
+    end
+    return ntuple(k -> sparse(I, J, V[k], nc, nf), 3)
+end
+
 """
     face_normal_components(cx, geometry, vc) -> Vector
 

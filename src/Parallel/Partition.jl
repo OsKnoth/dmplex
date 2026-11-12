@@ -57,6 +57,24 @@ function equal_area_partition(dm::Plex, nparts::Integer; centers=nothing)
         bands = clamp(round(Int, sqrt(nparts * (dm.period[2] > 0 ? dm.period[2] / dm.period[1] : 1))), 1, nparts)
         zones = balanced_counts(nparts, bands)
     end
+    return zonal_partition(north_south, west_east, zones, nparts)
+end
+
+"""
+    equal_area_partition(points, nparts) -> part per point
+
+The zonal equal-area partition of points on a sphere of any radius (e.g. the
+centroids of the cells of a polyhedral complex).
+"""
+function equal_area_partition(points::AbstractVector{<:AbstractVector{<:Real}}, nparts::Integer)
+    nparts <= length(points) || throw(ArgumentError("more parts than cells"))
+    north_south = [asin(clamp(p[3] / norm(p), -1, 1)) for p in points]
+    west_east = [mod(atan(p[2], p[1]), 2π) for p in points]
+    return zonal_partition(north_south, west_east, equal_area_zones(nparts), nparts)
+end
+
+function zonal_partition(north_south, west_east, zones, nparts)
+    nc = length(north_south)
     counts = balanced_counts(nc, nparts)
     order = sortperm(1:nc; lt=(a, b) -> north_south[a] > north_south[b] ||
                                         (north_south[a] == north_south[b] && west_east[a] < west_east[b]))
