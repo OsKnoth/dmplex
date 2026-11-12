@@ -10,6 +10,7 @@ include("Parallel/Parallel.jl")
 include("TimeSteppers/TimeSteppers.jl")
 include("ShallowWater/ShallowWater.jl")
 include("FiniteVolumes/FiniteVolumes.jl")
+include("Polyhedral/Polyhedral.jl")
 include("Nonhydrostatic/Nonhydrostatic.jl")
 include("Outputs/Outputs.jl")
 
@@ -21,6 +22,7 @@ include("Outputs/Outputs.jl")
 @reexport using .TimeSteppers
 @reexport using .ShallowWater
 @reexport using .FiniteVolumes
+@reexport using .Polyhedral
 @reexport using .Nonhydrostatic
 @reexport using .Outputs
 

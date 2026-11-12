@@ -1,0 +1,345 @@
+\documentclass[preprint,12pt]{elsarticle}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bn}{\mathbf{n}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\by}{\mathbf{y}}
+\newcommand{\bu}{\mathbf{u}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\aff}{\operatorname{aff}}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{definition}
+\newtheorem{remark}{Remark}
+
+\journal{Journal of Computational Physics}
+
+\begin{document}
+
+\begin{frontmatter}
+\title{Finite volumes on polyhedral cells: exact moments, polynomial reconstruction and the
+shallow-water equations}
+
+\author{Oswald Knoth}
+
+\begin{abstract}
+We describe the finite-volume method of the Fortran code POLYEDER as it is carried over to the
+Julia package \code{dmplex}: cell complexes of general polyhedra with vertex coordinates, the exact
+integration of monomials over cells and faces, the geometry derived from these moments, a
+polynomial reconstruction that preserves the cell averages, face gradients from interaction regions
+around the vertices, and the rotating shallow-water equations on a single layer of prisms over the
+sphere. The moments are computed by homogeneous numerical integration: Euler's identity and the
+divergence theorem in the affine hull of each cell, face and edge reduce the integral of a monomial
+to the vertices, following the cone hierarchy of the cell complex, without the degenerate cases of
+vertex formulas and for non-convex cells.
+\textcolor{red}{Working draft: Sections~\ref{sec:complex}--\ref{sec:reconstruction} describe what is
+implemented; the later sections are the plan.}
+\end{abstract}
+
+\begin{keyword}
+finite volumes \sep polyhedral meshes \sep integration of polynomials \sep $k$-exact reconstruction
+\sep multipoint flux approximation \sep shallow-water equations
+\end{keyword}
+\end{frontmatter}
+
+%==============================================================================
+\section{Introduction}\label{sec:intro}
+
+POLYEDER is a finite-volume code for general polyhedral cells: cut cells over orography, Voronoi and
+cubed-sphere meshes of a spherical shell, refined and coarsened meshes. Scalars are cell averages,
+the momentum is the normal component at the faces. Three ingredients carry the method:
+\begin{enumerate}
+\item the polynomial reconstruction of cell averages, for the upwind fluxes of the transport of
+  scalars and momentum, which needs the moments $\int_C (\bx-\bx_0)^\alpha$ of the cells of a
+  stencil;
+\item the gradient and the interpolation to the faces from local problems in the interaction
+  region around each vertex (the corners of the cells at the vertex), a multipoint flux approximation;
+\item the velocity at the cells from the normal components at the faces and the projection of the
+  cell tendencies back to the faces.
+\end{enumerate}
+The shallow-water equations are solved on one layer of prisms over the sphere with free-slip top and
+bottom, the same code as for the three-dimensional Euler equations.
+
+In \code{dmplex} the method works on a cell complex (Section~\ref{sec:complex}) that is built from an
+extruded surface mesh and later from general three-dimensional meshes. The moments are computed by
+homogeneous numerical integration~\cite{Lasserre1998,Chin2015} (Section~\ref{sec:moments}), the
+geometry of cells and faces from the moments of degree one (Section~\ref{sec:geometry}).
+
+%==============================================================================
+\section{Cell complexes}\label{sec:complex}
+
+A three-dimensional cell complex consists of cells, faces, edges and vertices. The \emph{cone} of a
+cell is the list of its faces, that of a face the list of its edges, that of an edge its two
+vertices, each with an incidence number $\pm1$ of the cellular boundary,
+\begin{equation}
+\partial C = \sum_{F\in\mathrm{cone}(C)} s_{CF}\,F,\qquad \partial F = \sum_{E\in\mathrm{cone}(F)}
+s_{FE}\,E,\qquad \partial E = v_2 - v_1,
+\end{equation}
+such that $\partial\partial = 0$. The orientation of a face is the circulation of its oriented
+boundary, its normal follows by the right-hand rule, and $s_{CF}=+1$ when the normal points out of
+$C$. A face between two cells has opposite signs in their cones, a face on the boundary of the
+domain one sign.
+
+\code{dmplex} stores a surface mesh as a \code{Plex} (cells, edges and vertices with cones and
+supports, the analogue of PETSc's \code{DMPlex}). Its extrusion \code{ExtrudedPlex} into $n$ layers is
+the complex of the tensor prisms: a base cell times a layer is a cell, times a level a horizontal face;
+a base edge times a layer a lateral face, times a level a horizontal edge; a base vertex times a layer
+a vertical edge, times a level a vertex. Only the surface mesh and $n$ are stored; cones and signs follow
+from those of the base, $\partial(p\times I) = \partial p\times I + (-1)^{\dim p}\,p\times\partial I$.
+The \code{PolyComplex} holds the cones of the three dimensions in compressed form with the vertex
+coordinates; \code{extruded\_complex} places the vertex $v$ of the base at the level of height $z_k$
+at $(a+z_k)\,v$ on a sphere of radius $a$ and at $v+z_k\hat{\mathbf z}$ on a plane. A general
+three-dimensional mesh fills the same arrays.
+
+%==============================================================================
+\section{Exact moments of polytopes}\label{sec:moments}
+
+\subsection{Homogeneous integration}
+Let $P\subset\R^3$ be a $k$-dimensional polytope ($k=1,2,3$: a segment, a planar polygon, a
+polyhedron), $H=\aff P$ its affine hull and $f$ a homogeneous polynomial of degree $q$, so that
+$\by\cdot\nabla f = q f$ (Euler). For a point $\by_0\in H$ the vector field $X=\by-\by_0$ is
+tangent to $H$ with $\operatorname{div}_H X = k$, and the divergence theorem in $H$ gives
+\begin{equation}
+\int_P \operatorname{div}_H(Xf) = \int_P \big(k f + (\by-\by_0)\cdot\nabla f\big)
+= (k+q)\int_P f - \int_P \by_0\cdot\nabla f
+= \sum_{G} d_G\int_G f ,
+\end{equation}
+where $G$ runs over the facets of $P$ with the outward unit normals $\nu_G$ in $H$, and
+$d_G = (\by-\by_0)\cdot\nu_G$ is constant on $G$ (the distance of $\aff G$ from $\by_0$). For the
+monomials $\by^\alpha$, $|\alpha|=q$, this is the recursion
+\begin{equation}\label{eq:recursion}
+\boxed{\;(k+|\alpha|)\int_P \by^\alpha = \sum_G d_G\int_G \by^\alpha
++ \sum_{i=1}^3 y_{0,i}\,\alpha_i\int_P \by^{\alpha-e_i}\;}
+\end{equation}
+in the degree for $P$ and down to the vertices in the dimension. With $\by_0$ the foot of the origin
+on $H$ the last term vanishes for $k=3$ ($\by_0=0$), and on a segment $[\mathbf a,\mathbf b]$ with the
+unit tangent $\mathbf t$ the facets are its end points with $d_{\mathbf b}=\mathbf t\cdot\mathbf b$,
+$d_{\mathbf a}=-\mathbf t\cdot\mathbf a$ and $\int_{\{\mathbf v\}}\by^\alpha = \mathbf v^\alpha$.
+The order-zero moments are the measures: $k\,|P| = \sum_G d_G |G|$, the formula of the volume of a
+pyramid. For a polygon with the vertices $\by_1,\dots,\by_m$ in the order of its orientation, the
+normal $\bn = \mathbf A/|\mathbf A|$ follows from the area vector $\mathbf A=\frac12\sum_i
+\by_i\times\by_{i+1}$ (Newell), and the outward normal of the edge from $\by_i$ to $\by_{i+1}$ in its
+plane is $\nu = \mathbf t\times\bn$.
+
+\begin{remark}
+POLYEDER integrates the ridge monomials $(\mathbf b\cdot(\bx-\bx_0))^n$ over a cell by a vertex
+formula with weights of the vertices that depend on $\mathbf b$; faces and edges normal to $\mathbf b$
+need separate cases (\code{SwitchInt}). The recursion~\eqref{eq:recursion} has no such cases, holds
+for non-convex cells and yields all monomials $\by^\alpha$ of a degree at once; a ridge monomial is a
+linear combination of them.
+\end{remark}
+
+\subsection{Frames and non-planar faces}
+The moments of a cell are taken in the local coordinates $\by=(\bx-\bx_C)/h_C$ with $\bx_C$ the mean
+of its vertices and $h_C$ the largest distance of a vertex from it, so that $|\by|\le1$ on the cell
+and the recursion is well conditioned for any position and size of the cell: the returned moments are
+$\int_C \big((\bx-\bx_C)/h_C\big)^\alpha\,dV$. Faces of the cell are integrated in the frame of the
+cell. A face whose vertices do not lie in one plane --- a spherical polygon with more than three
+vertices --- is replaced by the fan of triangles from the mean of its vertices, oriented as the face;
+both cells of the face see the same triangles, so the complex stays closed. The lateral faces of the
+prisms are planar, since both of their vertical edges lie on radii.
+
+\subsection{Tests}
+The moments of all monomials up to degree four are exact to round-off on the unit cube, on a
+triangular prism and on a non-convex L-shaped prism (\code{test/polyhedral.jl}), as is the divergence
+theorem $\int_C\partial_i\by^\alpha = \sum_F s_{CF}\, n_{F,i}\int_F\by^\alpha$ with the face moments.
+
+%==============================================================================
+\section{Geometry}\label{sec:geometry}
+
+The volume and the centroid of a cell are its moments of degree zero and one, the area vector of a
+face is the sum of those of its planar pieces, its centroid follows from the face moments. The
+outward area vectors of every cell sum to zero (to $10^{-17}$, Table~\ref{tab:shell}), which makes the
+divergence of a constant field vanish exactly. On a spherical shell of thickness $d$ the prisms have
+flat faces inscribed in the shell; their total volume converges at second order to that of the shell,
+on triangles, hexagons and the squares of the cubed sphere.
+
+\begin{table}[h]
+\centering
+\caption{Single layer of prisms on the unit sphere, thickness $0.1$: relative error of the total
+volume against $\frac{4\pi}{3}(1.1^3-1)$ and the largest $|\sum_F s_{CF}\mathbf A_F|$ of a cell.}
+\label{tab:shell}
+\begin{tabular}{lrrr}
+\toprule
+mesh & cells & volume error & closure \\
+\midrule
+icosahedral, level 2 & 320 & $-3.38\times10^{-2}$ & $2\times10^{-17}$ \\
+icosahedral, level 3 & 1280 & $-8.61\times10^{-3}$ & $1\times10^{-17}$ \\
+icosahedral, level 4 & 5120 & $-2.16\times10^{-3}$ & $5\times10^{-18}$ \\
+hexagonal, level 2 & 162 & $-2.66\times10^{-2}$ & $3\times10^{-17}$ \\
+hexagonal, level 3 & 642 & $-6.76\times10^{-3}$ & $1\times10^{-17}$ \\
+hexagonal, level 4 & 2562 & $-1.70\times10^{-3}$ & $5\times10^{-18}$ \\
+cubed sphere, $4\times4$ & 96 & $-6.51\times10^{-2}$ & $6\times10^{-17}$ \\
+cubed sphere, $8\times8$ & 384 & $-1.67\times10^{-2}$ & $2\times10^{-17}$ \\
+cubed sphere, $16\times16$ & 1536 & $-4.21\times10^{-3}$ & $9\times10^{-18}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%==============================================================================
+\section{Polynomial reconstruction}\label{sec:reconstruction}
+
+\subsection{Average-preserving least squares}
+For every cell $C$ we seek the polynomial $p_C=\sum_k c_k\,\by^{\alpha_k}$ of degree $\le r$ in the
+local coordinates $\by = Q_C(\bx-\bx_C)/h_C$ ($\bx_C$ the centroid, $h_C$ the largest distance of a
+vertex, $Q_C$ orthogonal) that has the average $\bar u_C$ of the cell and fits the averages of the
+other cells of its stencil $S_C$ in the least-squares sense~\cite{Barth1990,OllivierGooch2002},
+\begin{equation}
+\frac{1}{|C|}\int_C p_C = \bar u_C,\qquad \sum_{C'\in S_C\setminus C}
+\Big(\frac{1}{|C'|}\int_{C'} p_C - \bar u_{C'}\Big)^2 \to \min .
+\end{equation}
+With $a_{C'k} = |C'|^{-1}\int_{C'}\by^{\alpha_k}$ (the moments of Section~\ref{sec:moments} in the frame
+of $C$) the constraint eliminates the constant, $c_0 = \bar u_C - \sum_{k\ge1}a_{Ck}c_k$, and the
+remaining coefficients solve
+\begin{equation}
+\sum_{k\ge1}(a_{C'k}-a_{Ck})\,c_k = \bar u_{C'}-\bar u_C,\qquad C'\in S_C\setminus C ,
+\end{equation}
+by the pseudo-inverse with a relative rank tolerance (POLYEDER's \code{TolRank}). The coefficients are
+linear in the averages of the stencil, $c = R_C\,\bar u_{S_C}$, computed once.
+
+\paragraph{Stencils} $S_C$ is $C$ with the cells that share a vertex with it, grown ring by ring
+until the reduced matrix has full rank and at least $1.5$ times as many rows as monomials. Inside a
+mesh two rings suffice for degree three; at boundaries the stencil grows, for instance in the bottom
+and top layers of a column, where two rings see only three layers.
+
+\paragraph{Tangential basis} On one layer of cells over the sphere the stencil does not resolve the
+radial structure, and the radial monomials make the least-squares problem singular. The option
+\code{basis = :tangential} takes $Q_C$ with the radius at the centroid as its third axis and uses only
+the monomials without the third coordinate: a reconstruction in the tangent plane, the moments still
+exact over the prisms.
+
+\paragraph{Face values} The average of $p_C$ over a face $F$ of $C$ is
+$|F|^{-1}\int_F p_C = \sum_k c_k\, |F|^{-1}\int_F\by^{\alpha_k}$; for the two cells of every face
+these are two sparse matrices from the cell averages to the face values (\code{face\_value\_matrices}),
+and at the points of a face quadrature two more (\code{point\_value\_matrices}). On a distorted
+triangle mesh of a box, extruded into five layers, all face values of polynomials of degree $\le3$ are
+reproduced to $10^{-12}$.
+
+\subsection{Transport}
+The transport $\partial_t q+\nabla\cdot(q\bu)=0$ of the cell averages takes the upwind values at the
+faces. With one volume flux $U_F=\int_F\bu\cdot\bn$ per face, as for the normal velocities of a
+staggered scheme, the flux is $U_F\,\bar q_F$ with the upwind face average. This is only second order,
+whatever the degree: $\int_F q\,\bu\cdot\bn - U_F\bar q_F = O(h^2)\,|F|$ unless $\bu\cdot\bn$ is
+constant on $F$. With the velocity field known at the points $\bx_g$ of a face quadrature
+(\code{face\_quadrature}: the seven-point rule of degree five~\cite{Dunavant1985} on the fan of triangles
+of the face) the flux $\sum_g w_g(\bu\cdot\bn)_g\,q_g$, upwinded point by point, has the order $r+1$ of
+the reconstruction. Time integration is the third-order SSP Runge--Kutta method.
+
+Test fluxes that are exactly divergence free in every cell follow from a vector potential: for the
+velocity $\bu = g(\eta)\nabla\psi\times\nabla\eta$ of a stream function $\psi$ of the horizontal position
+($\eta$ the radius on the sphere, the height $z$ on a plane) the flux through $F$ is the circulation of
+$g(\eta)\psi\nabla\eta$ around $F$, $U_F = \sum_{a\to b}\frac12(\psi(a)+\psi(b))\,(G(\eta_b)-G(\eta_a))$
+over the oriented edges of $F$ with $G'=g$; it vanishes on the faces of constant $\eta$, and the fluxes
+of a cell sum to zero exactly. On the sphere $\psi=\boldsymbol\Omega\cdot\hat{\mathbf r}$ with
+$G(\eta)=\eta^3/3$ gives the solid-body rotation $\boldsymbol\Omega\times\bx$.
+
+\begin{table}[h]
+\centering
+\caption{Steady flow $\bu=(\sin\pi x\cos\pi y,-\cos\pi x\sin\pi y)$ in the unit square, distorted
+triangles ($2n^2$ cells, one layer), $q=\exp(2\psi)$, $\psi=\sin\pi x\sin\pi y/\pi$, relative $L^2$
+error at $t=0.5$, fluxes at the quadrature points; CFL $0.4$.}
+\label{tab:plane}
+\begin{tabular}{rcccccc}
+\toprule
+ & \multicolumn{2}{c}{degree 1} & \multicolumn{2}{c}{degree 2} & \multicolumn{2}{c}{degree 3} \\
+$n$ & error & order & error & order & error & order \\
+\midrule
+8 & $9.57\times10^{-3}$ & & $4.98\times10^{-3}$ & & $2.71\times10^{-3}$ & \\
+16 & $2.09\times10^{-3}$ & 2.20 & $6.97\times10^{-4}$ & 2.84 & $2.16\times10^{-4}$ & 3.65 \\
+32 & $4.21\times10^{-4}$ & 2.31 & $9.69\times10^{-5}$ & 2.85 & $1.05\times10^{-5}$ & 4.37 \\
+64 & $9.76\times10^{-5}$ & 2.11 & $1.27\times10^{-5}$ & 2.93 & $7.30\times10^{-7}$ & 3.84 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+With the face fluxes $U_F\bar q_F$ the same flow converges at second order for all degrees ($1.2\times10^{-4}$,
+$1.0\times10^{-4}$, $1.3\times10^{-4}$ at $n=64$). On one layer over the sphere (thickness $0.01$) a
+Gaussian hill $\exp(-|\hat{\mathbf r}-\hat{\mathbf r}_0|^2/0.4^2)$ is rotated once about an axis tilted by
+$45^\circ$ with the divergence-free face fluxes (Table~\ref{tab:sphere}); mass is conserved to $10^{-14}$.
+Besides the flux, the flat faces of the prisms inscribed in the shell limit the order to two.
+
+\begin{table}[h]
+\centering
+\caption{Solid-body rotation of a Gaussian hill over one revolution on one layer of prisms over the
+unit sphere, tangential basis, face fluxes $U_F\bar q_F$: relative $L^2$ error.}
+\label{tab:sphere}
+\begin{tabular}{lrcccc}
+\toprule
+mesh & cells & degree 0 & degree 1 & degree 2 & degree 3 \\
+\midrule
+hexagonal 3 & 642 & $7.6\times10^{-1}$ & $3.3\times10^{-1}$ & $3.7\times10^{-1}$ & $1.3\times10^{-1}$ \\
+hexagonal 4 & 2562 & $6.3\times10^{-1}$ & $1.2\times10^{-1}$ & $1.2\times10^{-1}$ & $2.2\times10^{-2}$ \\
+hexagonal 5 & 10242 & $4.7\times10^{-1}$ & $3.3\times10^{-2}$ & $2.2\times10^{-2}$ & $4.5\times10^{-3}$ \\
+icosahedral 3 & 1280 & $6.1\times10^{-1}$ & $2.3\times10^{-1}$ & $1.4\times10^{-1}$ & $9.8\times10^{-2}$ \\
+icosahedral 4 & 5120 & $4.6\times10^{-1}$ & $7.0\times10^{-2}$ & $3.1\times10^{-2}$ & $2.0\times10^{-2}$ \\
+icosahedral 5 & 20480 & $3.1\times10^{-1}$ & $1.8\times10^{-2}$ & $5.7\times10^{-3}$ & $4.6\times10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{remark}
+For the shallow-water equations with the normal momentum at the faces, the mass flux through a face is
+a single number, and the transport is second order like that of every staggered scheme; the higher
+reconstruction lowers the error constant and the dispersion (Table~\ref{tab:sphere}). Higher order needs
+the normal velocity along the face (from the reconstructed cell velocity, or several unknowns per face)
+and cells with curved faces on the sphere.
+\end{remark}
+
+%==============================================================================
+\section{Interaction regions and the face gradient}\label{sec:mpfa}
+\textcolor{red}{Plan.} Around each vertex the corners of its cells (a cell at the vertex with the
+faces meeting there) form the interaction region of a multipoint flux approximation~\cite{Aavatsmark2002}:
+a linear gradient per corner, continuity of the values at the faces of the region and the cell
+averages give a small local system; its solution expresses the gradient and the value at every face
+in the averages of the cells around its vertices (POLYEDER: \code{TGrad}).
+
+%==============================================================================
+\section{The shallow-water equations}\label{sec:sw}
+\textcolor{red}{Plan.} One layer of prisms over the sphere, free-slip top and bottom. Height $h$ as
+cell averages, the normal momentum $(h\bu)\cdot\bn$ at the lateral faces. The pressure gradient
+$g\nabla(h^2/2)$ (with the bathymetry) at the faces from Section~\ref{sec:mpfa}; the cell velocity
+from the normal components~\cite{Perot2000}, its advection with the reconstruction of
+Section~\ref{sec:reconstruction} and the Coriolis force at the cells, the tendency projected back to
+the faces. Time integration with the third-order TVD Runge--Kutta method, later with split-explicit
+methods~\cite{Wensch2009}. Tests: Williamson's case~2~\cite{Williamson1992} and the barotropic
+instability of Galewsky et al.~\cite{Galewsky2004}.
+
+\section*{Code availability}
+\code{src/Polyhedral/} of \code{dmplex}: \code{Complex.jl} (\code{PolyComplex},
+\code{extruded\_complex}), \code{Integration.jl} (\code{MonomialBasis}, \code{segment\_moments},
+\code{polygon\_moments}, \code{face\_moments}, \code{cell\_moments}), \code{Geometry.jl}
+(\code{PolyGeometry}), \code{Reconstruction.jl} (\code{PolyReconstruction}, \code{face\_value\_matrices},
+\code{point\_value\_matrices}), \code{Advection.jl} (\code{PolyAdvection}, \code{stream\_function\_flux});
+tests in \code{test/polyhedral.jl}.
+
+\begin{thebibliography}{99}
+\bibitem{Aavatsmark2002} I.~Aavatsmark, An introduction to multipoint flux approximations for
+  quadrilateral grids, \emph{Comput. Geosci.} 6 (2002) 405--432.
+\bibitem{Barth1990} T.~J. Barth and P.~O. Frederickson, Higher order solution of the Euler equations on
+  unstructured grids using quadratic reconstruction, AIAA paper 90-0013 (1990).
+\bibitem{Chin2015} E.~B. Chin, J.~B. Lasserre and N.~Sukumar, Numerical integration of homogeneous
+  functions on convex and nonconvex polygons and polyhedra, \emph{Comput. Mech.} 56 (2015) 967--981.
+\bibitem{Dunavant1985} D.~A. Dunavant, High degree efficient symmetrical Gaussian quadrature rules for the
+  triangle, \emph{Int. J. Numer. Methods Eng.} 21 (1985) 1129--1148.
+\bibitem{Galewsky2004} J.~Galewsky, R.~K. Scott and L.~M. Polvani, An initial-value problem for testing
+  numerical models of the global shallow-water equations, \emph{Tellus} 56A (2004) 429--440.
+\bibitem{Lasserre1998} J.~B. Lasserre, Integration on a convex polytope, \emph{Proc. Amer. Math. Soc.}
+  126 (1998) 2433--2441.
+\bibitem{OllivierGooch2002} C.~Ollivier-Gooch and M.~Van Altena, A high-order-accurate unstructured mesh
+  finite-volume scheme for the advection--diffusion equation, \emph{J. Comput. Phys.} 181 (2002) 729--752.
+\bibitem{Perot2000} B.~Perot, Conservation properties of unstructured staggered mesh schemes,
+  \emph{J. Comput. Phys.} 159 (2000) 58--89.
+\bibitem{Wensch2009} J.~Wensch, O.~Knoth and A.~Galant, Multirate infinitesimal step methods for
+  atmospheric flow simulation, \emph{BIT Numer. Math.} 49 (2009) 449--473.
+\bibitem{Williamson1992} D.~L. Williamson, J.~B. Drake, J.~J. Hack, R.~Jakob and P.~N. Swarztrauber, A standard
+  test set for numerical approximations to the shallow water equations in spherical geometry,
+  \emph{J. Comput. Phys.} 102 (1992) 211--224.
+\end{thebibliography}
+
+\end{document}
