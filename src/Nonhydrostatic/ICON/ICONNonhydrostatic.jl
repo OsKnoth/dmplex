@@ -76,7 +76,9 @@ the default `itime_scheme = 4` those of the last corrector, computed at the
 predictor state of the previous step, all recomputed in the first step and
 that of `vn` in the first of every `ndyn_substeps` steps, ICON `l_recompute`;
 `itime_scheme = 6` recomputes them every step), the pressure gradient of the
-Exner pressure extrapolated in time, `π^n + exner_expol (π^n - π^{n-1})`, and
+Exner pressure extrapolated in time, `π^n + exner_expol (π^n - π^{n-1})` (`exner_expol` reduced
+over steep slopes as ICON's `exner_exfac`: to zero at a slope of 1/4 or 500 m height difference to
+the neighbours, down to -1/6 above a slope of 1.5), and
 `ρ_e`, `θ_e` of `n`; `vn* = vn^n + Δt (T_vn^n - c_p θ_e ∂π/∂n)`, the fluxes of
 `vn*` and the column solve with `ρ`, `θ` of `n` linearly interpolated to the
 interfaces give `w*`, `ρ*`, `ρθ*`. Corrector: velocity tendencies at the
@@ -119,11 +121,15 @@ neighbours interpolated to the height of the cell (`truly_horizontal_points`).
 `hdiff_order = -1` switches it off; `hyperdiffusion = ν₄` adds `-ν₄ L(L(vn))`
 to every dynamics step.
 
-Differences to ICON: the pressure gradient over orography is that of
-`igradp_method = 1` along the levels, without the truncation over steep slopes, or with
-`pressure_gradient = :height` at constant height everywhere (`π'` of both cells interpolated
-linearly in height to the edge, extrapolated below the ground of a cell; ICON's `igradp_method = 3`
-only where the slope is steep, with a hydrostatic extrapolation); the divergence damping without
+The pressure gradient over orography: `pressure_gradient = :levels` that of ICON's
+`igradp_method = 1` along the levels with the metric correction; `:height` at constant height
+everywhere (`π'` of both cells interpolated linearly in height to the edge, extrapolated below the
+ground of a cell); `:taylor` that of ICON's `igradp_method = 3` (`taylor_gradient`): in the lowest
+layers, where the levels are steep, `π'` of either cell expanded to second order in height from its
+layer at the height of the edge, below the ground of a cell expanded at 5 m below the higher ground
+with a hydrostatic correction, above along the levels.
+
+Differences to ICON: the divergence damping without
 the metric correction; the vn diffusion is `itype_vn_diffu = 1`; no extra CFL diffusion
 (`lextra_diffu`); no tracer or physics coupling (`ndyn_substeps` only sets when the diffusion is
 called); no nest-boundary terms. Started from ICON's state, one step agrees with ICON to 0.1–1 % of
@@ -200,7 +206,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                             z_half=nothing, coordinate::Symbol=:sleve, flat_height::Real=16000.0,
                             decay_scale::Real=4000.0, decay_exponent::Real=1.35, pressure_gradient::Symbol=:levels,
                             miura_reference::Bool=true, backend=KernelAbstractions.CPU())
-    pressure_gradient in (:levels, :height) || throw(ArgumentError("pressure_gradient must be :levels or :height"))
+    pressure_gradient in (:levels, :height, :taylor) ||
+        throw(ArgumentError("pressure_gradient must be :levels, :height or :taylor"))
     size(grid.cell_edges, 1) == 3 || throw(ArgumentError("ICONNonhydrostatic needs a triangle mesh"))
     itime_scheme in (4, 6) || throw(ArgumentError("itime_scheme must be 4 or 6"))
     divdamp_order in (2, 4, 24) || throw(ArgumentError("divdamp_order must be 2, 4 or 24"))
@@ -277,7 +284,21 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
         c > 0 && (zv[v, :] .+= vw[n, v] .* cm.z_full[c, :])
     end
     ddxn = [(cm.z_full[grid.edge_cells[2, e], k] - cm.z_full[grid.edge_cells[1, e], k]) / (a * d[e]) for e in 1:ne, k in 1:nl]
-    zlev, zwt = height_interpolation(grid.edge_cells, cm.z_full, em.z_full)
+    # the pressure gradient over orography: at constant height (interpolation of π' to the edge) or by
+    # Taylor expansion (ICON igradp_method = 3, with the factors of ∂²π'/∂z² from the reference state)
+    taylor = pressure_gradient == :taylor
+    zlev, zwt, ntaylor, gradp_ex = taylor ? taylor_gradient(grid.edge_cells, cm, em) :
+                                   (height_interpolation(grid.edge_cells, cm.z_full, em.z_full)..., 0,
+                                    (e=Int32[], k=Int32[], dist=Float64[]))
+    dθref(z) = (-0.0075 * exp(-z / 10000.0) + ICON_GRAV / ICON_CPD) / ref_π(z)
+    curv_A = taylor ? map(z -> ICON_GRAV / (ICON_CPD * ref_θ(z)^2), cm.z_full) : zeros(0, 0)
+    curv_B = taylor ? map(z -> 2ICON_GRAV / (ICON_CPD * ref_θ(z)^3) * dθref(z), cm.z_full) : zeros(0, 0)
+    # time extrapolation of π reduced over steep slopes, to zero at a slope of 1/4 or 500 m height difference
+    # to the neighbours, slightly negative above 1.5 (ICON exner_exfac)
+    slope, height = cell_slopes(grid.cell_edges, grid.edge_cells, cm.z_full, 1 ./ (a .* d))
+    exfac = map(slope, height) do s, h
+        s > 1.5 ? max(-1 / 6, (1.5 - s) / 9) : max(0.0, exner_expol * min(1 - (4s)^2, 1 - (0.002h)^2))
+    end
     ddxt = [tangent_sign[e] * (zv[grid.edge_vertices[2, e], k] - zv[grid.edge_vertices[1, e], k]) / (a * l[e])
             for e in 1:ne, k in 1:nl]
     mean_area = 4π * a^2 / nc
@@ -306,7 +327,8 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
             ζ=z(nv, nlev), Lvn=z(ne, nlev), uvert=ntuple(_ -> z(nv, nlev), 3), uvert2=ntuple(_ -> z(nv, nlev), 3),
             kh=z(ne, nlev), n2e=z(ne, nlev), Lw=z(nc, nlev + 1), substep=Ref(0),
             hd=z(ne, nlev), wcf=z(nc, nlev), wch=z(nc, nlev + 1), πp=z(nc, nlev), dπdz=z(nc, nlev),
-            ρpr=z(nc, nlev), θpr=z(nc, nlev), Tθ=z(nc, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
+            ρpr=z(nc, nlev), θpr=z(nc, nlev), Tθ=z(nc, nlev),
+            c2=z(taylor ? nc : 0, nlev), dθdz=z(taylor ? nc : 0, nlev), y0=(vn=z(ne, nlev), w=z(nc, nlev + 1), ρ=z(nc, nlev), ρθ=z(nc, nlev), exner=z(nc, nlev)))
     # mo_nh_diffusion: vertex RBF, the quadrilateral of each edge, coefficients
     rbf_v = rbf_vertex_coefficients(grid; scale=rbf_vec_scale_v)
     quad = zeros(Int, 4, ne)
@@ -356,11 +378,13 @@ function ICONNonhydrostatic(grid::TRiSKGrid, vgrid::VerticalGrid; radius::Real=6
                               dev(cm.dz), dev(cm.dzh), dev(cm.wlow), orography,
                               (dze=dev(em.dz), rdz=dev(1 ./ cm.dz), wlowe=dev(em.wlow), qe=dev(qe), ddxn=dev(ddxn), ddxt=dev(ddxt),
                                z_full=dev(cm.z_full), zlev=dev(zlev), zwt=dev(zwt),
-                               pgrad=pressure_gradient == :height ? 2 : 1, cells=cm, edges=em),
+                               pgrad=Dict(:levels => 1, :height => 2, :taylor => 3)[pressure_gradient],
+                               ntaylor=ntaylor, gradp_ex=map(dev, gradp_ex), curv_A=dev(curv_A), curv_B=dev(curv_B),
+                               cells=cm, edges=em),
                               dev(rayleigh),
                               (θref=dev(θref), πref=dev(map(ref_π, cm.z_full)), dπref=dev(dπref), c1dwdz=dev(c1dwdz),
                                c2dwdz=dev(c2dwdz), wgtfacq=dev(qc), ρref_c=dev(ρref_c), θref_c=dev(θref_c),
-                               ρref_e=dev(ρref_e), θref_e=dev(θref_e)), work, a, Float64(beta),
+                               ρref_e=dev(ρref_e), θref_e=dev(θref_e), exfac=dev(exfac)), work, a, Float64(beta),
                               dev(divdamp), dev(divdamp_o2), dev(divdamp_3d),
                               (0.5 - veladv_offctr, 0.5 + veladv_offctr),
                               (0.5 - rhotheta_offctr, 0.5 + rhotheta_offctr), Int(itime_scheme),

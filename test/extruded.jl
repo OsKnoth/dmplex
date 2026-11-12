@@ -485,6 +485,26 @@ end
         step!(mh, y, 300.0, ys)
     end
     @test maximum(abs, y.vn) < 0.3 && maximum(abs, y.w) < 2e-3
+    # ICON's Taylor expansion (igradp_method = 3): two cells, the edge at 187.5, 325, 512.5 m within
+    # the layers of both cells only at layer 3; layer 1 below the right ground, expanded at 245 m
+    cells = column_metrics([0.0 100.0 300.0 600.0; 250.0 400.0 500.0 650.0])
+    edges = column_metrics([125.0 250.0 400.0 625.0])
+    lev, δ, nt, ex = NH.taylor_gradient([1; 2;;], cells, edges)
+    @test nt == 2 && lev[:, 1, :] == [2 3 3; 1 1 3]
+    @test δ[:, 1, :] ≈ [45.0 -125.0 62.5; -80.0 0.0 -62.5]
+    @test ex.e == [1] && ex.k == [1] && ex.dist ≈ [187.5 - 245.0]
+    mt = ICONNonhydrostatic(create_spherical_mesh(3), v; damping_height=Inf, damping_rate=0.0,
+                            surface_height=dcmip_mountain_height, coordinate=:basic, flat_height=12000.0,
+                            pressure_gradient=:taylor)
+    @test mt.metric.ntaylor >= 1
+    y, ys = initial_state(mt, dcmip_rest), zero_state(mt)
+    for _ in 1:24
+        step!(mt, y, 300.0, ys)
+    end
+    @test maximum(abs, y.vn) < 0.3 && maximum(abs, y.w) < 2e-3
+    # the time extrapolation of π reduced over the slopes, exner_expol = 1/3 over flat ground
+    f = mt.vertical.exfac
+    @test all(-1 / 6 .<= f .<= 1 / 3) && maximum(f) == 1 / 3 && minimum(f[:, 1]) < minimum(f[:, end])
     @test_throws ArgumentError ICONNonhydrostatic(create_spherical_mesh(2), v; pressure_gradient=:z)
     # zero orography is the flat model
     mf = ICONNonhydrostatic(create_spherical_mesh(2), v; surface_height=(λ, φ) -> 0.0)

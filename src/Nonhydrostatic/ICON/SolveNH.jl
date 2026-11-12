@@ -29,7 +29,10 @@ end
 `ρ_e`, `θ_e` of Miura's second-order upwind reconstruction at the
 backtrajectory point of the edge over `Δt/2`, and the horizontal pressure
 gradient `c_p θ_e ∂π/∂n` of the extrapolated Exner pressure `πex`; over orography
-(`oro`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` with `πex = π'` and `dπdz = ∂π'/∂z`.
+(`oro = 1`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)` with `πex = π'` and `dπdz = ∂π'/∂z`; at constant
+height (`oro = 2`, `height_difference`); or (`oro = 3`) in the lowest `nt` layers from the Taylor
+expansion `π' + δ (∂π'/∂z + δ c₂)` of the layer `zlev` of either cell at the distance `zwt` from
+its centre (`taylor_gradient`, `c₂ = ½ ∂²π'/∂z²` of `icon_exner_curvature_kernel!`), above as `oro = 1`.
 As in ICON, `ρ`, `θ` (and their gradients) are the deviations from the reference state, which is
 added at the height of the edge (`ρref_e`, `θref_e`; zero for the reconstruction of the full fields).
 """
@@ -37,7 +40,7 @@ added at the height of the edge (`ρref_e`, `θref_e`; zero for the reconstructi
                                     @Const(g1), @Const(g2), @Const(g3), @Const(h1), @Const(h2), @Const(h3),
                                     @Const(edge_cells), @Const(edge_vectors), @Const(inverse_dual), half_dt_a,
                                     @Const(dπdz), @Const(ddxn), @Const(edge_height), @Const(zlev), @Const(zwt), oro,
-                                    @Const(ρref_e), @Const(θref_e))
+                                    @Const(ρref_e), @Const(θref_e), @Const(c2), nt)
     e, k = @index(Global, NTuple)
     @inbounds begin
         l, r = edge_cells[1, e], edge_cells[2, e]
@@ -51,29 +54,50 @@ added at the height of the edge (`ρref_e`, `θref_e`; zero for the reconstructi
         θe[e, k] = t
         if oro == 2
             dπ = height_difference(πex, edge_cells, zlev, zwt, e, k) * inverse_dual[e]
+        elseif oro == 3 && k <= nt
+            taylor(s, c) = (j = zlev[s, e, k]; δ = zwt[s, e, k]; πex[c, j] + δ * (dπdz[c, j] + δ * c2[c, j]))
+            dπ = (taylor(2, r) - taylor(1, l)) * inverse_dual[e]
         else
             dπ = (πex[r, k] - πex[l, k]) * inverse_dual[e]
-            oro == 1 && (dπ -= ddxn[e, k] * (edge_height[1, e] * dπdz[l, k] + edge_height[2, e] * dπdz[r, k]))
+            oro != 0 && (dπ -= ddxn[e, k] * (edge_height[1, e] * dπdz[l, k] + edge_height[2, e] * dπdz[r, k]))
         end
         pg[e, k] = ICON_CPD * t * dπ
     end
 end
 
 """
-`π' = π - π_ref` of the layers (ICON `z_exner_ex_pr`) and `∂π'/∂z` across each layer from `π'` at
-its interfaces (ICON `z_dexner_dz_c`): linear between the layers (`wlow`), quadratic to the ground
-(`q`: wgtfacq), at the lid extrapolated linearly; for the metric term of the pressure gradient.
+For `taylor_gradient`: `c₂ = ½ ∂²π'/∂z²` of the layers from the hydrostatic balance of the deviation
+`θ'` of `θ` from the reference state, `½ (A ∂θ'/∂z - B θ')` with `A = g/(c_p θ_ref²)` and
+`B = 2g/(c_p θ_ref³) ∂θ_ref/∂z` (ICON `z_dexner_dz_c(2)`), and `∂θ/∂z` of the layers, both across the
+layer from the interfaces (`interface_values`).
 """
-@kernel function icon_exner_deviation_kernel!(πp, dπdz, @Const(π), @Const(πref), @Const(wlow), @Const(q), @Const(dz),
-                                              nlev)
+@kernel function icon_exner_curvature_kernel!(c2, dθdz, @Const(θ), @Const(θref), @Const(A), @Const(B), @Const(wlow),
+                                              @Const(q), @Const(dz), nlev)
     i, k = @index(Global, NTuple)
     @inbounds begin
-        p(j) = π[i, j] - πref[i, j]
-        lo = k > 1 ? wlow[i, k] * p(k - 1) + (1 - wlow[i, k]) * p(k) :
-             nlev >= 3 ? q[i, 1] * p(1) + q[i, 2] * p(2) + q[i, 3] * p(3) : p(1)
-        hi = k < nlev ? wlow[i, k + 1] * p(k) + (1 - wlow[i, k + 1]) * p(k + 1) : 2 * p(k) - lo
-        πp[i, k] = p(k)
-        dπdz[i, k] = (hi - lo) / dz[i, k]
+        t(j) = θ[i, j]
+        tp(j) = θ[i, j] - θref[i, j]
+        lo, hi = interface_values(t, i, k, wlow, q, nlev)
+        lp, hp = interface_values(tp, i, k, wlow, q, nlev)
+        dθdz[i, k] = (hi - lo) / dz[i, k]
+        c2[i, k] = (A[i, k] * (hp - lp) / dz[i, k] - B[i, k] * tp(k)) / 2
+    end
+end
+
+"""
+Hydrostatic correction of the Taylor pressure gradient (`taylor_gradient`) at the edges `pe`, layers `pk`
+below the higher ground of their cells: `pg += c_p θ_e dist g/c_p (θ₂ - θ₁) 4/(θ₁ + θ₂)² / d`, `θ_s`
+of cell `s` at the height of the expansion of the lowest layer (ICON `z_hydro_corr`).
+"""
+@kernel function icon_gradp_extrapolation_kernel!(pg, @Const(θe), @Const(θ), @Const(dθdz), @Const(pe), @Const(pk),
+                                                  @Const(dist), @Const(zlev), @Const(zwt), @Const(edge_cells),
+                                                  @Const(inverse_dual))
+    p = @index(Global)
+    @inbounds begin
+        e, k = pe[p], pk[p]
+        θs(s) = (c = edge_cells[s, e]; j = zlev[s, e, 1]; θ[c, j] + zwt[s, e, 1] * dθdz[c, j])
+        θ1, θ2 = θs(1), θs(2)
+        pg[e, k] += θe[e, k] * dist[p] * ICON_GRAV * inverse_dual[e] * (θ2 - θ1) * 4 / (θ1 + θ2)^2
     end
 end
 

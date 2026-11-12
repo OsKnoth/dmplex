@@ -148,13 +148,7 @@ function truly_horizontal_points(grid::TRiSKGrid, z::AbstractMatrix, divergence:
     nbr, nlevs, wt, geo = Int32[], Int32[], Float64[], Float64[]
     if active && nlev >= 2
         nb, C = cell_average(grid; cntrwgt)
-        slope, height = zeros(nc, nlev), zeros(nc, nlev)
-        for i in 1:nc, k in 1:nlev, n in 1:3
-            e = ce[n, i]
-            h = abs(z[ec[2, e], k] - z[ec[1, e], k])
-            height[i, k] = max(height[i, k], h)
-            slope[i, k] = max(slope[i, k], h * inverse_dual[e])
-        end
+        slope, height = cell_slopes(ce, ec, z, inverse_dual)
         avg(x, i, k) = C[1, i] * x[i, k] + sum(C[1 + n, i] * x[nb[n, i], k] for n in 1:3)
         steep(i, k) = avg(slope, i, k) >= thslp || avg(height, i, k) >= thhgtd
         for i in 1:nc

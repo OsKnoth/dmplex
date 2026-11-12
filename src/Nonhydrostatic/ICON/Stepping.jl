@@ -29,7 +29,8 @@ function step!(m::ICONNonhydrostatic, y, dt, ys=zero_state(m))
                 launch!(m, icon_thermo_kernel!, (nc, nlev), w.θ, w.π, y0.ρ, y0.ρθ)
                 launch!(m, icon_edge_kinetic_kernel!, (ne, nlev), w.vt, w.Ke, y0.vn, m.rbf_edges, m.rbf)
             end
-            @. w.π = (1 + m.exner_expol) * w.π0 - m.exner_expol * w.πprev
+            f = m.vertical.exfac   # exner_expol, reduced over steep slopes
+            @. w.π = (1 + f) * w.π0 - f * w.πprev
         end
         section(m, "vnupd") do
             m.hyperdiffusion == 0 ? fill!(w.hd, 0.0) : icon_hyperdiffusion!(w.hd, m, y0.vn)
@@ -39,12 +40,19 @@ function step!(m::ICONNonhydrostatic, y, dt, ys=zero_state(m))
             @. w.θpr = w.θ - v.θref_c
             launch!(m, icon_cell_gradient_kernel!, (nc, nlev), g..., w.ρpr, w.θpr, m.cell_edges, m.edge_cells,
                     m.edge_height, m.green_gauss...)
-            m.orography && launch!(m, icon_exner_deviation_kernel!, (nc, nlev), w.πp, w.dπdz, w.π, m.vertical.πref,
+            m.orography && launch!(m, exner_deviation_kernel!, (nc, nlev), w.πp, w.dπdz, w.π, m.vertical.πref,
                                    m.wlow, m.vertical.wgtfacq, m.dz, nlev)
+            x = m.metric
+            taylor = m.orography && x.pgrad == 3
+            taylor && launch!(m, icon_exner_curvature_kernel!, (nc, nlev), w.c2, w.dθdz, w.θ, v.θref, x.curv_A, x.curv_B,
+                              m.wlow, v.wgtfacq, m.dz, nlev)
             launch!(m, icon_miura_kernel!, (ne, nlev), w.ρe, w.θe, w.pg, y0.vn, w.vt, w.ρpr, w.θpr,
                     m.orography ? w.πp : w.π, g..., m.edge_cells, m.edge_vectors, m.inverse_dual, dt / (2 * m.radius),
-                    w.dπdz, m.metric.ddxn, m.edge_height, m.metric.zlev, m.metric.zwt,
-                    m.orography ? m.metric.pgrad : 0, v.ρref_e, v.θref_e)
+                    w.dπdz, x.ddxn, m.edge_height, x.zlev, x.zwt, m.orography ? x.pgrad : 0, v.ρref_e, v.θref_e,
+                    w.c2, x.ntaylor)
+            p = x.gradp_ex
+            taylor && !isempty(p.e) && launch!(m, icon_gradp_extrapolation_kernel!, (length(p.e),), w.pg, w.θe, w.θ,
+                                               w.dθdz, p.e, p.k, p.dist, x.zlev, x.zwt, m.edge_cells, m.inverse_dual)
             copyto!(w.πprev, w.π0)
             launch!(m, icon_vn_update_kernel!, (ne, nlev), ys.vn, y0.vn, w.tvn_now, w.tvn_now, w.pg, w.hd, dt, 1.0, 0.0)
         end

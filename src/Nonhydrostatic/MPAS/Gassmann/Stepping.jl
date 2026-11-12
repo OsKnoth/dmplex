@@ -71,8 +71,8 @@ end
 "The deviation of `π` from the reference atmosphere and its vertical derivative (`work.πp`, `work.dπdz`)."
 function exner_deviation!(m::MPASGassmannNonhydrostatic, π)
     w, nlev = m.work, num_layers(m.vgrid)
-    launch!(m, exner_deviation_kernel!, (num_cells(m.grid), nlev), w.πp, w.dπdz, π, m.metric.πref, m.metric.z_full,
-            nlev)
+    launch!(m, exner_deviation_centred_kernel!, (num_cells(m.grid), nlev), w.πp, w.dπdz, π, m.metric.πref,
+            m.metric.z_full, nlev)
     return nothing
 end
 

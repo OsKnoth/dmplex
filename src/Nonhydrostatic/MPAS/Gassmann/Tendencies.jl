@@ -13,7 +13,7 @@ end
 """
 `c_p θ_e ∂π/∂n` at edge `e`; over orography with `πe = π'` the deviation from the reference
 atmosphere: along the levels (`oro = 1`) `c_p θ_e (∂π'/∂n - ∂z/∂n ∂π'/∂z)`, `dπdz = ∂π'/∂z`
-(`exner_deviation_kernel!`), or at constant height (`oro = 2`) from `π'` of both cells interpolated
+(`exner_deviation_centred_kernel!`), or at constant height (`oro = 2`) from `π'` of both cells interpolated
 to the height of the edge (`height_difference`).
 """
 @inline function pressure_gradient(e, k, l, r, θe, πe, dπdz, ddxn, zlev, zwt, edge_cells, edge_weight, inverse_dual,
