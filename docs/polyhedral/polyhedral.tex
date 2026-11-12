@@ -38,8 +38,7 @@ sphere. The moments are computed by homogeneous numerical integration: Euler's i
 divergence theorem in the affine hull of each cell, face and edge reduce the integral of a monomial
 to the vertices, following the cone hierarchy of the cell complex, without the degenerate cases of
 vertex formulas and for non-convex cells.
-\textcolor{red}{Working draft: Sections~\ref{sec:complex}--\ref{sec:reconstruction} describe what is
-implemented; the later sections are the plan.}
+\textcolor{red}{Working draft.}
 \end{abstract}
 
 \begin{keyword}
@@ -293,29 +292,89 @@ and cells with curved faces on the sphere.
 
 %==============================================================================
 \section{Interaction regions and the face gradient}\label{sec:mpfa}
-\textcolor{red}{Plan.} Around each vertex the corners of its cells (a cell at the vertex with the
-faces meeting there) form the interaction region of a multipoint flux approximation~\cite{Aavatsmark2002}:
-a linear gradient per corner, continuity of the values at the faces of the region and the cell
-averages give a small local system; its solution expresses the gradient and the value at every face
-in the averages of the cells around its vertices (POLYEDER: \code{TGrad}).
+
+Around every vertex $v$ the cells at $v$ (the \emph{corners}) and the faces at $v$ form the
+interaction region of a multipoint flux approximation~\cite{Aavatsmark2002} (POLYEDER: \code{TGrad}).
+Every corner has a linear gradient from the values at the centroids $\bx_F$ of its faces at $v$,
+\begin{equation}
+\mathbf g_C = G_C\,(u_F-\bar u_C)_{F\ni v},\qquad G_C = \big[(\bx_F-\bx_C)^T\big]_F^{+},
+\end{equation}
+three faces for the corners of prisms (the pseudo-inverse for more). The values $u_F$ at the faces of
+the region are the unknowns of a local linear system: the normal gradient is continuous,
+$\bn_F\cdot\mathbf g_{C_1}=\bn_F\cdot\mathbf g_{C_2}$, across every interior face, and vanishes on the
+boundary. Its solution expresses the half-face values and normal gradients in the cell averages of
+the region; the face value and the normal gradient at a face are their means over its vertices,
+weighted by the share of the vertex in the area of the face (the quadrilateral of the vertex, the
+midpoints of its edges and the mean of the vertices). The two sparse matrices are exact for linear
+fields at all faces whose vertices lie inside the domain (to $10^{-14}$ on distorted triangular prisms
+in four layers). On one layer over the sphere the zero normal gradient at the top and the bottom is
+exact for every function of the horizontal position.
 
 %==============================================================================
 \section{The shallow-water equations}\label{sec:sw}
-\textcolor{red}{Plan.} One layer of prisms over the sphere, free-slip top and bottom. Height $h$ as
-cell averages, the normal momentum $(h\bu)\cdot\bn$ at the lateral faces. The pressure gradient
-$g\nabla(h^2/2)$ (with the bathymetry) at the faces from Section~\ref{sec:mpfa}; the cell velocity
-from the normal components~\cite{Perot2000}, its advection with the reconstruction of
-Section~\ref{sec:reconstruction} and the Coriolis force at the cells, the tendency projected back to
-the faces. Time integration with the third-order TVD Runge--Kutta method, later with split-explicit
-methods~\cite{Wensch2009}. Tests: Williamson's case~2~\cite{Williamson1992} and the barotropic
-instability of Galewsky et al.~\cite{Galewsky2004}.
+
+On one layer of prisms over the sphere, free slip at the top and the bottom, the height $h$ is a cell
+average and the normal momentum $U_F=(h\bu)\cdot\bn_F$ lives on the lateral faces:
+\begin{align}
+\frac{d\bar h_C}{dt} &= -\frac{1}{|C|}\sum_F s_{CF}|F|\,U_F,\\
+\frac{dU_F}{dt} &= \bn_F\cdot\big[\mathbf T_C\big]_F - \partial_n\big(\tfrac g2 h^2\big)_F - g\,h_F\,\partial_n b_F,
+\qquad
+\mathbf T_C = -\frac{1}{|C|}\sum_F s_{CF}|F|\,\frac{U_F}{h_F}\,(\mathbf m)_F^{\mathrm{up}} - f\,\hat{\mathbf r}\times\mathbf m_C .
+\end{align}
+The pressure gradient, the bathymetry and the face values $h_F$ come from the interaction regions;
+the cell momentum $\mathbf m_C$ is reconstructed from the normal components, its Cartesian
+components are transported with the upwind values of the polynomial reconstruction
+(Section~\ref{sec:reconstruction}, tangential basis), and the cell tendency $\mathbf T_C$ is carried
+to the faces with the face values of the interaction regions, again exact for linear fields. Mass is
+conserved to round-off. Time integration: the third-order SSP Runge--Kutta method at the gravity-wave
+CFL number $0.4$.
+
+\paragraph{The cell momentum} Perot's reconstruction~\cite{Perot2000} (POLYEDER's \code{SumNormal}),
+\begin{equation}
+\mathbf m_C = \frac{1}{|C|}\sum_F s_{CF}|F|\,U_F\,(\bx_F-\bx_C),
+\end{equation}
+is exact for constant fields; for linear fields the face-centroid rule misses a quadratic term, an
+$O(h)$ error that cancels on symmetric cells only. On triangles the scheme is therefore first order.
+A least-squares fit of a linear vector field to the normal components on the faces of the cell and of
+its vertex neighbours is exact for linear fields, but unstable in the shallow-water scheme; weighting
+the faces of the cell itself twenty times stronger than those of the neighbours makes it stable and
+second order on triangles. On hexagons and quadrilaterals Perot's form is more accurate and stays
+stable over 15 days, where the weighted fit grows; the default takes the fit on triangles only.
+
+\begin{table}[h]
+\centering
+\caption{Williamson's case 2 after 5 days on one layer of prisms (thickness 1000 m), reconstruction of
+degree 2: relative $L^2$ error of $h$; mass conserved to $10^{-13}$.}
+\label{tab:w2}
+\begin{tabular}{lrccc}
+\toprule
+mesh & cells & Perot & weighted fit & default \\
+\midrule
+icosahedral 3 & 1280 & $3.96\times10^{-3}$ & $2.10\times10^{-3}$ & fit \\
+icosahedral 4 & 5120 & $2.00\times10^{-3}$ & $5.68\times10^{-4}$ & \\
+icosahedral 5 & 20480 & $1.04\times10^{-3}$ & $1.43\times10^{-4}$ & \\
+hexagonal 3 & 642 & $2.74\times10^{-3}$ & $3.47\times10^{-3}$ & Perot \\
+hexagonal 4 & 2562 & $6.69\times10^{-4}$ & $1.09\times10^{-3}$ & \\
+hexagonal 5 & 10242 & $1.73\times10^{-4}$ & $2.96\times10^{-4}$ & \\
+cubed sphere $8^2$ & 384 & $6.63\times10^{-3}$ & $1.03\times10^{-2}$ & Perot \\
+cubed sphere $16^2$ & 1536 & $7.67\times10^{-4}$ & $1.22\times10^{-3}$ & \\
+cubed sphere $32^2$ & 6144 & $1.84\times10^{-4}$ & $2.85\times10^{-4}$ & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textcolor{red}{Next:} the barotropic instability of Galewsky et al.~\cite{Galewsky2004}, bathymetry
+(Williamson's case 5), split-explicit time integration~\cite{Wensch2009}, the GPU, and general
+three-dimensional complexes.
 
 \section*{Code availability}
 \code{src/Polyhedral/} of \code{dmplex}: \code{Complex.jl} (\code{PolyComplex},
 \code{extruded\_complex}), \code{Integration.jl} (\code{MonomialBasis}, \code{segment\_moments},
 \code{polygon\_moments}, \code{face\_moments}, \code{cell\_moments}), \code{Geometry.jl}
 (\code{PolyGeometry}), \code{Reconstruction.jl} (\code{PolyReconstruction}, \code{face\_value\_matrices},
-\code{point\_value\_matrices}), \code{Advection.jl} (\code{PolyAdvection}, \code{stream\_function\_flux});
+\code{point\_value\_matrices}), \code{Advection.jl} (\code{PolyAdvection}, \code{stream\_function\_flux}),
+\code{InteractionRegion.jl} (\code{interaction\_operators}, \code{cell\_vectors},
+\code{linear\_vector\_reconstruction}), \code{ShallowWater.jl} (\code{PolyShallowWater});
 tests in \code{test/polyhedral.jl}.
 
 \begin{thebibliography}{99}

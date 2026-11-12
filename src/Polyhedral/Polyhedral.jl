@@ -19,11 +19,15 @@ export MonomialBasis, num_monomials, cell_moments, face_moments, polygon_moments
 export PolyGeometry, face_cells, vertex_neighbours
 export PolyReconstruction, reconstruct, face_value_matrices, point_value_matrices, face_quadrature
 export PolyAdvection, stream_function_flux, upwind_time_step
+export interaction_operators, cell_vectors, face_normal_components, linear_vector_reconstruction
+export PolyShallowWater, shallow_water_time_step
 
 include("Complex.jl")
 include("Integration.jl")
 include("Geometry.jl")
 include("Reconstruction.jl")
 include("Advection.jl")
+include("InteractionRegion.jl")
+include("ShallowWater.jl")
 
 end # module Polyhedral

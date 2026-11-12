@@ -162,3 +162,56 @@ end
     end
     @test log2(steady_error(8) / steady_error(16)) > 3.3
 end
+
+@testset "polyhedral: interaction regions and shallow water" begin
+    PH = dmplex.Polyhedral
+    rng = Random.MersenneTwister(3)
+    n = 5
+    id(i, j) = (j - 1) * (n + 1) + i
+    jit(i) = i == 1 || i == n + 1 ? 0.0 : 0.3 * (rand(rng) - 0.5)
+    pts = [SVector((i - 1 + jit(i)) / n, (j - 1 + jit(j)) / n, 0.0) for j in 1:(n + 1) for i in 1:(n + 1)]
+    polys = reduce(vcat, [[[id(i, j), id(i + 1, j), id(i + 1, j + 1)], [id(i, j), id(i + 1, j + 1), id(i, j + 1)]]
+                          for j in 1:n for i in 1:n])
+    cx = extruded_complex(ExtrudedPlex(plex_from_polygons(polys, pts), 4), [0.0, 0.1, 0.25, 0.32, 0.45])
+    g = PolyGeometry(cx)
+    G, T = interaction_operators(cx, g)
+    fc = face_cells(cx)
+    nf = num_poly_faces(cx)
+    # linear fields: exact at the faces whose vertices are inside the domain
+    boundary = Set(v for f in 1:nf if fc[1, f] == 0 || fc[2, f] == 0 for v in PH.face_loop(cx, f))
+    inner = [f for f in 1:nf if all(v -> v ∉ boundary, PH.face_loop(cx, f))]
+    @test length(inner) > 50
+    a = SVector(1.3, -0.7, 2.1)
+    u = [1 + dot(a, x) for x in g.cell_centroid]
+    @test maximum(abs, (G * u)[inner] .- [dot(a, g.normal[f]) for f in inner]) < 1e-12
+    @test maximum(abs, (T * u)[inner] .- [1 + dot(a, g.face_centroid[f]) for f in inner]) < 1e-12
+    @test maximum(abs, G * ones(num_poly_cells(cx))) < 1e-12
+    # constant vectors from their normal components and back
+    vc = cell_vectors(cx, g, [dot(a, g.normal[f]) for f in 1:nf])
+    @test maximum(v -> norm(v - a), vc) < 1e-12
+    @test maximum(abs, face_normal_components(cx, g, vc) .- [dot(a, g.normal[f]) for f in 1:nf]) < 1e-12
+    # Williamson et al. (1992) case 2 for one day on one layer of prisms over hexagons
+    R, Ω, grav = 6.37122e6, 7.292e-5, 9.80616
+    u0, gh0 = 2π * R / (12 * 86400), 2.94e4
+    hexact(x) = (r = normalize(x); (gh0 - (R * Ω * u0 + u0^2 / 2) * r[3]^2) / grav)
+    uexact(x) = u0 * cross(SVector(0.0, 0.0, 1.0), normalize(x))
+    # hexagons (Perot's cell vectors) and triangles (the weighted linear fit)
+    for (mesh, perot) in ((create_hexagon_mesh(3), true), (create_spherical_mesh(3), false))
+        sh = extruded_complex(ExtrudedPlex(mesh, 1), [0.0, 1000.0]; radius=R)
+        m = PolyShallowWater(sh; gravity=grav, omega=Ω, degree=2)
+        @test (m.R === nothing) == perot
+        geo = m.geometry
+        h0 = [hexact(x) for x in geo.cell_centroid]
+        y = [h0; [f in m.interior ? hexact(geo.face_centroid[f]) * dot(uexact(geo.face_centroid[f]), geo.normal[f]) : 0.0
+                  for f in 1:num_poly_faces(sh)]]
+        steps = ceil(Int, 86400 / shallow_water_time_step(m, y))
+        cache = SSPRK3Cache(y)
+        for _ in 1:steps
+            ssprk3_step!(y, 86400 / steps, PH.tendency!, cache, m)
+        end
+        h = y[1:num_poly_cells(sh)]
+        @test sqrt(sum(geo.volume .* (h .- h0) .^ 2) / sum(geo.volume .* h0 .^ 2)) < 2e-3
+        @test abs(sum(geo.volume .* h) / sum(geo.volume .* h0) - 1) < 1e-13
+    end
+    @test_throws ArgumentError PolyShallowWater(cx; cell_vector=:rbf)
+end
