@@ -14,9 +14,9 @@ top of each script.
 | `trisk_galewsky.jl` | `TRiSKShallowWater`, `ICONShallowWater` | Galewsky jet | C-grid finite volumes | CPU, MPI, GPU |
 | `galewsky.jl` | `NonlinearKiteShallowWater` | Galewsky jet | kite elements RT1 × Q2 × CG2 | CPU, MPI, GPU |
 | `bickley.jl` | `NonlinearKiteShallowWater` | Bickley jet on a periodic plane | kite elements | CPU |
-| `baroclinic_wave.jl` | `MPASGassmannNonhydrostatic`, `ICONNonhydrostatic` (`--icon`) | baroclinic wave (Ullrich et al. 2014) | 3D MPAS-Gassmann (TRiSK), HEVI; ICON triangles, predictor–corrector | CPU, GPU |
+| `baroclinic_wave.jl` | any dycore (`dycores.jl`): `mpas`, `icon`, `kite`, `poly` | baroclinic wave (Ullrich et al. 2014) | 3D MPAS-Gassmann (TRiSK), HEVI; ICON triangles, predictor–corrector; kite elements; polyhedral finite volumes, IMEX | CPU, GPU (mpas, icon) |
 | `icon_jabw.jl` | `ICONNonhydrostatic` | baroclinic wave with ICON's jabw10d settings, JW or from a Fortran ICON state | ICON triangles, predictor–corrector, ICON grid files | CPU, GPU |
-| `thermal_wind.jl` | `MPASGassmannNonhydrostatic`, `ICONNonhydrostatic`, `KiteNonhydrostatic` | steady thermal wind (`thermal_wind`) | 3D MPAS-Gassmann, 3D kite elements, HEVI | CPU |
+| `thermal_wind.jl` | any dycore (`dycores.jl`) | steady thermal wind (`thermal_wind`) | as `baroclinic_wave.jl` | CPU |
 | `baroclinic_channel.jl` | `KiteNonhydrostatic` | baroclinic wave in an f-plane channel (Ullrich, Reed and Jablonowski 2015) | 3D kite elements on a periodic plane, HEVI | CPU |
 | `gpu/cudss_mass.jl` | mass matrices | solves against a known solution | RT_k, DG_k, CG_{k+1} | GPU, multi-GPU |
 
@@ -29,6 +29,29 @@ heights in units of 10 km for Galewsky). The baroclinic wave uses SI units.
 
 GPU runs need the environment `examples/gpu` (CUDA, cuDSS, ADIOS2 as weak dependencies); see
 [levante.md](levante.md) for the Levante setup and the batch scripts.
+
+## The dycores behind one interface: `dycores.jl`
+
+The nonhydrostatic test cases run with every dycore of the package. `examples/dycores.jl` (included
+by `baroclinic_wave.jl` and `thermal_wind.jl`) builds the model by name, `build_dycore(dycore,
+resolution; mesh, levels, top, damping_height, damping_rate, backend, opts)`:
+
+| dycore | model | default mesh |
+|---|---|---|
+| `mpas` | `MPASGassmannNonhydrostatic` (TRiSK, ICON-IAP form) | hexagons (or the Voronoi dual of a grid file) |
+| `icon` | `ICONNonhydrostatic` | triangles |
+| `kite` | `KiteNonhydrostatic` (RT1 × Q2) | hexagons; `--mesh=cubed`, `triangles` |
+| `poly` | `PolyEuler` (polyhedral finite volumes, `src/Polyhedral`) | prisms over hexagons; `--mesh=triangles`, `cubed` |
+
+All of them have the interface of `dmplex.ShallowWater`: `initial_state(m, profile)` from a test case
+`profile(λ, φ, z) -> (T, p, u, v)` of `Common/TestCases.jl`, `zero_state(m)`, `step!(m, y, dt, ys)`,
+`total_mass(m, y)` and the diagnostics `surface_pressure(m, y)`, `lowest_temperature(m, y)` and
+`vertical_velocity(m, y)`. A new test case is a profile and a loop over `run_dycore!(m, y, dt, days;
+report)`; `write_surface(path, m, y)` writes `lon lat p_s T` per column as text for
+`examples/plot_surface.py` (matplotlib), the same for every dycore. The command line is split by
+`options(args)` into positional arguments and `--key=value` options, which `build_dycore` passes on
+(mpas `--rk3`, `--tridiagonal`; icon `--hdiff`; kite `--velocity`, `--theta`, `--advection`; poly
+`--degree`).
 
 ## Finite-volume advection: `advection.jl`
 
@@ -138,10 +161,15 @@ is made of quadrilaterals or triangles (`create_periodic_plane`).
 ## Nonhydrostatic baroclinic wave: `baroclinic_wave.jl`
 
 ```sh
-julia --project examples/baroclinic_wave.jl 5 10 300 30
-julia --project=examples/gpu examples/baroclinic_wave.jl 7 10 150 30 --gpu
-sbatch --account=bb1143 examples/gpu/baroclinic_wave.sbatch     # hexagon 6 and 7 on one A100
+julia --project examples/baroclinic_wave.jl mpas 5 10 300 30
+julia --project=examples/gpu examples/baroclinic_wave.jl mpas 7 10 150 30 --gpu
+julia -t 8 --project examples/baroclinic_wave.jl poly 5 10 300 30 --out=poly5   # p_s, T at days 8, 10
+sbatch --account=bb1143 examples/gpu/baroclinic_wave.sbatch     # mpas, hexagon 6 and 7 on one A100
+sbatch --account=bb1143 examples/gpu/baroclinic_dycores.sbatch  # mpas, icon and kite, one A100 each
 ```
+
+The first argument is the dycore (`mpas`, `icon`, `kite`, `poly`, see `dycores.jl` above); the old
+form `baroclinic_wave.jl 5 10 300 30 [--icon]` still runs mpas (icon).
 
 The baroclinic wave of Ullrich et al. (2014), shallow atmosphere over flat ground in height
 coordinates, with `MPASGassmannNonhydrostatic` on the extruded hexagon mesh (Lorenz staggering: θ with ρ
@@ -153,8 +181,9 @@ to 30 km, with Rayleigh damping of w above 22 km. The model follows the ICON-IAP
 - Smagorinsky diffusion;
 - third-order upwind θ at the interfaces in the ρθ flux (`vertical_theta = :upwind`).
 
-The time step is a Wicker–Skamarock RK3 with a HEVI split. Each stage has an implicit tridiagonal
-solve per column for w, ρ, ρθ, linearized around the Exner pressure of the base state.
+The time step is the two-stage predictor–corrector of ICON-IAP with a HEVI split (`--rk3`: the
+Wicker–Skamarock RK3). Each stage has an implicit solve per column for w, ρ, ρθ (five-band, or
+tridiagonal with `--tridiagonal`), linearized around the Exner pressure of the base state.
 `hilbert_order` renumbers the mesh along a Hilbert curve first, so that neighbours are close in
 memory. The example prints the minimum surface pressure once a day and the time per step, and
 writes p_s and the temperature of the lowest layer.
@@ -165,9 +194,26 @@ writes p_s and the temperature of the lowest layer.
 |---|---|---|---|---|---|
 | hexagon 5, dt 300 s | 992.6 | 983.5 | 968.4 | 946.9 | 921.8 |
 | hexagon 6, dt 300 s | 991.66 | 982.25 | 963.13 | 940.43 | 925.06 |
+| hexagon 6, dt 150 s, ICON-IAP | 991.75 | 982.52 | 963.81 | 941.68 | 926.00 |
 | hexagon 7, dt 150 s | 990.2 | 975.8 | 957.5 | 949.5 | 931.4 |
 
-The GPU and CPU runs of hexagon 6 agree, and mass is conserved to 4e-16.
+The GPU and CPU runs of hexagon 6 agree, and mass is conserved to 4e-16. The rows without ICON-IAP
+were run with RK3 (`--rk3 --tridiagonal`). The default ICON-IAP stepping needs dt ≤ 220 s on
+hexagon 6 (dt 240 s blows up on the first day, about 2 s per km), RK3 runs there with dt 300 s.
+
+With `poly` the same script runs `PolyEuler` on the prisms over the hexagons (polyhedral finite
+volumes, `ρ` and `ρθ` at the cells, normal momentum at the faces, reconstruction of degree 1,
+IMEX ARS(2,3,2) with the vertical acoustics implicit, see `docs/polyhedral/polyhedral_doc.tex`),
+on 8 threads of a Mac mini 241 ms per step after a setup of 9 minutes:
+
+| Day | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|
+| poly, hexagon 5, dt 300 s | 994.39 | 988.30 | 976.06 | 961.24 | 955.60 |
+
+These numbers are not the baroclinic wave: by day 10 poly has five equal waves around the globe
+instead of one wave packet (the fivefold symmetry of the icosahedral mesh grows by itself), while
+mpas, icon and kite agree on one packet near 120° E ([figure](polyhedral/figures/baroclinic_dycores_day10.png), from `baroclinic_dycores.sbatch`
+and `plot_surface.py`). Mass is conserved to 1e-15. The grid imprinting of poly is open.
 
 With `--icon` the same script runs `ICONNonhydrostatic` on the triangle mesh (ICON's
 predictor–corrector, Miura fluxes, divergence damping, fourth-order diffusion scaled with Δx³), see
@@ -217,9 +263,13 @@ time. See [dycores/ICON.md](dycores/ICON.md) for the comparison.
 ## Nonhydrostatic thermal wind: `thermal_wind.jl`
 
 ```sh
-julia --project examples/thermal_wind.jl trisk 4 5 300
+julia --project examples/thermal_wind.jl mpas 4 5 300
 julia --project examples/thermal_wind.jl kite 3 5 150 rt dg_upwind hexagon dg
+julia --project examples/thermal_wind.jl kite 3 5 150 --mesh=cubed --velocity=dual_radau
+julia -t 8 --project examples/thermal_wind.jl poly 4 5 300
 ```
+
+The first argument is the dycore (`dycores.jl`; `trisk` is `mpas`).
 
 For the kite model the last two arguments are the primal mesh, `hexagon`, `cubed` (resolution =
 cells per panel edge) or `triangles`, and the `horizontal_advection`: `dg` (default) or
@@ -230,7 +280,8 @@ temperature falls towards the poles near the ground, `1/T = (1 + ε sin²φ sech
 T0 = 300 K, ε = 0.1, z_s = 12 km. The surface pressure is the same everywhere, so there is no
 wind at the ground. The westerly grows up to about z_s and is nearly constant above (24 m/s at the
 equator), so the damping layer sees no shear. The flow should stay at rest in the rotating
-frame; the script prints max |w|, max |θ − θ(0)| and max |Δp_s| twice a day. 30 layers up to
+frame; the script prints max |w|, the largest change of the temperature of the lowest layer and
+max |Δp_s| twice a day (the table below was made with the change of θ in all layers). 30 layers up to
 30 km, Rayleigh damping of w above 22 km.
 
 | model | max \|w\| day 1 | day 3 | day 5 |
@@ -241,6 +292,7 @@ frame; the script prints max |w|, max |θ − θ(0)| and max |Δp_s| twice a day
 | kite RT1 × Q2, `dg_upwind`, `dg` advection, hexagon 3, dt 150 s | 6.6e-5 | 1.3e-4 | |
 | the same, cubed sphere 12 | 4.0e-5 | 1.1e-4 | |
 | the same, triangles 3 | 7.1e-5 | 1.5e-4 | |
+| poly (`PolyEuler`), hexagon 4, dt 300 s | 1.4e-3 | 1.4e-3 | 1.6e-3 (lowest layer ΔT 0.19 K, Δp_s 0.13 hPa) |
 
 The vector-invariant momentum advection is unstable in supercritical flow; see
 [KITE3D_PLAN.md](KITE3D_PLAN.md).

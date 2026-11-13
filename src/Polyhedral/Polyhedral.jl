@@ -6,7 +6,8 @@ Finite volumes on polyhedral cells after POLYEDER: cell complexes with vertex co
 monomials over cells and faces (`cell_moments`, `face_moments`) and the geometry derived from it
 (`PolyGeometry`), the polynomial reconstruction of cell averages (`PolyReconstruction`), the
 transport with its upwind fluxes (`PolyAdvection`) and the shallow-water equations on one layer
-(`PolyShallowWater`, KernelAbstractions kernels, MPI), and cut cells over orography (`cut_complex`,
+(`PolyShallowWater`, KernelAbstractions kernels, MPI), the compressible Euler equations on extruded
+cells (`PolyEuler`, vertically implicit) and cut cells over orography (`cut_complex`,
 `merge_small_cells`). Description: `docs/polyhedral/polyhedral.tex`.
 """
 module Polyhedral
@@ -21,7 +22,8 @@ import ..FEM
 using ..FEM: to_backend
 using ..Parallel: DofDistribution, exchange!, gather, num_local, equal_area_partition
 import ..Parallel: is_distributed, global_sum
-import ..ShallowWater: initial_state, gather_state, total_mass, tendency!, height_dofs, velocity_dofs
+import ..ShallowWater: initial_state, gather_state, total_mass, tendency!, height_dofs, velocity_dofs, step!, zero_state,
+    surface_pressure, lowest_temperature, vertical_velocity
 using ..FiniteVolumes: merged_halo
 
 export PolyComplex, extruded_complex, num_poly_cells, num_poly_faces, num_poly_edges, num_poly_vertices
@@ -32,6 +34,7 @@ export PolyAdvection, stream_function_flux, upwind_time_step
 export interaction_operators, cell_vectors, cell_vector_matrices, face_normal_components, linear_vector_reconstruction
 export PolyShallowWater, shallow_water_time_step, cell_momentum!
 export cut_complex, merge_cells, merge_small_cells, vector_potential_flux
+export PolyEuler, surface_pressure, lowest_temperature, vertical_velocity
 
 include("Complex.jl")
 include("Integration.jl")
@@ -41,5 +44,6 @@ include("Advection.jl")
 include("InteractionRegion.jl")
 include("ShallowWater.jl")
 include("CutCell.jl")
+include("Euler.jl")
 
 end # module Polyhedral

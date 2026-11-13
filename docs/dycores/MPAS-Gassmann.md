@@ -71,9 +71,15 @@ Baroclinic wave (Ullrich et al. 2014), 30 layers, minimum surface pressure (hPa)
 |---|---|---|---|---|---|
 | hexagon 5, dt 300 s | 992.6 | 983.5 | 968.4 | 946.9 | 921.8 |
 | hexagon 6, dt 300 s | 991.66 | 982.25 | 963.13 | 940.43 | 925.06 |
+| hexagon 6, dt 150 s, ICON-IAP | 991.75 | 982.52 | 963.81 | 941.68 | 926.00 |
 | hexagon 7, dt 150 s | 990.2 | 975.8 | 957.5 | 949.5 | 931.4 |
 
-(RK3, tridiagonal vertical solve.) The GPU and CPU runs of hexagon 6 agree; mass is conserved to 4e-16.
+(RK3, tridiagonal vertical solve, `--rk3 --tridiagonal`, except the row marked ICON-IAP, which is the
+default.) The GPU and CPU runs of hexagon 6 agree; mass is conserved to 4e-16.
+
+The ICON-IAP predictor–corrector has a smaller horizontal acoustic limit than RK3: on hexagon 6
+(≈ 112 km) dt 220 s runs, dt 240 s blows up on the first day (CPU and GPU), so about 2 s per km,
+while RK3 runs there with dt 300 s.
 
 Hexagon 5, dt 300 s, CPU, minimum surface pressure at day 10 and time per step:
 

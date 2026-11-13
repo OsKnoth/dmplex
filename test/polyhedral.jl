@@ -282,3 +282,30 @@ end
     @test log2(steady_error(16, 8) / steady_error(32, 16)) > 1.6
     @test_throws ArgumentError cut_complex(grid(4, 2), x -> x[3] - 0.5)       # a vertex on the surface
 end
+
+@testset "polyhedral: Euler equations" begin
+    PH = dmplex.Polyhedral
+    a = 6.37122e6
+    levels = collect(range(0.0, 12000.0; length=7))
+    cx = extruded_complex(ExtrudedPlex(create_hexagon_mesh(2), 6), levels; radius=a)
+    m = PolyEuler(cx, levels; radius=a, damping_height=9000.0, damping_rate=0.05)
+    @test PH.num_columns(m) == 162
+    # a stratified atmosphere at rest, not the isothermal reference: discretely balanced, stays at rest
+    T(z) = 288 - 0.0065z
+    rest(λ, φ, z) = (T(z), 1e5 * (T(z) / 288)^(9.80616 / (287 * 0.0065)), 0.0, 0.0)
+    y = initial_state(m, rest)
+    dy = PH.tendency!(similar(y), y, m)
+    nc = length(m.geometry.volume)
+    @test maximum(abs, dy[1:(2nc)]) == 0
+    @test maximum(abs, dy[(2nc + 1):end]) < 1e-9
+    ps0, mass0 = surface_pressure(m, y), total_mass(m, y)
+    @test maximum(abs, ps0 .- 1e5) < 200          # extrapolated from 1 km as if isothermal
+    ys = zero_state(m)
+    for _ in 1:96
+        step!(m, y, 900.0, ys)
+    end
+    @test maximum(abs, vertical_velocity(m, y)) < 1e-8
+    @test maximum(abs, surface_pressure(m, y) .- ps0) < 1e-6
+    @test abs(total_mass(m, y) / mass0 - 1) < 1e-13
+    @test_throws ArgumentError PolyEuler(cx, levels[1:4]; radius=a)
+end

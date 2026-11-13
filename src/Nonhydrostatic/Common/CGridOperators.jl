@@ -216,6 +216,23 @@ end
 "Pressure `p₀ π^(c_p/R)` of the lowest layer at every cell (on the host)."
 lowest_pressure(m::CGridNonhydrostatic, y) = P0 .* (Rd .* Array(y.ρθ)[:, 1] ./ P0) .^ (Cpd / Cvd)
 
+# the diagnostics of the dycore interface (ShallowWater): the lowest layer of the cells, on the host
+lowest_layer(m::CGridNonhydrostatic, x) = Array(x)[:, 1]
+
+"Temperature of the lowest layer (K) of every column, from `ρ` and `ρθ`."
+function lowest_temperature(m::CGridNonhydrostatic, y)
+    ρ, ρθ = lowest_layer(m, y.ρ), lowest_layer(m, y.ρθ)
+    return (Rd .* ρθ ./ P0) .^ (Rd / Cvd) .* ρθ ./ ρ
+end
+
+"Surface pressure (Pa): the pressure of the lowest layer extrapolated hydrostatically to `z = 0` (flat ground)."
+function surface_pressure(m::CGridNonhydrostatic, y)
+    ρθ, T = lowest_layer(m, y.ρθ), lowest_temperature(m, y)
+    return P0 .* (Rd .* ρθ ./ P0) .^ (Cpd / Cvd) .* exp.(GRAV * m.vgrid.z_full[1] ./ (Rd .* T))
+end
+
+vertical_velocity(m::CGridNonhydrostatic, y) = Array(y.w)
+
 "Total mass `Σ a² A_i dz_ik ρ_ik` (`dz` per layer, or per cell and layer)."
 function total_mass(m::CGridNonhydrostatic, y)
     ρ, dz = Array(y.ρ), Array(m.dz)

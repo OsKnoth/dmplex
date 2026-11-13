@@ -33,9 +33,9 @@ using ..Geometry: CellMap, map_point, edge_point, edge_normal
 using ..ShallowWater: NonlinearKiteShallowWater, height_dofs, velocity_dofs
 using ..Parallel: num_local_kites, exchange!, gather, owned
 import ..ShallowWater
-import ..ShallowWater: initial_state, total_mass
+import ..ShallowWater: initial_state, total_mass, step!, zero_state, surface_pressure, lowest_temperature, vertical_velocity
 
-export section_timer!, VerticalGrid, MPASGassmannNonhydrostatic, TRiSKNonhydrostatic, ICONNonhydrostatic, read_icon_state, read_icon_levels, zero_state, stage!, step!, baroclinic_wave, baroclinic_channel, thermal_wind, jablonowski_williamson, jw_surface_height, dcmip_mountain_height, dcmip_rest, small_planet, dcmip2025_gap_height, dcmip2025_vortex_height, dcmip2025_mountain_flow, dcmip2025_levels, icon_vertical_grid, terrain_following, column_metrics, lowest_pressure
+export section_timer!, VerticalGrid, MPASGassmannNonhydrostatic, TRiSKNonhydrostatic, ICONNonhydrostatic, read_icon_state, read_icon_levels, zero_state, stage!, step!, baroclinic_wave, baroclinic_channel, thermal_wind, jablonowski_williamson, jw_surface_height, dcmip_mountain_height, dcmip_rest, small_planet, dcmip2025_gap_height, dcmip2025_vortex_height, dcmip2025_mountain_flow, dcmip2025_levels, icon_vertical_grid, terrain_following, column_metrics, lowest_pressure, surface_pressure, lowest_temperature, vertical_velocity
 export KiteNonhydrostatic, num_columns, project_layers, project_velocity, mass_divergence!, column_weights,
        owned_columns, gather_layers,
     column_points, vertical_stage!, vertical_step!, vertical_tendency!, horizontal_tendency!

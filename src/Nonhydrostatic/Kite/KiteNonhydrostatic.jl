@@ -987,3 +987,26 @@ function step!(m::KiteNonhydrostatic, y, dt, ys=zero_state(m))
     base_exner!(m, y0)
     return wicker_skamarock!(m, y, y0, ys, dt)
 end
+
+# the diagnostics of the dycore interface (ShallowWater): the arrays are layers × points
+lowest_layer(m::KiteNonhydrostatic, x) = Array(x)[1, :]
+
+"Temperature of the lowest layer (K) at the points of the kites."
+function lowest_temperature(m::KiteNonhydrostatic, y)
+    ρ, ρθ = lowest_layer(m, y.ρ), lowest_layer(m, y.ρθ)
+    return (Rd .* ρθ ./ P0) .^ (Rd / Cvd) .* ρθ ./ ρ
+end
+
+"Surface pressure (Pa): the pressure of the lowest layer extrapolated hydrostatically to `z = 0`."
+function surface_pressure(m::KiteNonhydrostatic, y)
+    ρθ, T = lowest_layer(m, y.ρθ), lowest_temperature(m, y)
+    return P0 .* (Rd .* ρθ ./ P0) .^ (Cpd / Cvd) .* exp.(GRAV * m.vgrid.z_full[1] ./ (Rd .* T))
+end
+
+vertical_velocity(m::KiteNonhydrostatic, y) = Array(y.w)
+
+"Total mass `a² Σ_k dz_k Σ_i W_i ρ_ki` (`W = column_weights`, the owned columns of this rank)."
+function total_mass(m::KiteNonhydrostatic, y)
+    o = owned_columns(m)
+    return m.radius^2 * sum(Array(view(y.ρ, :, o)) * Array(view(column_weights(m), o)) .* m.vgrid.dz)
+end
