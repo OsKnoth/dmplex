@@ -399,18 +399,112 @@ triangles). With the perturbation the hexagons and the cubed sphere show the exp
 it on top of the grid waves. Perot's vectors on triangles (300\,m off balance after 3 days) are too
 diffusive, and there the perturbation makes no difference.
 
-\textcolor{red}{Next:} the grid imprinting of the jet, bathymetry
-(Williamson's case 5), split-explicit time integration~\cite{Wensch2009}, the GPU, and general
-three-dimensional complexes.
+\paragraph{The terms one by one} The momentum advection alone ($g=0$, $\Omega=0$) for a smooth
+tangential field and height, against $-\bn_F\cdot\nabla_s\cdot(h\bu\otimes\bu)$ at the face centroids,
+splits into the cell momentum, its transport and the projection (Table~\ref{tab:advection}). The
+transport with the exact cell momentum and the projection of the exact cell tendency converge at
+first and second order in the maximum norm. The error of the cell momentum, however, enters through
+the divergence of the fluxes: Perot's vectors on triangles (first order everywhere) give an error of
+$0.12$ that does not decrease, and on the hexagons their error is first order within three cells of
+the pentagons, so that the advection stalls at $6\times10^{-3}$ on level 6. The weighted fit makes the
+cell momentum second order on all meshes and the advection converges (hexagons $1.5\times10^{-3}$ on
+level 6). Galewsky's jet does not improve with it (unperturbed hexagons 13\,m and 563\,m, cubed sphere
+16\,m and 368\,m after 3 and 6 days), so the advection is not what excites the jet. Splitting the
+residual of Williamson's case 2, which is a steady state, into advection with Coriolis
+and the pressure term shows the other suspect: the pressure gradient of the interaction regions is
+first order in the maximum norm on all meshes (relative $9.5\times10^{-4}$, $1.3\times10^{-3}$ and
+$5.4\times10^{-4}$ on hexagons 6, triangles 6 and the cubed sphere $64^2$, halving with $h$), while its
+mean error is second order, and on the triangles it dominates the residual.
+
+\begin{table}[h]
+\centering
+\caption{Momentum advection, relative maximum errors at the faces: total, cell momentum $\mathbf m_C$,
+cell tendency and face tendency with the exact $\mathbf m_C$.}
+\label{tab:advection}
+\begin{tabular}{llrcccc}
+\toprule
+mesh & $\mathbf m_C$ & level & total & $\mathbf m_C$ & cell, exact $\mathbf m_C$ & face, exact $\mathbf m_C$ \\
+\midrule
+triangles & fit & 4 & $8.6\times10^{-3}$ & $2.0\times10^{-3}$ & $1.7\times10^{-2}$ & $7.1\times10^{-3}$ \\
+ & & 6 & $1.6\times10^{-3}$ & $1.2\times10^{-4}$ & $4.3\times10^{-3}$ & $1.6\times10^{-3}$ \\
+triangles & Perot & 4 & $1.2\times10^{-1}$ & $2.6\times10^{-2}$ & & \\
+ & & 6 & $1.2\times10^{-1}$ & $6.6\times10^{-3}$ & & \\
+hexagons & Perot & 4 & $2.2\times10^{-2}$ & $3.0\times10^{-3}$ & $5.8\times10^{-3}$ & $1.9\times10^{-2}$ \\
+ & & 6 & $5.7\times10^{-3}$ & $4.6\times10^{-4}$ & $4.0\times10^{-4}$ & $1.2\times10^{-3}$ \\
+hexagons & fit & 6 & $1.5\times10^{-3}$ & $2.0\times10^{-4}$ & & \\
+cubed sphere & Perot & $16^2$ & $2.6\times10^{-2}$ & $3.1\times10^{-3}$ & $7.0\times10^{-3}$ & $2.2\times10^{-2}$ \\
+ & & $64^2$ & $2.8\times10^{-3}$ & $2.0\times10^{-4}$ & $1.2\times10^{-3}$ & $1.3\times10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textcolor{red}{Next:} the pressure gradient near the irregular vertices (the grid imprinting of the
+jet), bathymetry (Williamson's case 5), split-explicit time integration~\cite{Wensch2009}, and the
+three-dimensional equations on cut cells (Section~\ref{sec:cut}).
+
+%==============================================================================
+\section{Cut cells}\label{sec:cut}
+
+As in POLYEDER's \code{CutGrid}, orography is represented by cutting the cells of a complex with the
+surface $\ell(\bx)=0$ of a level function, the fluid where $\ell>0$ (\code{cut\_complex}): vertices
+below the surface are removed; an edge between a vertex below and one above is cut at the root of
+$\ell$ on it (Illinois method) and keeps its orientation; a face with cut edges is closed by the edge
+from the cut point where its oriented boundary leaves the fluid to the one where it enters it again;
+a cut cell is closed by the terrain face through the closing edges of its faces, each with the sign
+opposite to that of its face in the cell, so that the boundary of the cell has no boundary. The
+terrain face is in general not planar and is integrated as the fan of its vertex mean
+(Section~\ref{sec:moments}). A face crossed twice by the surface is rejected, as in POLYEDER.
+
+Cutting leaves cells of any size: on jittered triangular prisms over $[-1,1]\times[0,\frac14]\times[0,1]$
+($2n_x\cdot2\cdot n_z$ cells) under the mountain
+$z_s=0.03+0.25\,e^{-(x/0.4)^2}\cos^2(\pi x/0.5)$ the smallest cut cell has $2.5\times10^{-11}$ of the volume
+of its prism. \code{merge\_small\_cells} unites every cell below half the volume of its uncut
+cell with the neighbour across its largest face, repeated for unions still too small; the union of
+cells is again a polyhedron of the complex (\code{merge\_cells}: the faces between them removed), with
+its exact moments, so nothing else changes. The test flow
+$\bu=\nabla\times(\psi\,\hat{\mathbf y})$, $\psi=(z-z_s(x))(1-z)\sin\frac{\pi(x+1)}2$, follows the
+terrain and vanishes on the whole boundary; its fluxes (\code{vector\_potential\_flux}, the circulation
+of $\psi\hat{\mathbf y}$ by the trapezoidal rule) are divergence free in every cell and zero through the
+terrain faces, whose vertices lie on $\psi=0$. Every cell closes ($|\sum_F s|F|\bn_F|<10^{-17}$), the
+volume converges at second order to the exact one, mass is conserved to $10^{-15}$, and $q=e^{2\psi}$ is
+steady (Table~\ref{tab:cut}).
+
+The quadratic reconstruction needs more cells at the terrain: with the default stencil
+(1.5 times as many cells as monomials) a cut cell has a one-sided stencil of 16 cells, and the
+semi-discrete operator an eigenvalue with $\Re\lambda\,\Delta t=0.5$, which blows up; twice as many
+cells still give $0.27$, two and a half times as many ($\code{boundary\_oversampling}=2.5$, at cells
+with a boundary face) leave $10^{-6}$ to $10^{-3}$. Degrees 0 and 1 are stable with the default.
+
+\begin{table}[h]
+\centering
+\caption{Cut prisms under the mountain, steady transport of $q=e^{2\psi}$ to $t=0.5$, degree 2, boundary
+oversampling 2.5: relative $L^2$ error and SSP-RK3 steps at CFL $0.4$ of the upwind limit, without and
+with merging the cells below half their prism.}
+\label{tab:cut}
+\begin{tabular}{rrrcrcr}
+\toprule
+$n_x\times n_z$ & cut cells & smallest & error & steps & error merged & steps \\
+\midrule
+$16\times8$ & 82 & $2.5\times10^{-11}$ & $2.01\times10^{-2}$ & 74638 & $2.18\times10^{-2}$ & 26 \\
+$32\times16$ & 180 & $2.1\times10^{-6}$ & $6.08\times10^{-3}$ & 3150 & $6.43\times10^{-3}$ & 64 \\
+$64\times32$ & 368 & $3.0\times10^{-5}$ & $1.69\times10^{-3}$ & 2378 & $1.72\times10^{-3}$ & 119 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textcolor{red}{Next:} the interaction regions and the momentum on cut cells, the three-dimensional
+Euler equations over orography, cut cells on the sphere (with the radial interpolation of POLYEDER's
+edge search).
 
 \section*{Code availability}
 \code{src/Polyhedral/} of \code{dmplex}: \code{Complex.jl} (\code{PolyComplex},
 \code{extruded\_complex}), \code{Integration.jl} (\code{MonomialBasis}, \code{segment\_moments},
 \code{polygon\_moments}, \code{face\_moments}, \code{cell\_moments}), \code{Geometry.jl}
 (\code{PolyGeometry}), \code{Reconstruction.jl} (\code{PolyReconstruction}, \code{face\_value\_matrices},
-\code{point\_value\_matrices}), \code{Advection.jl} (\code{PolyAdvection}, \code{stream\_function\_flux}),
+\code{point\_value\_matrices}), \code{Advection.jl} (\code{PolyAdvection}, \code{stream\_function\_flux}, \code{vector\_potential\_flux}),
 \code{InteractionRegion.jl} (\code{interaction\_operators}, \code{cell\_vectors},
-\code{linear\_vector\_reconstruction}), \code{ShallowWater.jl} (\code{PolyShallowWater});
+\code{linear\_vector\_reconstruction}), \code{ShallowWater.jl} (\code{PolyShallowWater}),
+\code{CutCell.jl} (\code{cut\_complex}, \code{merge\_cells}, \code{merge\_small\_cells});
 tests in \code{test/polyhedral.jl}.
 
 \begin{thebibliography}{99}

@@ -1,7 +1,8 @@
 # Polynomial reconstruction from cell averages that preserves the average of the cell
 
 """
-    PolyReconstruction(cx, geometry, degree; basis=:full, rings=nothing, up=normalize, rtol=1e-8)
+    PolyReconstruction(cx, geometry, degree; basis=:full, rings=nothing, oversampling=1.5,
+                       boundary_oversampling=oversampling, up=normalize, rtol=1e-8)
 
 For every cell `C` the polynomial `p_C = Σ_k c_k y^{α_k}` of degree `≤ degree` in the local
 coordinates `y = Q (x - x_C)/h_C` (centroid `x_C`, largest distance `h_C` of a vertex) that has the
@@ -11,8 +12,9 @@ the relative rank tolerance `rtol` (POLYEDER `TolRank`). The coefficients are li
 of the stencil, `c = R ū_S` (`coefficients[C]`, monomials × stencil).
 
 `stencil[C]` is `C` followed by the cells sharing a vertex with it, `rings` times; by default the
-rings grow (up to 4) until the least-squares problem has full rank and at least 1.5 times as many
-cells as monomials (more rings at boundaries). `basis = :full`
+rings grow (up to 4) until the least-squares problem has full rank and at least `oversampling`
+times as many cells as monomials (more rings at boundaries), `boundary_oversampling` times at the
+cells with a boundary face (one-sided stencils, as the cut cells at the terrain, need more). `basis = :full`
 uses all monomials of the degree (`Q = I`); `basis = :tangential` the monomials without the third
 local coordinate along `up(x_C)` (the radius on a spherical shell): a reconstruction in the tangent
 plane for one layer of cells, whose radial structure the stencil cannot resolve.
@@ -36,7 +38,8 @@ function frame_with_normal(n)
 end
 
 function PolyReconstruction(cx::PolyComplex, geometry::PolyGeometry, degree::Integer; basis::Symbol=:full,
-                            rings::Union{Nothing, Integer}=nothing, up=normalize, rtol::Real=1e-8)
+                            rings::Union{Nothing, Integer}=nothing, oversampling::Real=1.5,
+                            boundary_oversampling::Real=oversampling, up=normalize, rtol::Real=1e-8)
     basis in (:full, :tangential) || throw(ArgumentError("basis must be :full or :tangential"))
     B = MonomialBasis(degree)
     terms = basis == :full ? collect(1:num_monomials(B)) : findall(α -> α[3] == 0, B.exponents)
@@ -46,6 +49,11 @@ function PolyReconstruction(cx::PolyComplex, geometry::PolyGeometry, degree::Int
     scale = [maximum(v -> norm(cx.coordinates[v] - center[c]), cell_vertices(cx, c)) for c in 1:nc]
     rotation = [basis == :full ? SMatrix{3, 3}(1.0I) : frame_with_normal(up(center[c])) for c in 1:nc]
     nt = length(terms)
+    fc = face_cells(cx)
+    at_boundary = falses(nc)
+    for f in axes(fc, 2)
+        (fc[1, f] == 0 || fc[2, f] == 0) && (at_boundary[max(fc[1, f], fc[2, f])] = true)
+    end
     # the averages of the monomials of cell c over the cells S, and the reduced matrix of the fit
     averages(c, S) = reduce(vcat, map(S) do s
         I = cell_moments(cx, s, B; center=center[c], scale=scale[c], rotation=rotation[c])
@@ -55,11 +63,12 @@ function PolyReconstruction(cx::PolyComplex, geometry::PolyGeometry, degree::Int
     stencil, coefficients = Vector{Vector{Int}}(undef, nc), Vector{Matrix{Float64}}(undef, nc)
     for c in 1:nc
         S, A = [c], averages(c, [c])
+        factor = at_boundary[c] ? boundary_oversampling : oversampling
         for ring in 1:something(rings, 4)
             S = unique(vcat(S, reduce(vcat, (nb[s] for s in S))))
             A = averages(c, S)
             rings === nothing || continue
-            nt == 1 || (length(S) >= 1.5nt && rank(reduced(A); rtol) == nt - 1) && break
+            nt == 1 || (length(S) >= factor * nt && rank(reduced(A); rtol) == nt - 1) && break
         end
         ns = length(S)
         R = zeros(nt, ns)

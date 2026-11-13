@@ -6,7 +6,8 @@ Finite volumes on polyhedral cells after POLYEDER: cell complexes with vertex co
 monomials over cells and faces (`cell_moments`, `face_moments`) and the geometry derived from it
 (`PolyGeometry`), the polynomial reconstruction of cell averages (`PolyReconstruction`), the
 transport with its upwind fluxes (`PolyAdvection`) and the shallow-water equations on one layer
-(`PolyShallowWater`, KernelAbstractions kernels, MPI). Description: `docs/polyhedral/polyhedral.tex`.
+(`PolyShallowWater`, KernelAbstractions kernels, MPI), and cut cells over orography (`cut_complex`,
+`merge_small_cells`). Description: `docs/polyhedral/polyhedral.tex`.
 """
 module Polyhedral
 
@@ -30,6 +31,7 @@ export PolyReconstruction, reconstruct, face_value_matrices, point_value_matrice
 export PolyAdvection, stream_function_flux, upwind_time_step
 export interaction_operators, cell_vectors, cell_vector_matrices, face_normal_components, linear_vector_reconstruction
 export PolyShallowWater, shallow_water_time_step, cell_momentum!
+export cut_complex, merge_cells, merge_small_cells, vector_potential_flux
 
 include("Complex.jl")
 include("Integration.jl")
@@ -38,5 +40,6 @@ include("Reconstruction.jl")
 include("Advection.jl")
 include("InteractionRegion.jl")
 include("ShallowWater.jl")
+include("CutCell.jl")
 
 end # module Polyhedral

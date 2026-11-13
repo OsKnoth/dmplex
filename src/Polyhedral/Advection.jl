@@ -22,7 +22,25 @@ function stream_function_flux(cx::PolyComplex, ψ; G=identity, height=norm, proj
 end
 
 """
-    PolyAdvection(cx, flux; degree=2, basis=:full, rings=nothing, up=normalize)
+    vector_potential_flux(cx, A) -> Vector
+
+Volume fluxes through the faces of `u = ∇ × A`: the circulations of the vector potential `A(x)`
+around the faces by the trapezoidal rule on their edges, `Σ ½ (A(a) + A(b))⋅(b - a)`. The outward
+fluxes of every cell sum to zero exactly, and a face on which `A` vanishes at the vertices (a
+terrain face with `A = ψ ŷ`, `ψ = 0` on the terrain) has none.
+"""
+function vector_potential_flux(cx::PolyComplex, A)
+    return map(1:num_poly_faces(cx)) do f
+        xs = face_points(cx, f)
+        sum(eachindex(xs)) do i
+            a, b = xs[i], xs[mod1(i + 1, length(xs))]
+            dot(A(a) + A(b), b - a) / 2
+        end
+    end
+end
+
+"""
+    PolyAdvection(cx, flux;degree=2, basis=:full, rings=nothing, up=normalize)
     PolyAdvection(cx, velocity::Function; ...)
 
 Transport `∂ₜq + ∇⋅(q u) = 0` of the cell averages `q` with upwind fluxes of the polynomial
@@ -43,8 +61,9 @@ struct PolyAdvection
 end
 
 function PolyAdvection(cx::PolyComplex, flux; degree::Integer=2, basis::Symbol=:full,
-                       rings=nothing, up=normalize, geometry=PolyGeometry(cx))
-    rec = PolyReconstruction(cx, geometry, degree; basis, rings, up)
+                       rings=nothing, oversampling::Real=1.5, boundary_oversampling::Real=oversampling, up=normalize,
+                       geometry=PolyGeometry(cx))
+    rec = PolyReconstruction(cx, geometry, degree; basis, rings, oversampling, boundary_oversampling, up)
     fc = face_cells(cx)
     if flux isa Function
         quadrature = [face_quadrature(cx, f) for f in 1:num_poly_faces(cx)]

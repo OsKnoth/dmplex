@@ -228,3 +228,57 @@ end
     end
     @test_throws ArgumentError PolyShallowWater(cx; cell_vector=:rbf)
 end
+
+@testset "polyhedral: cut cells" begin
+    PH = dmplex.Polyhedral
+    # jittered triangular prisms over [-1, 1] × [0, 1/4] × [0, 1], cut by a mountain
+    zs(x) = 0.03 + 0.25 * exp(-(x / 0.4)^2) * cos(π * x / 0.5)^2
+    level(x) = x[3] - zs(x[1])
+    ψ(x) = (x[3] - zs(x[1])) * (1 - x[3]) * sin(π * (x[1] + 1) / 2)       # zero on the whole boundary
+    function grid(nx, nz; ny=2)
+        rng = Random.MersenneTwister(1)
+        id(i, j) = (j - 1) * (nx + 1) + i
+        jit(i, n) = i == 1 || i == n + 1 ? 0.0 : 0.3 * (rand(rng) - 0.5)
+        pts = [SVector(-1 + 2 * (i - 1 + jit(i, nx)) / nx, 0.25 * (j - 1 + jit(j, ny)) / ny, 0.0)
+               for j in 1:(ny + 1) for i in 1:(nx + 1)]
+        polys = reduce(vcat, [[[id(i, j), id(i + 1, j), id(i + 1, j + 1)], [id(i, j), id(i + 1, j + 1), id(i, j + 1)]]
+                              for j in 1:ny for i in 1:nx])
+        return extruded_complex(ExtrudedPlex(plex_from_polygons(polys, pts), nz), collect(range(0.0, 1.0; length=nz + 1)))
+    end
+    exact_volume = 0.25 * (2 - 2 * sum(zs, range(-1, 1; length=200001)) / 200001)
+    function steady_error(nx, nz)
+        cx = grid(nx, nz)
+        g0 = PolyGeometry(cx)
+        cut, parent, terrain = cut_complex(cx, level)
+        g = PolyGeometry(cut)
+        fc = face_cells(cut)
+        @test all(f -> fc[2, f] == 0 && fc[1, f] > 0, terrain)
+        @test maximum(c -> norm(sum(s * g.area[f] * g.normal[f] for (f, s) in zip(PH.cell_cone(cut, c)...))),
+                      1:num_poly_cells(cut)) < 1e-15
+        @test all(x -> abs(level(x)) < 1e-12, cut.coordinates[unique(reduce(vcat, PH.face_loop.(Ref(cut), terrain)))])
+        @test abs(sum(g.volume) - exact_volume) < 0.2 / nx^2         # the terrain piecewise linear
+        @test minimum(g.volume ./ g0.volume[parent]) < 1e-3
+        merged, group = merge_small_cells(cut, g0.volume[parent]; geometry=g)
+        gm = PolyGeometry(merged)
+        @test sum(gm.volume) ≈ sum(g.volume)
+        @test all(k -> gm.volume[k] >= 0.5 * maximum(g0.volume[parent[c]] for c in findall(==(k), group)),
+                  1:num_poly_cells(merged))
+        # a terrain-following flow ∇ × (ψ ŷ): no flux through the terrain, q = exp(2ψ) steady
+        U = vector_potential_flux(merged, x -> SVector(0.0, ψ(x), 0.0))
+        fm = face_cells(merged)
+        @test maximum(abs(U[f]) for f in 1:num_poly_faces(merged) if fm[1, f] == 0 || fm[2, f] == 0) < 1e-14
+        m = PolyAdvection(merged, U; degree=2, geometry=gm, boundary_oversampling=2.5)
+        @test maximum(abs, PH.tendency!(zeros(num_poly_cells(merged)), ones(num_poly_cells(merged)), m)) < 1e-10
+        q = [exp(2ψ(x)) for x in gm.cell_centroid]
+        q0, V = copy(q), gm.volume
+        nst = ceil(Int, 0.5 / (0.4 * upwind_time_step(m)))
+        cache = SSPRK3Cache(q)
+        for _ in 1:nst
+            ssprk3_step!(q, 0.5 / nst, PH.tendency!, cache, m)
+        end
+        @test abs(sum(V .* q) / sum(V .* q0) - 1) < 1e-13
+        return sqrt(sum(V .* (q .- q0) .^ 2) / sum(V .* q0 .^ 2))
+    end
+    @test log2(steady_error(16, 8) / steady_error(32, 16)) > 1.6
+    @test_throws ArgumentError cut_complex(grid(4, 2), x -> x[3] - 0.5)       # a vertex on the surface
+end
