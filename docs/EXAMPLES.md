@@ -51,7 +51,7 @@ report)`; `write_surface(path, m, y)` writes `lon lat p_s T` per column as text 
 `examples/plot_surface.py` (matplotlib), the same for every dycore. The command line is split by
 `options(args)` into positional arguments and `--key=value` options, which `build_dycore` passes on
 (mpas `--rk3`, `--tridiagonal`; icon `--hdiff`; kite `--velocity`, `--theta`, `--advection`; poly
-`--degree`).
+`--degree`, `--upwind`, `--nu4`).
 
 ## Finite-volume advection: `advection.jl`
 
@@ -204,16 +204,24 @@ hexagon 6 (dt 240 s blows up on the first day, about 2 s per km), RK3 runs there
 With `poly` the same script runs `PolyEuler` on the prisms over the hexagons (polyhedral finite
 volumes, `ρ` and `ρθ` at the cells, normal momentum at the faces, reconstruction of degree 1,
 IMEX ARS(2,3,2) with the vertical acoustics implicit, see `docs/polyhedral/polyhedral_doc.tex`),
-on 8 threads of a Mac mini 241 ms per step after a setup of 9 minutes:
+on 8 threads of a Mac mini 241 ms per step after a setup of 9 minutes. The momentum is transported
+centred by default, with a hyperviscosity `--nu4` of 3e15 m⁴/s at hexagon 5 (∝ Δx³); `--upwind=1
+--nu4=0` is the upwind transport of before:
 
 | Day | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|
-| poly, hexagon 5, dt 300 s | 994.39 | 988.30 | 976.06 | 961.24 | 955.60 |
+| poly, hexagon 5, dt 300 s (centred, ν₄ 3e15) | 992.63 | 984.40 | 964.64 | 947.90 | 938.06 |
+| poly, hexagon 5, dt 300 s, `--upwind=1 --nu4=0` | 994.39 | 988.30 | 976.06 | 961.24 | 955.60 |
+| mpas, hexagon 5, dt 300 s | 992.6 | 983.5 | 968.4 | 946.9 | 921.8 |
 
-These numbers are not the baroclinic wave: by day 10 poly has five equal waves around the globe
-instead of one wave packet (the fivefold symmetry of the icosahedral mesh grows by itself), while
-mpas, icon and kite agree on one packet near 120° E ([figure](polyhedral/figures/baroclinic_dycores_day10.png), from `baroclinic_dycores.sbatch`
-and `plot_surface.py`). Mass is conserved to 1e-15. The grid imprinting of poly is open.
+The upwind momentum transport damped the wave most; centred without hyperviscosity gives 934.4 hPa
+at day 10, ν₄ = 1e16 952.7 hPa. With the upwind transport the day-10 map is not the baroclinic wave
+but five equal waves around the globe (the fivefold symmetry of the icosahedral mesh), while mpas,
+icon and kite agree on one packet near 120° E ([figure](polyhedral/figures/baroclinic_dycores_day10.png),
+from `baroclinic_dycores.sbatch` and `plot_surface.py`). The imprinting itself is not stronger than in
+mpas: without the perturbation the largest zonal standard deviation of p_s over 5° bands at day 10
+is 12.7 hPa (upwind), 13.4 hPa (centred, ν₄ 1e16) and 14.6 hPa in mpas; the wave of poly grows too
+slowly to dominate it. Mass is conserved to 1e-15.
 
 With `--icon` the same script runs `ICONNonhydrostatic` on the triangle mesh (ICON's
 predictor–corrector, Miura fluxes, divergence damping, fourth-order diffusion scaled with Δx³), see

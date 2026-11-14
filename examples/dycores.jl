@@ -53,7 +53,9 @@ The model `dycore` on `mesh` at `resolution` (bisections of the icosahedron, or 
 edge on the cubed sphere) with `levels` equidistant layers up to `top` and Rayleigh damping of
 `w` above `damping_height`; `dm` is the 2D mesh whose cells carry the surface fields (`nothing`
 for kite, whose columns are the height dofs). Dycore options in `opts`: mpas `rk3`,
-`tridiagonal`; icon `hdiff`; kite `velocity`, `theta`, `advection`; poly `degree`.
+`tridiagonal`; icon `hdiff`; kite `velocity`, `theta`, `advection`; poly `degree`,
+`upwind` (weight of the upwinding of the momentum transport, 0: centred), `nu4` (hyperviscosity,
+m⁴/s, 3e15 at 223 km, ∝ Δx³).
 """
 function build_dycore(dycore, resolution; mesh=default_mesh(dycore), levels::Integer=30, top::Real=30000.0,
                       damping_height::Real=22000.0, damping_rate::Real=0.05,
@@ -85,8 +87,12 @@ function build_dycore(dycore, resolution; mesh=default_mesh(dycore), levels::Int
     else
         dm = base_mesh(mesh, resolution)
         cx = extruded_complex(ExtrudedPlex(dm, levels), v.z_half; radius=EARTH_RADIUS)
+        # centred momentum transport with a hyperviscosity ∝ Δx³, 3e15 m⁴/s at 223 km (hexagon 5)
+        Δx = sqrt(4π / num_cells(dm)) * EARTH_RADIUS
+        nu4 = haskey(opts, "nu4") ? parse(Float64, opts["nu4"]) : 3e15 * (Δx / 223e3)^3
         m = PolyEuler(cx, v.z_half; radius=EARTH_RADIUS, damping_height, damping_rate,
-                      degree=parse(Int, get(opts, "degree", "1")))
+                      degree=parse(Int, get(opts, "degree", "1")),
+                      momentum_upwind=parse(Float64, get(opts, "upwind", "0")), hyperviscosity=nu4)
         return m, dm
     end
 end

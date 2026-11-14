@@ -13,6 +13,8 @@
 \newcommand{\bn}{\mathbf{n}}
 \newcommand{\bx}{\mathbf{x}}
 \newcommand{\bu}{\mathbf{u}}
+\newcommand{\bv}{\mathbf{v}}
+\newcommand{\rhat}{\hat{\mathbf{r}}}
 \lstset{basicstyle=\ttfamily\small, breaklines=true, columns=fullflexible, keepspaces=true, frame=single,
         framerule=0.3pt, rulecolor=\color{gray}, xleftmargin=1em, xrightmargin=1em,
         literate={ψ}{{$\psi$}}1 {Ω}{{$\Omega$}}1 {θ}{{$\theta$}}1 {ρ}{{$\rho$}}1 {r̂}{{$\hat r$}}1
@@ -174,7 +176,7 @@ is conserved to $10^{-13}$.
 \end{figure}
 
 %==============================================================================
-\section{Interaction regions and cell vectors}
+\section{Interaction regions and cell vectors}\label{sec:interaction}
 
 \begin{lstlisting}
 G, T = interaction_operators(cx, geo)   # faces x cells: normal gradient, face value
@@ -365,11 +367,17 @@ deviations $p'$, $\rho'$ from an isothermal state at rest. It has the interface 
 \end{enumerate}
 
 Figure~\ref{fig:baroclinic} compares the baroclinic wave with \code{mpas} at the same resolution
-(hexagon 5, 30 layers, dt 300~s). The minimum surface pressure is 994.4, 988.3, 976.1, 961.2 and
-955.6~hPa at days 6 to 10 (mpas 992.6, 983.5, 968.4, 946.9, 921.8), but these are not the
-baroclinic wave: by day 10 poly has five equal waves around the globe instead of one wave packet,
-the fivefold symmetry of the icosahedral mesh growing by itself, while mpas, icon and the kite
-model agree on one packet near 120\textdegree\,E. This grid imprinting is open. Mass is conserved to $10^{-15}$;
+(hexagon 5, 30 layers, dt 300~s). With the upwind momentum transport the minimum surface pressure is
+994.4, 988.3, 976.1, 961.2 and 955.6~hPa at days 6 to 10 (mpas 992.6, 983.5, 968.4, 946.9, 921.8),
+and by day 10 poly has five equal waves around the globe instead of one wave packet, the fivefold
+symmetry of the icosahedral mesh, while mpas, icon and the kite model agree on one packet near
+120\textdegree\,E. The imprinting is not stronger than in mpas: without the perturbation the largest
+zonal standard deviation of $p_s$ over 5\textdegree\ bands at day 10 is 12.7~hPa (mpas 14.6~hPa),
+but the wave of poly grows too slowly to dominate it. The upwinding of the momentum is the main
+damping: transported centred (\code{momentum\_upwind=0}) the minimum is 992.6, 984.4, 964.6, 947.9
+and 938.1~hPa with a hyperviscosity $\nu_4 = 3\cdot10^{15}$~m$^4$/s (\code{hyperviscosity}, the
+default of \code{dycores.jl}, $\propto\Delta x^3$), 934.4~hPa at day 10 without it; the hyperviscosity
+of the cell velocity does not reduce the imprinting (13.4~hPa with $\nu_4 = 10^{16}$). Mass is conserved to $10^{-15}$;
 241~ms per step on 8 threads of a Mac mini after a setup of 9 minutes (mostly the reconstruction).
 With \code{degree=2} the run blows up within the first day (open). The thermal wind
 (\code{thermal\_wind.jl poly 4 5 300}) keeps $\max|w|$ at $1.6\cdot10^{-3}$~m/s for 5 days, the
@@ -384,6 +392,112 @@ temperature of the lowest layer at days 8 and 10: MPAS-Gassmann (\code{mpas}) an
 (\code{poly}), from \code{baroclinic\_wave.jl --out} and \code{examples/plot\_surface.py}.}
 \label{fig:baroclinic}
 \end{figure}
+
+%==============================================================================
+\section{Local mass matrices on polygons}\label{sec:local}
+
+The two-point gradient of \code{PolyEuler} is consistent only where the line between the centroids is
+normal to the face (on hexagon 4 the angle is $0.45^\circ$ on average and at most $2^\circ$). This
+section collects the attempts at a consistent gradient that keeps the energy pairing $G = -B^T$ and a
+local (explicit) mass matrix.
+
+\paragraph{Multipoint gradient} The gradient of the interaction regions (\code{interaction\_operators},
+Section~\ref{sec:interaction}) in place of the two-point gradient of \code{PolyEuler} blows up within the first
+day on hexagon 4, with and without the perturbation of the baroclinic wave ($\rho\theta < 0$). It is not
+the adjoint of the divergence, so there is no energy bound, and the regions are three-dimensional: on the
+lateral faces they pick up the large hydrostatic vertical gradient of $p'$ from the cells above and below.
+
+\paragraph{Corner unknowns} The prototype \code{examples/polyhedral/corner/corner\_sw.jl} (one layer,
+shallow water) has the normal momentum on the two halves of every lateral face, one per corner (vertex
+column). At the corner $(C, v)$ the two half faces of $C$ give the full vector $\bu_{Cv} = N_{Cv}^{-1}U$,
+the inner product is the corner quadrature $\sum_{C,v}\omega_{Cv}\,\bu_{Cv}\cdot\bv_{Cv}$ with the subcell
+areas $\omega_{Cv}$, so $M = C^TWC$ is block diagonal per vertex (the vertex rule of Wheeler and Yotov,
+the lumped $\mathrm{BDM}_1\times P_0$ of Egger and Radu on triangles); the gradient is $M^{-1}B^T$, the
+Coriolis force $-f\rhat\times\bu_{Cv}$ at the corners does no work. The linear system conserves energy
+(largest real part of the eigenvalues $4\cdot10^{-19}$). Williamson 2 after 5 days, relative $L^2$
+error of $h$, with \code{PolyShallowWater} (``C grid'') for comparison:
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+& hexagons 3 & hexagons 4 & icosahedral 3 & icosahedral 4 \\
+\midrule
+corner unknowns & 0.145 & 0.157 & $9.3\cdot10^{-3}$ & $2.1\cdot10^{-3}$ \\
+C grid & $2.7\cdot10^{-3}$ & $6.7\cdot10^{-4}$ & $2.1\cdot10^{-3}$ & $5.7\cdot10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+On triangles the scheme converges at second order (the super-convergence of the pressure of the lumped
+$\mathrm{BDM}_1$), four times less accurate than the C grid; on hexagons it does not converge.
+
+\paragraph{The corner condition} For $\bu$ constant the inner product must reproduce
+$\int_C\bu\cdot\bv = \sum_s s_{Cs}|F_s|\,V_s\,\bu\cdot(\bx_s - \bx_C)$ (exact for fields of constant
+divergence, $\bx_s$ the centroid of the half face $s$). Corner by corner this is $A_{Cv} = R_{Cv}^TN_{Cv}$,
+$R_{Cv}$ the rows $s|F_s|(\bx_s - \bx_C)$ of the two half faces (Lipnikov, Shashkov and Yotov 2009, local
+flux mimetic finite differences), and a symmetric local inner product exists only if every $A_{Cv}$ is
+symmetric; the scalar weight $\omega_{Cv}I$ needs it isotropic. On level 3 (\code{corner\_A.jl}):
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+mesh & ratio of the eigenvalues of $A_{Cv}$ & asymmetry $\|A - A^T\|/\|A\|$ & defect of $\omega I$ \\
+\midrule
+hexagons & 4.8--9.9 & 0.26 & 0.83 \\
+cubed sphere & 2.5--3.9 & 0.17 & \\
+icosahedral & 1.67--1.68 & 0.095 & \\
+\bottomrule
+\end{tabular}
+\end{center}
+Symmetrizing $A_{Cv}$ leaves an $O(1)$ error, the non-symmetric $A_{Cv}$ is MPFA-O without the energy
+pairing. On triangles the weaker consistency of the quadrature (exact for $P_1$ on affine elements)
+suffices for the second order of the pressure; on hexagons no corner rule of this kind is consistent.
+
+\paragraph{Spurious slow modes} The half faces double the velocity unknowns: the mode with opposite signs
+on the two halves of a face carries no flux. Eigenvalues of the linear rotating system (depth 10~km,
+level 2): hexagons 162 cells, 960 half faces, 312 gravity modes and 810 modes slower than $2\Omega$;
+icosahedral 320 cells, 960 half faces, 628 gravity modes ($\approx 2N$, no checkerboard as on ICON's
+triangular C grid) and 652 slow modes, about 330 of them spurious.
+
+\paragraph{Cell-wise mimetic inner product} With the same half-face unknowns,
+$M_C = R_CR_C^T/|C| + \gamma\,\mathrm{tr}(M_0)/n_s\,(I - N_C(N_C^TN_C)^{-1}N_C^T)$ per cell
+(\code{corner\_mfd.jl}, Brezzi, Lipnikov and Shashkov) is consistent on any polygon and symmetric, with
+the Coriolis force of the cell vectors $R_C^TU/|C|$, but $M$ couples all half faces of a cell and its
+inverse is global (one sparse SPD solve per stage, well conditioned). Williamson 2 on hexagons 3 and 4:
+$\gamma = 1$: 0.099, 0.032; $\gamma = 10$: 0.015, 0.0042; $\gamma = 30$: 0.0054, 0.0015. The error falls
+as the stabilization suppresses the zero-sum modes: the extra unknowns do not help.
+
+\paragraph{Literature} Egger and Radu: the mass-lumped $\mathrm{BDM}_1\times P_0$ for acoustic waves
+(Numer.\ Math.\ 145, 2020, arXiv:1803.04238; simplices, first order, $O(h^2)$ pressure by
+super-convergence, leapfrog), the second-order multipoint flux elements on hybrid meshes (SINUM 58, 2020,
+arXiv:1812.03938; vertices and barycentre as quadrature points, $\mathrm{RT}_1$, $\mathrm{BDFM}_2$ and
+enriched spaces with $P_1$ pressure, affine elements only), their use for waves in $H(\mathrm{div})$
+(arXiv:1912.07057) and Yee-like schemes for Maxwell (arXiv:2209.10432, 2306.01182). None treats
+non-affine cells or general polygons; spherical triangles deviate from their chords by $h^2/8a$, a
+smooth perturbation of affine maps, hexagons are not near-affine images of a reference element.
+
+\paragraph{The kite elements} The kite model (\code{docs/paper/kite.tex}) gets its local mass from the
+spaces, not from inexact quadrature: the velocity is $H(\mathrm{div})$ in the dual cells and broken across
+the dual faces, so the exact mass matrix is block diagonal per dual cell, and the height mass is diagonal
+by the Radau nodes. The corner scheme above is essentially its lowest pair $Q_0\times\mathrm{RT}_0$ with the
+dual-face unknowns removed and the mass lumped. Two conditions fix the lowest consistent order:
+\begin{enumerate}
+\item \emph{Gradient.} With one height per primal cell ($Q_0$) $B^T\pi$ has no entries on the dual faces,
+  and the block of a dual cell has to produce $\nabla p\cdot\bn$ there from the primal half faces alone,
+  the corner condition again; the kite paper measures $7.4, 7.6, 7.7$ for the gradient error of
+  $Q_0\times\mathrm{RT}_0$ on hexagons. A height continuous and non-constant inside the primal cell
+  ($H_p$, $p\ge1$) forces the dual-face unknowns through the dual-face term of $G$.
+\item \emph{Divergence.} Kites are bilinear images of the square that do not become parallelograms under
+  refinement (on a regular hexagon the angles stay $120^\circ, 90^\circ, 60^\circ, 90^\circ$), and on such
+  quadrilaterals the mapped $\mathrm{RT}_0$ and $\mathrm{BDM}_1$ lose the approximation of the divergence
+  (Arnold, Boffi and Falk 2005); $\mathrm{RT}_1$ keeps first order.
+\end{enumerate}
+The lowest pair with both operators consistent is therefore $\mathrm{RT}_1\times Q_1$ (60 velocity and
+13 height unknowns per hexagon); $\mathrm{BDM}_1\times Q_1$ and $Q_1^2\times Q_1$ of Wess et al.\ (36 and
+13, the latter with $2\times2$ blocks) have a non-converging divergence but still converge at second
+order for the geostrophic state. All these pairs have more than twice as many velocity as height
+unknowns and so divergence-free fields orthogonal to the curls ($8E - N$ for $\mathrm{RT}_1\times Q_1$),
+the counterpart of the spurious slow modes of the corner scheme. One height value per polygon with a
+local, symmetric velocity mass is consistent only on affine cells; on hexagons the choice is between the
+two-point gradient (local, energy pairing, consistent on orthogonal meshes), a global mimetic mass matrix,
+and a richer height space as in the kite elements.
 
 %==============================================================================
 \section{Tests and examples}
@@ -403,10 +517,15 @@ Euler equations & a stratified atmosphere at rest (not the reference) balanced e
 \end{tabular}
 \end{table}
 
-Run with \code{julia +1.12 --project=. test/runtests.jl} (or include \code{test/polyhedral.jl}).
-The MPI subtest starts \code{mpiexec} with the repository environment, which needs an instantiated
-\code{Manifest.toml} for that Julia version (\code{Pkg.instantiate()}); MPI.jl then uses its own MPICH
-unless \code{LocalPreferences.toml} selects a system MPI through \code{MPIPreferences}.
+Run with \code{julia +1.12 --project=. test/runtests.jl}. The test files use the packages loaded by
+\code{runtests.jl}; to run only these test sets,
+\code{julia +1.12 --project=. -e 'using Test, dmplex, LinearAlgebra, SparseArrays, StaticArrays, Random,
+KernelAbstractions, MPI; include("test/polyhedral.jl")'} (without \code{MPI} the MPI subtest fails with
+\code{MPI} undefined and the later test sets do not run). The MPI subtest starts \code{mpiexec} with the
+repository environment, which needs an instantiated \code{Manifest.toml} for that Julia version
+(\code{Pkg.instantiate()}). MPI.jl then uses its own MPICH (\code{MPICH\_jll}, with its \code{mpiexec});
+a \code{LocalPreferences.toml} selecting a system MPI is read only when \code{MPIPreferences} is a
+dependency of the active project. On the Mac mini all five test sets pass (261 tests, 2.5 minutes).
 
 \begin{table}[h]
 \centering\small
@@ -419,6 +538,7 @@ unless \code{LocalPreferences.toml} selects a system MPI through \code{MPIPrefer
 \code{figure\_data.jl} & data of Figures~\ref{fig:meshes}--\ref{fig:cut} \\
 \code{plot\_doc.py}, \code{plot\_mountain.py} & the figures (matplotlib) \\
 \code{../baroclinic\_wave.jl poly}, \code{../plot\_surface.py} & baroclinic wave, Figure~\ref{fig:baroclinic} \\
+\code{corner/} & corner unknowns and the cell-wise mimetic inner product, Section~\ref{sec:local} \\
 \bottomrule
 \end{tabular}
 \end{table}

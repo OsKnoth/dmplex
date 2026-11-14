@@ -17,7 +17,8 @@
 # mpas --rk3 (Wicker–Skamarock instead of the predictor–corrector of ICON-IAP), --tridiagonal (the
 # tridiagonal vertical solve for w); icon --hdiff (ICON's diffusion, hdiff_order = 5, instead of the
 # fourth-order diffusion of vn); kite --velocity, --theta, --advection; poly --degree (of the
-# reconstruction, 1). The old form `baroclinic_wave.jl [resolution] ... --icon` is icon, else mpas.
+# reconstruction, 1), --upwind (of the momentum transport, 1 upwind, 0 centred, the default), --nu4 (hyperviscosity,
+# m⁴/s, 3e15 at hexagon 5, ∝ Δx³). The old form `baroclinic_wave.jl [resolution] ... --icon` is icon, else mpas.
 # Prints the minimum surface pressure and the change of mass once a day, the time per step, and
 # writes p_s (Pa) and T of the lowest layer (K) to baroclinic_wave_<dycore>_<resolution>.vtkhdf
 # (not for kite).

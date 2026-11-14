@@ -7,8 +7,8 @@ euler_pressure(Θ) = P00 * (RD * Θ / P00)^(CPD / CVD)
 
 """
     PolyEuler(cx, levels; radius=nothing, omega=7.292e-5, gravity=9.80616, degree=1, projection=:adjoint,
-              reference_temperature=250, damping_height=Inf, damping_rate=0, oversampling=1.5,
-              boundary_oversampling=2.5, geometry=PolyGeometry(cx))
+              reference_temperature=250, damping_height=Inf, damping_rate=0, momentum_upwind=1,
+              hyperviscosity=0, oversampling=1.5, boundary_oversampling=2.5, geometry=PolyGeometry(cx))
 
 The compressible Euler equations on the `extruded_complex` of the heights `levels` (cells numbered
 column by column, `c = (i - 1) layers + k`), over the sphere of `radius` (`up` the radial
@@ -23,7 +23,10 @@ boundary faces), as the cut-cell mountain flow of the documentation:
 - mass and `ρθ`: fluxes `|F| M_F` through the faces, `θ` upwind from the reconstruction of degree
   `degree` (`PolyReconstruction`);
 - momentum at the faces: the advection of the cell momentum (Perot's `cell_vector_matrices` `R`,
-  its velocity upwind from the reconstruction) and the Coriolis force `-f r̂ × m_C` with
+  its velocity from the reconstruction, the flux `F (q₁ + q₂)/2 + α |F| (q₁ - q₂)/2` with
+  `α = momentum_upwind`, 1 upwind, 0 centred), the horizontal hyperviscosity `-ν₄ ρ ∇⁴v` of the
+  cell velocity with `ν₄ = hyperviscosity` (m⁴/s, the two-point Laplacian over the faces within
+  the layers, applied twice) and the Coriolis force `-f r̂ × m_C` with
   `f = 2Ω⋅r̂` (traditional approximation, as the shallow-atmosphere test cases), both forces `A_C`
   of the cells; the gradient of `p'` between the two cells along the normal and, at the faces
   between layers, the buoyancy `∓g ρ'`, with `p'`, `ρ'` the deviations from an isothermal state at
@@ -65,6 +68,8 @@ struct PolyEuler{W <: NamedTuple}
     w1::Vector{Float64}                        # weight of the first cell at the face
     buoyancy::Vector{Float64}                  # ±g at the faces between layers (sign of n⋅up), else 0
     damping::Vector{Float64}
+    momentum_upwind::Float64
+    hyperviscosity::Float64
     projection::Symbol
     geometric_dist::Vector{Float64}            # n⋅(x₂ - x₁) of the centroids
     up::Vector{SVector{3, Float64}}            # at the cells
@@ -98,7 +103,8 @@ end
 
 function PolyEuler(cx::PolyComplex, levels::AbstractVector{<:Real}; radius::Union{Nothing, Real}=nothing, omega::Real=7.292e-5,
                    gravity::Real=GRAVITY, degree::Integer=1, projection::Symbol=:adjoint, reference_temperature::Real=250.0,
-                   damping_height::Real=Inf, damping_rate::Real=0.0, oversampling::Real=1.5,
+                   damping_height::Real=Inf, damping_rate::Real=0.0, momentum_upwind::Real=1.0,
+                   hyperviscosity::Real=0.0, oversampling::Real=1.5,
                    boundary_oversampling::Real=2.5, geometry::PolyGeometry=PolyGeometry(cx))
     nc, nf = num_poly_cells(cx), num_poly_faces(cx)
     layers = length(levels) - 1
@@ -172,11 +178,13 @@ function PolyEuler(cx::PolyComplex, levels::AbstractVector{<:Real}; radius::Unio
         column_faces[k, i], column_sign[k, i] = f, fc[1, f] == c ? 1.0 : -1.0
     end
     work = (θ=zeros(nc), pp=zeros(nc), ρp=zeros(nc), F=zeros(nf), G=zeros(nf), q1=zeros(nf), q2=zeros(nf),
-            m=[zeros(nc) for _ in 1:3], v=[zeros(nc) for _ in 1:3], A=[zeros(nc) for _ in 1:3],
+            m=[zeros(nc) for _ in 1:3], v=[zeros(nc) for _ in 1:3], A=[zeros(nc) for _ in 1:3], lap=zeros(nc),
+            lap2=zeros(nc),
             cs=zeros(nc), θF=zeros(nf), tri=[zeros(max(layers - 1, 1), 4) for _ in 1:Threads.maxthreadid()])
     Ω = sphere ? SVector(0.0, 0.0, Float64(omega)) : SVector(0.0, 0.0, 0.0)
     m = PolyEuler(cx, geo, Int(layers), a, Float64(gravity), Float64.(levels), cell_height, face_height, fc, cell_offsets,
-                  cell_faces, cell_signs, interior, vertical, dist, w1, buoyancy, damping, projection,
+                  cell_faces, cell_signs, interior, vertical, dist, w1, buoyancy, damping, Float64(momentum_upwind),
+                  Float64(hyperviscosity), projection,
                   [interior[f] ? dot(geo.normal[f], geo.cell_centroid[fc[2, f]] - geo.cell_centroid[fc[1, f]]) : 0.0 for f in 1:nf],
                   up.(geo.cell_centroid), Ω, R, Q,
                   reference, pref, column_faces, column_sign, work)
@@ -300,16 +308,35 @@ function divergence!(dq, F, m::PolyEuler)
     return dq
 end
 
-"Upwind transport `G_F = F_F q_F` of the cell values `q` with the mass fluxes `F`."
-function upwind_flux!(G, q, m::PolyEuler)
+"""
+Transport `G_F = F_F (q₁ + q₂)/2 + α |F_F| (q₁ - q₂)/2` of the cell values `q` with the mass fluxes
+`F`, `q₁`, `q₂` the face values of the two sides; upwind for `α = 1`.
+"""
+function upwind_flux!(G, q, m::PolyEuler, α::Real=1.0)
     w = m.work
     tmul!(w.q1, m.Q[1], q)
     tmul!(w.q2, m.Q[2], q)
     F = w.F
     Threads.@threads for f in eachindex(G)
-        @inbounds G[f] = F[f] >= 0 ? F[f] * w.q1[f] : F[f] * w.q2[f]
+        @inbounds G[f] = F[f] * (w.q1[f] + w.q2[f]) / 2 + α * abs(F[f]) * (w.q1[f] - w.q2[f]) / 2
     end
     return G
+end
+
+"The two-point Laplacian `|C|⁻¹ Σ_F |F| (q_N - q_C) / n⋅(x₂ - x₁)` over the faces of the cells within their layer."
+function horizontal_laplacian!(L, q, m::PolyEuler)
+    geo = m.geometry
+    Threads.@threads for c in eachindex(L)
+        s = 0.0
+        @inbounds for k in m.cell_offsets[c]:(m.cell_offsets[c + 1] - 1)
+            f = m.cell_faces[k]
+            (m.interior[f] && !m.vertical[f]) || continue
+            other = m.fc[1, f] == c ? m.fc[2, f] : m.fc[1, f]
+            s += geo.area[f] * (q[other] - q[c]) / m.dist[f]
+        end
+        @inbounds L[c] = s / geo.volume[c]
+    end
+    return L
 end
 
 "The full tendency of `[ρ; ρθ; M]`."
@@ -337,7 +364,16 @@ function tendency!(dy, y, m::PolyEuler)
         w.v[k] .= w.m[k] ./ ρ
     end
     for k in 1:3
-        divergence!(w.A[k], upwind_flux!(w.G, w.v[k], m), m)
+        divergence!(w.A[k], upwind_flux!(w.G, w.v[k], m, m.momentum_upwind), m)
+    end
+    if m.hyperviscosity > 0
+        ν = m.hyperviscosity
+        for k in 1:3
+            horizontal_laplacian!(w.lap2, horizontal_laplacian!(w.lap, w.v[k], m), m)
+            Threads.@threads for c in 1:nc
+                @inbounds w.A[k][c] -= ν * ρ[c] * w.lap2[c]
+            end
+        end
     end
     Ω, adjoint = m.omega, m.projection == :adjoint
     if !iszero(Ω)
